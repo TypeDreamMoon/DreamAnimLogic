@@ -115,7 +115,7 @@ void UAlsLean::DalSampleInputs()
 	}
 }
 
-void UAlsLean::DalUpdate(const float dt)
+void UAlsLean::DalUpdate([[maybe_unused]] const float dt)
 {
 	const float yaw = DalMath::ToRotator(ActorRotation).Yaw;
 	const bool can_rate = (!Pending) && (dt > UE_SMALL_NUMBER);

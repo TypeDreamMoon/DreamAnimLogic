@@ -136,7 +136,7 @@ void UHeroGait::DalSampleInputs()
 	DalNotify_Footstep = false;
 }
 
-void UHeroGait::DalUpdate(const float dt)
+void UHeroGait::DalUpdate([[maybe_unused]] const float dt)
 {
 	Speed = DalMath::InterpTo(Speed, DalMath::Length(DalMath::Swizzle2<0, 1>(Velocity)), dt, SpeedInterpSpeed);
 	CurrentGait = Crouched ? EGait::Walk : Dal_Fn_gait_for(Speed, SprintHeld);
@@ -152,7 +152,7 @@ void UHeroGait::DalUpdate(const float dt)
 
 void UHeroGait::ResetSteps()
 {
-	const float dt = Dal_DeltaSeconds;
+	[[maybe_unused]] const float dt = Dal_DeltaSeconds;
 	Steps = 0;
 }
 
