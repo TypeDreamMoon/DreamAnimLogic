@@ -57,6 +57,21 @@ def _is_nonzero_number(e: ir.Expr) -> bool:
     return False
 
 
+def unparen(s: str) -> str:
+    """Drop one redundant pair of outer parentheses: '(a + b)' -> 'a + b'."""
+    if not (s.startswith("(") and s.endswith(")")):
+        return s
+    depth = 0
+    for i, ch in enumerate(s):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return s[1:-1] if i == len(s) - 1 else s
+    return s
+
+
 class PyGen:
     def __init__(self, m: ir.Module):
         self.m = m
@@ -79,7 +94,9 @@ class PyGen:
         if k is ir.ToFloat:
             return f"float({self.x(e.x)})"
         if k is ir.Unary:
-            return f"(not {self.x(e.x)})" if e.op == "!" else f"(-{self.x(e.x)})"
+            if e.op == "!":
+                return f"(not {self.x(e.x)})"
+            return f"_rt.i32(-{self.x(e.x)})" if e.ty is INT else f"(-{self.x(e.x)})"
         if k is ir.Binary:
             return self.binary(e)
         if k is ir.Cond:
@@ -89,7 +106,7 @@ class PyGen:
                 return f"{self.x(e.x)}.{e.comps}"
             return f"_rt.swizzle({self.x(e.x)}, {e.comps!r})"
         if k is ir.Make:
-            args = ", ".join(self.x(a) for a in e.args)
+            args = ", ".join(unparen(self.x(a)) for a in e.args)
             if e.ctor == "vec2":
                 return f"_rt.Vec2({args})"
             if e.ctor == "vec3":
@@ -98,12 +115,12 @@ class PyGen:
                 return f"_rt.Rotator({args})"
             return f"_rt.Quat({args})"
         if k is ir.CallBuiltin:
-            return f"_rt.{BUILTINS[e.name].py}({', '.join(self.x(a) for a in e.args)})"
+            return f"_rt.{BUILTINS[e.name].py}({', '.join(unparen(self.x(a)) for a in e.args)})"
         if k is ir.CallFn:
-            return f"_fn_{e.name}({', '.join(self.x(a) for a in e.args)})"
+            return f"_fn_{e.name}({', '.join(unparen(self.x(a)) for a in e.args)})"
         if k is ir.CallExtern:
             ext = self.m.find_extern(e.name)
-            call = f"{ext.py}({', '.join(self.x(a) for a in e.args)})"  # type: ignore[union-attr]
+            call = f"{ext.py}({', '.join(unparen(self.x(a)) for a in e.args)})"  # type: ignore[union-attr]
             conv = _AS.get(e.ty, "int")
             return f"{conv}({call})"
         raise AssertionError(k)
@@ -135,15 +152,15 @@ class PyGen:
         out: list[str] = []
         for s in body:
             if isinstance(s, ir.Let):
-                out.append(f"{pad}{s.name} = {self.x(s.init)}")
+                out.append(f"{pad}{s.name} = {unparen(self.x(s.init))}")
             elif isinstance(s, ir.Assign):
                 target = f"self.{s.name}" if s.kind == "state" else s.name
-                out.append(f"{pad}{target} = {self.x(s.value)}")
+                out.append(f"{pad}{target} = {unparen(self.x(s.value))}")
             elif isinstance(s, ir.If):
                 kw = "if"
                 cur = s
                 while True:
-                    out.append(f"{pad}{kw} {self.x(cur.cond)}:")
+                    out.append(f"{pad}{kw} {unparen(self.x(cur.cond))}:")
                     out.extend(self.stmts(cur.then, depth + 1) or [f"{pad}{INDENT}pass"])
                     if len(cur.orelse) == 1 and isinstance(cur.orelse[0], ir.If):
                         cur = cur.orelse[0]
@@ -154,7 +171,7 @@ class PyGen:
                         out.extend(self.stmts(cur.orelse, depth + 1) or [f"{pad}{INDENT}pass"])
                     break
             elif isinstance(s, ir.Return):
-                out.append(f"{pad}return" + (f" {self.x(s.value)}" if s.value is not None else ""))
+                out.append(f"{pad}return" + (f" {unparen(self.x(s.value))}" if s.value is not None else ""))
         return out
 
     # ---- module -------------------------------------------------------------------------------

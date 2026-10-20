@@ -1,0 +1,60 @@
+// hero_gait.dal -- a small locomotion-variables program in the style of the plan's sketch.
+// Exercises enums, the movement-mode enum, input actions, notifies, a free input, entries and
+// compound assignment; used by the tests as the second real example.
+
+logic HeroGait;
+
+enum Gait { Walk, Run, Sprint }
+
+const WalkSpeed: float = 175.0;
+const RunSpeed: float = 450.0;
+
+param SpeedInterpSpeed: float = 8.0;
+param LeanInterpSpeed: float = 6.0;
+
+input Velocity: vec3 <- host.velocity;
+input Accel: vec3 <- host.acceleration;
+input Mode: MovementMode <- host.movement_mode;
+input Crouched: bool <- host.is_crouching;
+input AimRotation: rotator <- host.control_rotation;
+input MoveInput: vec2 <- host.action("Move");
+input SprintHeld: bool <- host.action("Sprint");
+input FootstepFired: bool <- host.notify("Footstep");
+input Aiming: bool;                      // free input: set by game code
+
+state Speed: float;
+state CurrentGait: Gait = Gait.Walk;
+state InAir: bool;
+state Lean: float;
+state Steps: int;
+state AimOffset: vec2;
+state MoveDirection: vec2;
+
+fn gait_for(speed: float, sprint: bool) -> Gait {
+    if (sprint && speed > RunSpeed) {
+        return Gait.Sprint;
+    }
+    if (speed > WalkSpeed * 1.5) {
+        return Gait.Run;
+    }
+    return Gait.Walk;
+}
+
+update(dt) {
+    Speed = interp_to(Speed, length(Velocity.xy), dt, SpeedInterpSpeed);
+    CurrentGait = Crouched ? Gait.Walk : gait_for(Speed, SprintHeld);
+    InAir = Mode == MovementMode.Falling;
+    Lean = interp_to(Lean, clamp(Accel.y * 0.01, -1.0, 1.0), dt, LeanInterpSpeed);
+    if (FootstepFired) {
+        Steps += 1;
+    }
+    MoveDirection = length_sq(MoveInput) > 1.0 ? normalize(MoveInput) : MoveInput;
+    AimOffset = Aiming
+        ? vec2(delta_angle(0.0, AimRotation.yaw), clamp_angle(AimRotation.pitch, -60.0, 60.0))
+        : VEC2_ZERO;
+}
+
+// Called from a .dab with Call(Self.ResetSteps).
+entry ResetSteps(dt) {
+    Steps = 0;
+}

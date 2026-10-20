@@ -1,0 +1,95 @@
+// als_lean.dal -- the lean logic of ALS-Refactored 4.18 (MIT, Sixze), rewritten in DAL.
+//
+// Original: Source/ALS/Private/AlsAnimationInstance.cpp
+//   RefreshLocomotionOnGameThread()  acceleration = (V - prevV) / dt, and the yaw speed
+//   GetAccelerationAmount()          acceleration normalised by max acceleration / braking deceleration
+//   RefreshGroundedLean()            LeanState = damped acceleration amount            (on the ground)
+//   RefreshInAirLean()               LeanState = damped local velocity * curve(vz)     (in the air)
+//
+// Not reproduced: the movement-base compensation (MovementBase.DeltaRotation) and the rest of
+// FAlsLocomotionAnimationState.  The grounded / in-air choice comes from the CMC (host.is_grounded).
+
+logic AlsLean;
+
+// UAlsGeneralAnimationSettings::LeanInterpolationHalfLife (seconds; 0 = no smoothing).
+param LeanInterpolationHalfLife: float = 0.2;
+
+// RefreshInAirLean: static constexpr ReferenceSpeed.
+const InAirLeanReferenceSpeed: float = 350.0;
+
+// UAlsInAirSettings::LeanAmountCurve is a UCurveFloat asset in ALS (vertical velocity -> lean multiplier).
+// A DAL program cannot read assets, so the curve is an extern fn: C++ implements it
+// (AlsLeanLibrary.h), the Python stand-in lives in als_lean_standins.py and the compiler checks both exist.
+extern fn InAirLeanCurve(VerticalVelocity: float) -> float
+    cpp "AlsLeanLibrary::InAirLeanCurve" include "AlsLeanLibrary.h";
+
+// ---- host --------------------------------------------------------------------------------------
+input Velocity: vec3 <- host.velocity;                         // world space, cm/s
+input ActorRotation: quat <- host.actor_rotation;
+input MaxAcceleration: float <- host.max_acceleration;
+input MaxBrakingDeceleration: float <- host.max_braking_deceleration;
+input Grounded: bool <- host.is_grounded;
+
+// ---- state ---------------------------------------------------------------------------------------
+state Pending: bool = true;     // ALS bPendingUpdate: true until the first update has finished
+state PreviousVelocity: vec3;
+state PreviousYaw: float;
+state Acceleration: vec3;       // world space, cm/s^2 (ALS: LocomotionState.AccelerationWorldSpace)
+state YawSpeed: float;          // deg/s            (ALS: LocomotionState.YawVelocityWorldSpace)
+state LeanForward: float;       // ALS: LeanState.ForwardAmount
+state LeanRight: float;         // ALS: LeanState.RightAmount
+
+// UAlsVector::ClampMagnitude01
+fn clamp_magnitude01(v: vec3) -> vec3 {
+    let magnitude_sq = length_sq(v);
+    if (magnitude_sq <= 1.0) {
+        return v;
+    }
+    return v * inv_sqrt(magnitude_sq);
+}
+
+// UAlsAnimationInstance::GetAccelerationAmount: -1 = full braking, 1 = full acceleration, in the
+// character's local space (x forward, y right).
+fn acceleration_amount(accel: vec3, velocity: vec3, rotation: quat, max_accel: float, max_brake: float) -> vec2 {
+    let max_amount = dot(accel, velocity) >= 0.0 ? max_accel : max_brake;
+    if (max_amount <= KINDA_SMALL_NUMBER) {
+        return VEC2_ZERO;
+    }
+    let local_accel = unrotate(rotation, accel);
+    return clamp_magnitude01(local_accel / max_amount).xy;
+}
+
+// UAlsMath::DamperExactAlpha
+fn damper_exact_alpha(dt: float, half_life: float) -> float {
+    return 1.0 - inv_exp_approx(LN2 / (half_life + SMALL_NUMBER) * dt);
+}
+
+update(dt) {
+    // RefreshLocomotionOnGameThread
+    let yaw = to_rotator(ActorRotation).yaw;
+    let can_rate = !Pending && dt > SMALL_NUMBER;
+    Acceleration = can_rate ? (Velocity - PreviousVelocity) / dt : VEC3_ZERO;
+    YawSpeed = can_rate ? unwind_degrees(yaw - PreviousYaw) / dt : 0.0;
+    PreviousVelocity = Velocity;
+    PreviousYaw = yaw;
+
+    // RefreshGroundedLean / RefreshInAirLean: the target lean, x = forward, y = right
+    var target = VEC2_ZERO;
+    if (Grounded) {
+        target = acceleration_amount(Acceleration, Velocity, ActorRotation, MaxAcceleration, MaxBrakingDeceleration);
+    } else {
+        let curve = InAirLeanCurve(Velocity.z);
+        target = (unrotate(ActorRotation, Velocity) / InAirLeanReferenceSpeed * curve).xy;
+    }
+
+    if (Pending || LeanInterpolationHalfLife <= 0.0) {
+        LeanForward = target.x;
+        LeanRight = target.y;
+    } else {
+        let alpha = damper_exact_alpha(dt, LeanInterpolationHalfLife);
+        LeanForward = lerp(LeanForward, target.x, alpha);
+        LeanRight = lerp(LeanRight, target.y, alpha);
+    }
+
+    Pending = false;
+}

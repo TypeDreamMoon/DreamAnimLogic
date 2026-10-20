@@ -40,7 +40,7 @@ PY_CLASS_API = frozenset(
     "reset snapshot overrides set_input sample_inputs call_entry values host update".split()
 )
 
-RESERVED_PREFIXES = ("Dal_", "DAL_", "DalHost_", "DalNotify_", "AnimNotify_", "Montage_", "Native", "Blueprint")
+RESERVED_PREFIXES = ("Dal_", "DAL_", "DalHost_", "DalNotify_", "DalAction_", "AnimNotify_", "Montage_", "Native", "Blueprint")
 
 
 def reserved_reason(name: str, allow_py_keyword: bool = False) -> str | None:

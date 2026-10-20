@@ -230,8 +230,10 @@ def vdiv(v, s):
 
 # ---- scalar math --------------------------------------------------------------
 
-def abs_(x):  # FMath::Abs
-    return -x if x < 0 else x
+def abs_(x):  # FMath::Abs (int32 results wrap, as in C++)
+    if x < 0:
+        return i32(-x) if isinstance(x, int) else -x
+    return x
 
 
 def sign(x):  # FMath::Sign
