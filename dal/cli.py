@@ -99,6 +99,13 @@ def cmd_dump_ir(args) -> int:
     return 0
 
 
+def cmd_host(args) -> int:
+    from .hostapi import protocol_markdown
+
+    sys.stdout.write(protocol_markdown())
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m dal", description="DAL (Dream Anim Logic) compiler")
     p.add_argument("--version", action="version", version=f"dal {__version__}")
@@ -126,6 +133,9 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--seed", type=int, default=1)
     v.add_argument("--tol", type=float, default=0.0, help="relative tolerance (0 = exact)")
     v.set_defaults(func=cmd_verify)
+
+    h = sub.add_parser("host", help="print the host protocol (reads, commands, queries, events) as Markdown")
+    h.set_defaults(func=cmd_host)
 
     d = sub.add_parser("dump-ir", help="print the typed IR")
     d.add_argument("file")

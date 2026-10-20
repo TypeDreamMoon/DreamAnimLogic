@@ -41,6 +41,32 @@ class CliTests(unittest.TestCase):
             self.assertIn("class MYGAME_API UAlsLean", f.read())
         self.assertEqual(out.count("wrote"), 4)
 
+    def test_actor_logic_writes_the_host_header_and_a_component(self):
+        cpp_dir = os.path.join(self.tmp, "cpp")
+        code, out, err = run("compile", os.path.join(EXAMPLES, "melee_combo.dal"), "--cpp", cpp_dir, "--module", "MYGAME_API")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sorted(os.listdir(cpp_dir)), ["DalHost.h", "DalMath.h", "MeleeCombo.cpp", "MeleeCombo.h"])
+        with open(os.path.join(cpp_dir, "MeleeCombo.h"), encoding="utf-8") as f:
+            self.assertIn("class MYGAME_API UMeleeCombo : public UActorComponent", f.read())
+        # an explicit base class wins over the kind's default
+        code, _, err = run("compile", os.path.join(EXAMPLES, "melee_combo.dal"), "--cpp", cpp_dir, "--parent-class", "UMyComponent", "--parent-include", "My.h")
+        self.assertEqual(code, 0, err)
+        with open(os.path.join(cpp_dir, "MeleeCombo.h"), encoding="utf-8") as f:
+            self.assertIn("class UMeleeCombo : public UMyComponent", f.read())
+        # an anim instance without host traffic has no DalHost.h
+        gait_dir = os.path.join(self.tmp, "gait")
+        run("compile", GAIT, "--cpp", gait_dir)
+        self.assertNotIn("DalHost.h", os.listdir(gait_dir))
+
+    def test_actor_logic_python_output_and_verify(self):
+        py_dir = os.path.join(self.tmp, "py")
+        for name in ("melee_combo.dal", "lockon_camera.dal"):
+            path = os.path.join(EXAMPLES, name)
+            self.assertEqual(run("compile", path, "--py", py_dir)[0], 0)
+            code, out, err = run("verify", path, "--frames", "120", "--seed", "3")
+            self.assertEqual(code, 0, err)
+            self.assertIn("agree", out)
+
     def test_second_compile_leaves_files_untouched(self):
         cpp_dir = os.path.join(self.tmp, "cpp")
         run("compile", GAIT, "--cpp", cpp_dir)

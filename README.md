@@ -6,9 +6,11 @@ compiler, two backends**:
 | Backend | Output | Runs in |
 |---|---|---|
 | Python | a self-contained module with one class (`__init__(host)`, `update(dt)`, state fields) | Blender (DreamVEd), tests, tools |
-| Unreal C++ | `U<Logic>.h/.cpp`: a `UAnimInstance` parent class + `DalMath.h` | Unreal Engine 5.8, as the C++ parent of a `.dab` Animation Blueprint |
+| Unreal C++ | `U<Logic>.h/.cpp` (+ `DalMath.h`, `DalHost.h`): a `UAnimInstance` parent class (`logic X;`) or a `UActorComponent` character component (`logic X : actor;`) | Unreal Engine 5.8: the C++ parent of a `.dab` Animation Blueprint, or a component on the character |
 
-The language is specified in `I:\DCC\Plan\dal-syntax-v0.md` (Chinese). This README covers the repository.
+The language is specified in Chinese in `I:\DCC\Plan\dal-syntax-v0.md` (v0: values, math, anim instance logic)
+and `I:\DCC\Plan\dal-syntax-v1.md` (v1 / v2: host commands, events, montages, combos, queries, camera).
+This README covers the repository.
 
 ```
 logic HeroGait;
@@ -25,25 +27,52 @@ update(dt) {
 }
 ```
 
+and, from v1, logic that acts on the character (`examples/melee_combo.dal`, abridged):
+
+```
+logic MeleeCombo : actor;                    // a character component, game thread
+
+montage Light1 { Windup, Strike, Recover }   // assets the host plays
+montage Light2 { Windup, Strike, Recover }
+action Attack: bool;                         // an Enhanced Input action
+
+window Cancel <- notify_state CancelWindow closes_on Light1, Light2;
+buffer AttackBuffer = 0.3 <- input Attack started;     // a press stays valid for 0.3 s
+
+combo Melee {
+    start on AttackBuffer when Grounded -> Hit1;
+    step Hit1 { play Light1; on AttackBuffer within Cancel -> Hit2; }
+    step Hit2 { play Light2; }
+}
+
+on notify Hit { Hits += 1; }                 // event handlers
+update(dt) { host.set_max_walk_speed(Melee != MeleeStep.Idle ? 120.0 : 600.0); }   // host commands are queued
+```
+
 ## Layout
 
 ```
 dal/                  the package (pure Python 3.11+, no dependencies) -- this is what gets vendored
   lexer.py parser.py syntax.py    source -> syntax tree (errors with line/column)
+  lower.py                        timer / window / buffer / combo -> core language (on the syntax tree)
   check.py names.py types.py      name resolution, static types, constant folding -> IR
   ir.py                           typed IR (both backends and the interpreter read only this)
-  builtins.py hostapi.py          the standard library table and host interface v0
-  runtime.py                      value types (Vec2/Vec3/Rotator/Quat) + math with UE semantics
+  builtins.py                     the standard library table
+  hostapi.py                      the host protocol: reads, commands, queries, events; HostV0 / HostV1 base classes
+  mockhost.py                     MockHost (recording) and SimHost (plays montages, produces events) for tests and tools
+  runtime.py                      value types (Vec2/Vec3/Rotator/Quat/Hit) + math with UE semantics + LogicBase
   interp.py                       reference interpreter over the IR
   pybackend.py                    Python backend
-  cppbackend.py  cpp/DalMath.h    C++ backend and its static math header
-  harness.py                      interpreter-vs-generated-Python consistency harness
+  cppbackend.py  cpp/             C++ backend and its static headers (DalMath.h, DalHost.h)
+  harness.py                      interpreter-vs-generated-Python consistency harness (states and host commands)
   api.py cli.py __main__.py       entry points
 examples/
   als_lean.dal                    ALS-Refactored's lean logic (+ als_lean_standins.py, AlsLeanLibrary.h)
   hero_gait.dal                   enums, input actions, notifies, entries
+  melee_combo.dal                 three-hit chain: montages, input buffer, cancel windows, combo (actor logic)
+  lockon_camera.dal               lock-on target selection, line-of-sight trace, camera framing (actor logic)
 tests/                            python -I -m unittest discover -s tests
-  oracles/als_lean_oracle.py      independent port of ALS's lean code (does not import dal)
+  oracles/                        independent hand-written ports (ALS lean, melee, lock-on); they do not import dal
   cpp_stub/ cpp_driver.py         stand-in engine headers + build/run helper for the C++ tests
   golden/                         golden C++ output
 ```
@@ -56,15 +85,18 @@ Run from the repository root (or with the folder that contains `dal/` on `PYTHON
 ```
 python -m dal compile examples/als_lean.dal --py out/py --cpp out/cpp --module MYGAME_API
 python -m dal check   examples/als_lean.dal
-python -m dal verify  examples/als_lean.dal --frames 500 --seed 7   # interpreter vs generated Python
+python -m dal verify  examples/melee_combo.dal --frames 500 --seed 7   # interpreter vs generated Python
 python -m dal dump-ir examples/als_lean.dal
+python -m dal host                                                      # the host protocol as Markdown tables
 ```
 
-* `--py DIR` writes `<Logic>.py`; `--cpp DIR` writes `<Logic>.h`, `<Logic>.cpp` and `DalMath.h`.
+* `--py DIR` writes `<Logic>.py`; `--cpp DIR` writes `<Logic>.h`, `<Logic>.cpp`, `DalMath.h` and, for programs with
+  host traffic (handlers, commands, actor logic), `DalHost.h`.
   Output is deterministic (no timestamps) and files are only rewritten when the content changes, so
   Unreal's Live Coding / UBT only rebuild what changed.
 * `--module MYGAME_API` puts the module's export macro on the generated `UCLASS`.
-* `--parent-class UMyBase --parent-include MyBase.h` changes the C++ base class (default `UAnimInstance`).
+* `--parent-class UMyBase --parent-include MyBase.h` changes the C++ base class (default `UAnimInstance`, or
+  `UActorComponent` for `logic X : actor;`).
 * `--standins FILE` provides the Python stand-ins of `extern fn`s (default: `<source>_standins.py`).
 * Exit code 0 = ok, 1 = compile errors (`file:line:col: error DALnnnn: message` plus the source line and a
   caret), 2 = usage error.
@@ -78,25 +110,47 @@ from dal.cppbackend import generate_cpp, CppOptions
 
 result = dal.check_file("examples/hero_gait.dal")        # raises dal.DalError with all diagnostics
 Hero = load_class(result.module)                         # the generated class, ready to use
-hero = Hero(host)                                        # host: object with the attributes of dal.hostapi.HOST_ITEMS
+hero = Hero(host)                                        # host: a dal.hostapi.HostV1 (or HostV0) object
 hero.update(1 / 60)
 print(hero.Speed, hero.snapshot())
 files = generate_cpp(result.module, CppOptions(module_api="MYGAME_API"))   # {filename: text}
 ```
+
+## The host protocol (what Blender / Unreal provide)
+
+A logic talks to its host in four ways; all of them are listed in the tables of `dal/hostapi.py`
+(`python -m dal host` prints them), the checker validates programs against those tables, and both backends and the
+mock hosts implement them.
+
+| | what | in the language | when it takes effect |
+|---|---|---|---|
+| reads | CMC values, actor transform, input actions, notify flags, montage state | `input X: type <- host.item` | sampled once at the start of an update |
+| events | notify / notify window begin+end, montage ended / blending out, input action phases | `on notify Hit { ... }` | handlers run at the start of the next update, oldest first |
+| commands | CMC writes, jump / crouch / launch, montage play / stop / jump to section ..., control rotation, spring arm, FOV | `host.set_max_walk_speed(v);` | **queued**; the host runs them in order after the update |
+| queries | line / sphere trace, target list | `let h = host.trace_line(a, b);` (actor logic only) | answered immediately (game thread) |
+
+Python hosts subclass `dal.hostapi.HostV1` (every method documents the DreamVEd call it maps to:
+`MontageManager.play / stop / jump_to_section / set_next_section`, `CharacterMovement.jump / add_movement_input /
+launch / set_movement_mode / p.max_walk_speed ...`, `CollisionWorld.line_trace / sweep_sphere`, `EnhancedInput.bind /
+action_value`, the spring arm parameters). `dal.mockhost.MockHost` records commands and answers traces against a
+ground plane and spheres; `SimHost` also plays montages (length, sections, notifies, notify windows, blend out) and turns
+what happens into the events the logic polls -- enough to test combos without Blender or Unreal.
 
 ## Generated Python class
 
 * `Class(host=None, **params)`; `update(dt)`; `reset()`; `snapshot()` (inputs then states as plain data);
   `set_input(name, value)` for free inputs; `call_entry(name)` / `Entry()` for entries;
   `overrides = {"Velocity": ...}` forces a host-bound input (for a variable panel).
-* Metadata for UIs: `DAL_PARAMS`, `DAL_INPUTS`, `DAL_STATES`, `DAL_ENTRIES`.
-* The host is any object with the attributes listed in `dal.hostapi.HOST_ITEMS` (`velocity`, `acceleration`,
-  `is_grounded`, ... and the methods `action(name, type)` and `notify(name)`); subclass `dal.hostapi.HostV0`
-  to get neutral defaults for everything you do not provide.
+* One `update(dt)`: sample the inputs, collect the events (`post_event(...)` and `host.poll_events()`), tick the timers,
+  run the handlers, run the body, hand the queued commands to the host (`take_commands()` returns them instead, for
+  hosts that execute commands themselves).
+* Metadata for UIs: `DAL_PARAMS`, `DAL_INPUTS`, `DAL_STATES`, `DAL_ENTRIES`, `DAL_KIND`, `DAL_HANDLERS`.
 * Imports only `dal.runtime` (and `dal.hostapi` lazily): the `dal` package must be importable, which is
   why it is vendored as a whole.
 
 ## Generated C++ (UE 5.8)
+
+Anim logic (`logic X;`, v0 shape, unchanged):
 
 ```
 UCLASS() class [API] U<Logic> : public UAnimInstance
@@ -108,10 +162,34 @@ UCLASS() class [API] U<Logic> : public UAnimInstance
   notifies                                      -> UFUNCTION() AnimNotify_<Name>() sets a flag read by host.notify("<Name>")
 ```
 
-A `.dab` uses the generated class as `Parent = U<Logic>`. Modules needed: `Core`, `CoreUObject`, `Engine`
-(+ `EnhancedInput` if `host.action` is used) -- the first lines of the generated header say so. For a
-`host.action("Move")` input, assign the `UInputAction` asset to the generated `DalAction_Move` property in
-the class defaults.
+With host traffic (handlers, `host.` commands, montage reads) an anim instance additionally queues commands under a
+lock; **the next `NativeUpdateAnimation` runs them on the game thread, before it samples** (so a command takes effect one
+update later than on the Python side, where `update` flushes at its end). Events from the animation delegates
+(`OnMontageEnded`, `OnMontageBlendingOut`, `OnPlayMontageNotifyBegin/End`, `AnimNotify_<Name>`) are queued and handled
+by the next update.
+
+Actor logic (`logic X : actor;`):
+
+```
+UCLASS(ClassGroup = (Dal), Meta = (BlueprintSpawnableComponent)) class [API] U<Logic> : public UActorComponent
+  TickComponent (TG_PrePhysics, game thread):  DalBindHost()      lazily subscribe to the owner's AnimInstance delegates and its
+                                                                  UEnhancedInputComponent (BindAction per `on input` handler)
+                                               DalSampleInputs()  reads, as above (+ montage state of the owner's mesh)
+                                               DalTakeEvents()    events queued by the delegates since the last tick
+                                               DalUpdate(dt)      timer ticks, handlers (DalDispatchEvents), update body; may call
+                                                                  the queries (traces, targets)
+                                               DalFlushCommands() DalExecuteCommand(): CMC / Character / montage / controller / camera calls
+  assets to assign in the class defaults:  DalMontage_<Name> (UAnimMontage), DalAction_<Name> (UInputAction),
+                                           DalTargetTag (default "DalTarget"), DalTraceChannel (default ECC_Visibility)
+```
+
+A `.dab` uses an anim-instance class as `Parent = U<Logic>`. Modules needed: `Core`, `CoreUObject`, `Engine`
+(+ `EnhancedInput` if actions are used) -- the first lines of the generated header say so. For a
+`host.action("Move")` input or an `on input` handler, assign the `UInputAction` asset to the generated
+`DalAction_<Name>` property. Notifies reach actor logic through **Play Montage Notify** (point) and **Play Montage Notify
+Window** (state) notifies named like the handler; an anim instance additionally receives custom `AnimNotify_<Name>` ones.
+Enum names (user enums and the `<Montage>Section` enums) become `E<Name>` in the module: keep them unique across the logics
+of one module.
 
 `extern fn` declarations call hand-written C++ (`cpp "Ns::Fn" include "Header.h"`); see
 `examples/AlsLeanLibrary.h` for the pattern. The functions must be pure and thread safe.
@@ -123,11 +201,12 @@ Both consumers carry **the same version of the package folder**:
 * DreamVEd: `blender-moon-engine/scripts/modules/dal`
 * DreamAnim: `DreamAnim/Tools/dal`
 
-Copy the `dal/` directory (including `dal/cpp/DalMath.h`, excluding `__pycache__`); do not copy `tests/`
-or `examples/`. `dal.__version__` identifies the version; the generated files record it in their first
+Copy the `dal/` directory (including `dal/cpp/DalMath.h` and `dal/cpp/DalHost.h`, excluding `__pycache__`); do not copy
+`tests/` or `examples/`. `dal.__version__` identifies the version (0.2.0); the generated files record it in their first
 line. Blender calls `dal.check_file(...)` + `load_class(...)`; Unreal's editor Python calls
 `dal.cli.main(["compile", file, "--cpp", dir, "--module", API])` (or `python -m dal`). The compiler does
-not depend on Unreal or on the project directory.
+not depend on Unreal or on the project directory. Programs written for 0.1.0 compile unchanged (their generated C++ is
+identical apart from the version in the banner).
 
 ## Tests
 
@@ -135,7 +214,7 @@ not depend on Unreal or on the project directory.
 python -I -m unittest discover -s tests
 ```
 
-180+ tests, about 15 s. Python 3.11+ syntax; also run under Blender 5.2's embedded Python 3.13.
+300 tests, about 50 s. Python 3.11+ syntax; also run under Blender 5.2's embedded Python 3.13.
 
 | File | What it checks |
 |---|---|
@@ -143,24 +222,32 @@ python -I -m unittest discover -s tests
 | `test_check.py` | name resolution, types, diagnostics (codes + line/column), IR shape, stand-in checks |
 | `test_runtime.py` | the math library against hand-derived UE semantics |
 | `test_pybackend.py` | the generated class: API, params, overrides, entries, integer / division semantics |
-| `test_consistency.py` | interpreter vs generated Python, frame by frame: both examples, **every built-in signature**, operators, control flow, entries, externs, plus a mutation check that proves the comparison can fail |
+| `test_consistency.py` | interpreter vs generated Python, frame by frame: both v0 examples, **every built-in signature**, operators, control flow, entries, externs, plus a mutation check that proves the comparison can fail |
+| `test_v1.py` | v1 / v2 language: diagnostics, commands (queued, flushed, plain arguments), events, timers, windows, buffers, montage reads, queries, loops, random-frame consistency of interpreter and Python backend |
+| `test_host_protocol.py` | the protocol tables vs `HostV1` / `MockHost` / `SimHost` (arity, documentation, simulation) |
 | `test_als_lean.py` | `examples/als_lean.dal` vs the independent port of ALS's lean code (`oracles/`) over random sequences |
-| `test_cpp.py` | golden C++ text, structural invariants (worker-thread code never touches the world), `DalMath.h` has an overload for every built-in signature |
-| `test_cpp_compile.py` | compiles the generated C++ (MSVC `/W4 /WX`, or g++/clang++) against stand-in engine headers (`tests/cpp_stub`) and compares the results with the Python backend; skipped when no compiler is found |
+| `test_melee.py` | `examples/melee_combo.dal` vs `oracles/melee_oracle.py`: scripted sessions through the montage simulation and 30 random sessions (states and commands per frame) |
+| `test_lockon.py` | `examples/lockon_camera.dal` vs `oracles/lockon_oracle.py`: scenarios and 24 random sessions |
+| `test_cpp.py` | golden C++ text of the v0 examples, structural invariants (worker-thread code never touches the world), `DalMath.h` has an overload for every built-in signature |
+| `test_cpp_v1.py` | golden C++ text of the two actor examples and an anim instance with host traffic; invariants of the component (tick order, queues, delegates, input binding, executors) |
+| `test_cpp_compile.py` | compiles the generated C++ (MSVC `/W4 /WX`, or g++/clang++) against stand-in engine headers (`tests/cpp_stub`) and compares states **and the host effects** (CMC writes, montage calls ...) with the Python backend, for the v0 examples, both actor examples, every host command, traces / targets and an anim instance with events; skipped when no compiler is found |
 | `test_cli.py` | `python -m dal` |
 
-Regenerate golden files with `UPDATE_GOLDEN=1 python -I -m unittest discover -s tests -p test_cpp.py`
-and review the diff. `DAL_CL=<path to cl.exe>` selects a specific MSVC for `test_cpp_compile.py`.
+Regenerate golden files with `UPDATE_GOLDEN=1 python -I -m unittest discover -s tests -p test_cpp.py` (and
+`-p test_cpp_v1.py`) and review the diff. `DAL_CL=<path to cl.exe>` selects a specific MSVC for `test_cpp_compile.py`.
 
 ## What is not verified
 
 * The generated C++ has **not** been compiled inside Unreal Engine. `test_cpp_compile.py` proves it is
-  well-formed C++20 and numerically consistent against stand-in headers written from the UE 5.8 sources;
-  engine-specific facts (UHT acceptance of the `UPROPERTY` set, `FVector3f`/`FQuat4f` conversions from the
-  double-precision `FVector`/`FQuat`, `UEnhancedPlayerInput::GetActionValue`, module dependencies) still
-  need the first real build.
+  well-formed C++20 and behaves like the Python backend against stand-in headers written from the UE 5.8 sources;
+  engine-specific facts still need the first real build: UHT acceptance of the `UPROPERTY` / `UFUNCTION` set (private
+  `UFUNCTION`s with a `const FBranchingPointNotifyPayload&` parameter as delegate targets), `AddUniqueDynamic` on
+  `OnPlayMontageNotifyBegin/End`, the `BindAction` overload for `void(const FInputActionValue&)` with a private member,
+  `FVector3f` / `FQuat4f` conversions from the double-precision engine types, `SCENE_QUERY_STAT` inside a component,
+  module dependencies.
 * Float precision: the Python backend computes in double, the C++ backend in `float`. Programs with hard
   thresholds can differ by a frame at the boundary.
 * `to_rotator()` uses an exact `asin`; UE's float `FQuat::Rotator()` uses `FMath::FastAsin` (error up to
   about 7e-5 rad). `atan2()` likewise uses the C library; UE's float version is a minimax approximation
   with relative error below 1e-6.
+* The Blender side is an interface plus mocks: no `HostV1` implementation on top of the real DreamVEd runtime exists yet.

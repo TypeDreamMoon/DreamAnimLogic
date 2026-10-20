@@ -69,6 +69,27 @@ class ProtocolTests(unittest.TestCase):
         host.montage_play("M", 1.0, None)           # no error
 
 
+class DocumentationTests(unittest.TestCase):
+    def test_the_generated_protocol_tables_name_everything(self):
+        from dal.hostapi import protocol_markdown
+
+        text = protocol_markdown()
+        for name in (*HOST_ITEMS, *COMMANDS, *QUERIES, *EVENTS):
+            self.assertIn(f"`{name}", text, name)
+        self.assertNotIn(chr(13), text)
+
+    def test_cli_prints_the_protocol(self):
+        import io
+        from contextlib import redirect_stdout
+
+        from dal.cli import main
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.assertEqual(main(["host"]), 0)
+        self.assertIn("montage_set_next_section", buf.getvalue())
+
+
 class MockHostTests(unittest.TestCase):
     def test_commands_are_recorded_with_plain_arguments_and_echoed_into_state(self):
         host = MockHost()

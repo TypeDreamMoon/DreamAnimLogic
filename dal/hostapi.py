@@ -142,7 +142,9 @@ COMMANDS: dict[str, Command] = {
         _c("montage_stop", ["montage", FLOAT], 1, (-1.0,),
            doc="blend a montage out; a negative time uses the montage's own blend out",
            ue="AnimInstance->Montage_Stop(BlendOut, Montage)"),
-        _c("montage_stop_all", [FLOAT], 0, (-1.0,), ue="AnimInstance->Montage_Stop(BlendOut)"),
+        _c("montage_stop_all", [FLOAT], 0, (-1.0,),
+           doc="blend out every playing montage; a negative time uses the blend out of the montage that is playing",
+           ue="AnimInstance->Montage_Stop(BlendOut)"),
         _c("montage_jump_to_section", ["montage", "section"], ue="AnimInstance->Montage_JumpToSection(Section, Montage)"),
         _c("montage_set_next_section", ["montage", "section", "section"],
            ue="AnimInstance->Montage_SetNextSection(From, To, Montage)"),
@@ -171,10 +173,10 @@ QUERIES: dict[str, Query] = {
     q.name: q
     for q in (
         Query("trace_line", (VEC3, VEC3), HIT, "line trace from start to end against the world's blocking geometry",
-              "World->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, IgnoreOwner)"),
+              "World->LineTraceSingleByChannel(Hit, Start, End, DalTraceChannel (ECC_Visibility), IgnoreOwner)"),
         Query("trace_sphere", (VEC3, VEC3, FLOAT), HIT, "sphere sweep from start to end",
-              "World->SweepSingleByChannel(Hit, Start, End, FQuat::Identity, ECC_Visibility, Sphere(Radius), IgnoreOwner)"),
-        Query("target_count", (), INT, "number of targetable actors (tag DalTarget in Unreal)", "tagged actors, refreshed each tick"),
+              "World->SweepSingleByChannel(Hit, Start, End, FQuat::Identity, DalTraceChannel (ECC_Visibility), Sphere(Radius), IgnoreOwner)"),
+        Query("target_count", (), INT, "number of targetable actors", "actors with the tag DalTargetTag (DalTarget), collected once per tick"),
         Query("target_id", (INT,), INT, "stable id of the i-th target", "AActor::GetUniqueID()"),
         Query("target_location", (INT,), VEC3, "location of the i-th target", "Actor->GetActorLocation()"),
         Query("target_index", (INT,), INT, "index of the target with this id, or -1 if it is gone", "lookup by id"),
@@ -213,7 +215,10 @@ class HostV0:
     control_rotation = rt.ROTATOR_ZERO
 
     def action(self, name: str, ty: str):
-        """Value of the input action ``name`` as DAL type ``ty`` ('bool', 'float', 'vec2', 'vec3')."""
+        """Value of the input action ``name`` as DAL type ``ty`` ('bool', 'float', 'vec2', 'vec3').
+
+        Blender adapter: ``pi.action_value(name)`` (``c3.input.EnhancedInput``) -> ``get_bool()`` / ``get_float()`` / ``get_vec2()``.
+        """
         return {"bool": False, "float": 0.0, "vec2": rt.VEC2_ZERO, "vec3": rt.VEC3_ZERO}[ty]
 
     def notify(self, name: str) -> bool:
@@ -250,11 +255,11 @@ class HostV1(HostV0):
 
     # ---- queries (actor logic) -------------------------------------------------------------------------------
     def trace_line(self, start, end):
-        """world.line_trace(start, end) -> rt.Hit (blocking, point, normal, distance, time)"""
+        """c3.collision ``world.line_trace(start, end, ignore=owner)`` -> ``rt.Hit(h.blocking_hit, h.impact_point, h.impact_normal, h.distance, h.time)``"""
         return rt.Hit()
 
     def trace_sphere(self, start, end, radius: float):
-        """world.sweep_sphere(start, end, radius) -> rt.Hit"""
+        """c3.collision ``world.sweep_sphere(start, end, radius, ignore=owner)`` -> ``rt.Hit`` as for ``trace_line``"""
         return rt.Hit()
 
     def target_count(self) -> int:
@@ -276,8 +281,9 @@ class HostV1(HostV0):
         Blender adapter: drain ``manager.events`` -- ``{"type": "ended", "montage": M, "interrupted": b}`` becomes
         ``("montage_ended", M, b)`` and ``"blend_out_started"`` becomes ``("montage_blending_out", M, b)`` -- and turn the
         notifies of the montage's notify queue (``manager.pending_notifies``) into ``("notify", N)`` for point notifies and
-        ``("notify_begin", N)`` / ``("notify_end", N)`` for notify states.  Input actions come from the 3C input layer
-        (``c3.input``) as ``("input", A, phase, value)``.
+        ``("notify_begin", N)`` / ``("notify_end", N)`` for notify states.  Input actions: bind the declared actions with
+        ``pi.bind(A, Event.STARTED / TRIGGERED / ONGOING / COMPLETED / CANCELED, callback)`` (``c3.input``) and queue
+        ``("input", A, "started" / "triggered" / ..., value)`` from the callbacks (``value`` = the action value).
         """
         return []
 
@@ -361,3 +367,31 @@ class HostV1(HostV0):
 
     def camera_set_fov(self, value: float) -> None:
         """camera.p.fov = value"""
+
+
+# ---- documentation generated from the tables --------------------------------------------------------------------------------
+
+def _param_text(p) -> str:
+    return p if isinstance(p, str) else p.name
+
+
+def protocol_markdown() -> str:
+    """The host protocol as Markdown tables (``python -m dal host``): what a host has to provide, from the tables above."""
+    out = ["## Reads (`input X: type <- host.item`)", "", "| item | type | Unreal | meaning |", "|---|---|---|---|"]
+    for it in HOST_ITEMS.values():
+        ty = it.ty.name if it.ty is not None else ("/".join(t.name for t in it.allowed) if it.allowed else "section enum")
+        name = f"{it.name}({it.arg_kind})" if it.arg else it.name
+        unit = f" ({it.unit})" if it.unit else ""
+        out.append(f"| `{name}` | {ty}{unit} | `{it.ue}` | {it.doc} |")
+    out += ["", "## Commands (`host.name(args);`, executed after the update)", "", "| command | arguments | Unreal |", "|---|---|---|"]
+    for c in COMMANDS.values():
+        params = ", ".join(_param_text(p) + ("?" if i >= c.min_args else "") for i, p in enumerate(c.params))
+        out.append(f"| `{c.name}` | {params or '-'} | `{c.ue}` |")
+    out += ["", "## Queries (`host.name(args)` expressions, actor logic only)", "", "| query | arguments | result | Unreal |", "|---|---|---|---|"]
+    for q in QUERIES.values():
+        params = ", ".join(t.name for t in q.params)
+        out.append(f"| `{q.name}` | {params or '-'} | {q.ret.name} | `{q.ue}` |")
+    out += ["", "## Events (`on ...` handlers; `HostV1.poll_events`)", "", "| event | tuple |", "|---|---|"]
+    for name, doc in EVENTS.items():
+        out.append(f"| `{name}` | {doc} |")
+    return "\n".join(out) + "\n"
