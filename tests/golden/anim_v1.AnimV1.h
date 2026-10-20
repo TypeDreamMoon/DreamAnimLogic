@@ -9,6 +9,9 @@
 #include "Animation/AnimNotifies/AnimNotify.h"
 #include "AnimV1.generated.h"
 
+class APawn;
+class ACharacter;
+class UCharacterMovementComponent;
 class UInputAction;
 class UAnimMontage;
 

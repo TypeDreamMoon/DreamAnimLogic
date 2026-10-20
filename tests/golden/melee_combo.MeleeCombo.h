@@ -9,6 +9,9 @@
 #include "Animation/AnimNotifies/AnimNotify.h"
 #include "MeleeCombo.generated.h"
 
+class APawn;
+class ACharacter;
+class UCharacterMovementComponent;
 class UInputAction;
 class UEnhancedInputComponent;
 struct FInputActionValue;

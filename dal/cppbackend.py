@@ -895,6 +895,14 @@ class CppGen:
         L.append(f'#include "{m.name}.generated.h"')
         L.append("")
         fwd: list[str] = []
+        # Engine classes named in the declarations of the helper methods below. The header must not lean on what the
+        # parent class' header happens to include.
+        if self.needs_pawn_helper:
+            fwd.append("class APawn;")
+        if self.character_cmds or self.movement_cmds:
+            fwd.append("class ACharacter;")
+        if self.movement_cmds:
+            fwd.append("class UCharacterMovementComponent;")
         if self.action_slots():
             fwd.append("class UInputAction;")
         if self.bind_input:

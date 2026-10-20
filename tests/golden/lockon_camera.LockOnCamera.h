@@ -9,6 +9,7 @@
 #include "Engine/EngineTypes.h"
 #include "LockOnCamera.generated.h"
 
+class APawn;
 class UInputAction;
 class UEnhancedInputComponent;
 struct FInputActionValue;
