@@ -48,7 +48,7 @@ class DiagnosticTests(unittest.TestCase):
 
     def test_reserved_for_backends(self):
         for name in ("lambda", "None", "delete", "class", "TRUE", "reset", "Dal_x", "AnimNotify_Foo", "bUseMultiThreadedAnimationUpdate"):
-            self.check(HDR + f"state {name}: float;", ("DAL3004", 2, 1 + len("state ") if False else 7))
+            self.check(HDR + f"state {name}: float;", ("DAL3004", 2, 7))
 
     def test_enum_member_names_may_be_python_keywords(self):
         compile_ok(HDR + "enum E { None, Pass, From }\nstate S: E;")
@@ -173,6 +173,14 @@ class StandinTests(unittest.TestCase):
 
     def test_syntax_error_in_standins(self):
         self.assertEqual(errors(self.SRC, ("s.py", "def f(x:\n")), [("DAL6005", 2, 1)])
+
+    def test_standin_must_not_break_the_generated_module(self):
+        future = "from __future__ import annotations\ndef f(x): return x\n"
+        self.assertEqual(errors(self.SRC, ("s.py", future)), [("DAL6006", 2, 1)])
+        clash = "def f(x): return x\ndef Zz(): pass\n"                    # Zz is the logic's class name
+        self.assertEqual(errors(self.SRC, ("s.py", clash)), [("DAL6007", 2, 1)])
+        fine = "import math\n_TABLE = (1.0, 2.0)\ndef f(x): return math.floor(x) + _TABLE[0]\n"
+        self.assertEqual(errors(self.SRC, ("s.py", fine)), [])
 
     def test_python_name_override(self):
         src = HDR + 'extern fn f(x: float) -> float py "f_py";\nstate S: float;\nupdate(dt) { S = f(1.0); }'

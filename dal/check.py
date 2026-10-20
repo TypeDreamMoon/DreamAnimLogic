@@ -870,6 +870,24 @@ class Checker:
         except SyntaxError as ex:
             self.err("DAL6005", f"stand-in file {fname} has a syntax error: {ex.msg} (line {ex.lineno})", decl_pos.get(externs[0].name, Pos(1, 1, 2)))
             return
+        first_pos = decl_pos.get(externs[0].name, Pos(1, 1, 2))
+        taken = {self.module.name, "_rt"}
+        taken |= {e.name for e in self.user_enums}
+        taken |= {f"_fn_{f.name}" for f in self.module.funcs}
+        taken |= {f"_K_{c.name}" for c in self.module.consts}
+        for node in tree.body:
+            if isinstance(node, pyast.ImportFrom) and node.module == "__future__":
+                self.err("DAL6006", f"stand-in file {fname} may not use 'from __future__' imports: it is bundled into the middle of the generated module", first_pos)
+            names: list[str] = []
+            if isinstance(node, (pyast.FunctionDef, pyast.ClassDef)):
+                names = [node.name]
+            elif isinstance(node, pyast.Assign):
+                names = [t.id for t in node.targets if isinstance(t, pyast.Name)]
+            elif isinstance(node, (pyast.Import, pyast.ImportFrom)):
+                names = [(a.asname or a.name).split(".")[0] for a in node.names]
+            for n in names:
+                if n in taken:
+                    self.err("DAL6007", f"stand-in file {fname} defines '{n}', which the generated module needs for itself", first_pos)
         defs = {n.name: n for n in tree.body if isinstance(n, (pyast.FunctionDef,))}
         for x in externs:
             pos = decl_pos.get(x.name, Pos(1, 1, 2))
