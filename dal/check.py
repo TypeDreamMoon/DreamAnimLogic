@@ -107,6 +107,9 @@ class Checker:
         self.const_defs: dict[str, ir.ConstDef] = {}
         self.pending_consts: set[str] = set()
         self.reserved = all_reserved_names()
+        self.later: dict[str, str] = {}   # declared variables, for better messages in constant expressions
+        self.later_fns: set[str] = set()  # functions declared later in the file
+        self.invalid_names: set[str] = set()  # declared with an unusable name; uses are not reported again
 
     # ---- diagnostics ---------------------------------------------------------------
     def err(self, code: str, message: str, pos: Pos) -> None:
@@ -139,6 +142,7 @@ class Checker:
 
     def declare_global(self, name: str, kind: str, pos: Pos, obj: object = None, what: str = "") -> bool:
         if not self.valid_ident(name, pos, what or f"a {kind} name"):
+            self.invalid_names.add(name)
             return False
         prev = self.globals.get(name)
         if prev is not None:
@@ -184,13 +188,23 @@ class Checker:
         else:
             if len(logics) > 1:
                 self.err("DAL3011", "only one 'logic' declaration is allowed per file", logics[1].pos)
-            self.declare_global(logics[0].name, "logic", logics[0].pos, what="a logic name")
+            self.declare_global(logics[0].name, "logic", logics[0].name_pos or logics[0].pos, what="a logic name")
             m.name = logics[0].name
 
         # 1. enums (types are needed by everything else)
         for d in decls:
             if isinstance(d, S.EnumDecl):
                 self.declare_enum(d)
+
+        for d in decls:
+            if isinstance(d, S.ParamDecl):
+                self.later[d.name] = "param"
+            elif isinstance(d, S.InputDecl):
+                self.later[d.name] = "input"
+            elif isinstance(d, S.StateDecl):
+                self.later[d.name] = "state"
+            elif isinstance(d, (S.FnDecl, S.ExternDecl)):
+                self.later_fns.add(d.name)
 
         # 2. consts, in source order
         for d in decls:
@@ -215,7 +229,7 @@ class Checker:
                 self.declare_state(d)
         for d in decls:
             if isinstance(d, S.EntryDecl):
-                self.declare_global(d.name, "entry", d.pos, what="an entry name")
+                self.declare_global(d.name, "entry", d.name_pos or d.pos, what="an entry name")
 
         # 4. bodies
         for d in decls:
@@ -243,7 +257,7 @@ class Checker:
 
     # ---- declarations ---------------------------------------------------------------------------------------
     def declare_enum(self, d: S.EnumDecl) -> None:
-        if not self.declare_global(d.name, "enum", d.pos, what="an enum name"):
+        if not self.declare_global(d.name, "enum", d.name_pos or d.pos, what="an enum name"):
             return
         seen: dict[str, Pos] = {}
         members: list[str] = []
@@ -262,7 +276,7 @@ class Checker:
         self.globals[d.name].obj = et
 
     def declare_const(self, d: S.ConstDecl) -> None:
-        ok = self.declare_global(d.name, "const", d.pos, what="a constant name")
+        ok = self.declare_global(d.name, "const", d.name_pos or d.pos, what="a constant name")
         ty = self.resolve_type(d.type_name, d.type_pos)
         sc = Scope("const")
         e = self.ex(d.init, sc)
@@ -309,21 +323,21 @@ class Checker:
         return zero_value(ty) if v is None else v
 
     def declare_param(self, d: S.ParamDecl) -> None:
-        ok = self.declare_global(d.name, "param", d.pos, what="a parameter name")
+        ok = self.declare_global(d.name, "param", d.name_pos or d.pos, what="a parameter name")
         ty = self.resolve_type(d.type_name, d.type_pos)
         value = self.const_value(d.init, ty, d.pos, f"param '{d.name}'")
         if ok and ty is not ERROR:
             self.module.params.append(ir.ParamDef(d.name, ty, value))
 
     def declare_state(self, d: S.StateDecl) -> None:
-        ok = self.declare_global(d.name, "state", d.pos, what="a state name")
+        ok = self.declare_global(d.name, "state", d.name_pos or d.pos, what="a state name")
         ty = self.resolve_type(d.type_name, d.type_pos)
         value = self.const_value(d.init, ty, d.pos, f"state '{d.name}'")
         if ok and ty is not ERROR:
             self.module.states.append(ir.StateDef(d.name, ty, value))
 
     def declare_input(self, d: S.InputDecl) -> None:
-        ok = self.declare_global(d.name, "input", d.pos, what="an input name")
+        ok = self.declare_global(d.name, "input", d.name_pos or d.pos, what="an input name")
         ty = self.resolve_type(d.type_name, d.type_pos)
         host = None
         value = None
@@ -382,7 +396,7 @@ class Checker:
         return out if ok else None
 
     def declare_fn_sig(self, d: S.FnDecl) -> None:
-        self.declare_global(d.name, "fn", d.pos, what="a function name")
+        self.declare_global(d.name, "fn", d.name_pos or d.pos, what="a function name")
         params = self.declare_params(d.params)
         ret = self.resolve_type(d.ret_name, d.ret_pos)
         if params is not None:
@@ -390,7 +404,7 @@ class Checker:
         self.fn_pos[d.name] = d.pos
 
     def declare_extern(self, d: S.ExternDecl) -> None:
-        self.declare_global(d.name, "extern", d.pos, what="a function name")
+        self.declare_global(d.name, "extern", d.name_pos or d.pos, what="a function name")
         params = self.declare_params(d.params)
         ret = self.resolve_type(d.ret_name, d.ret_pos)
         if params is None:
@@ -499,6 +513,9 @@ class Checker:
             kind, target_ty = "local", loc.ty
         else:
             sym = self.globals.get(s.name)
+            if sym is None and s.name in self.invalid_names:
+                self.ex(s.value, sc)
+                return None
             if sym is None:
                 self.err("DAL3040", f"undefined name '{s.name}'" + self.suggest(s.name, list(self.globals) + sc.visible_names()), name_pos)
                 self.ex(s.value, sc)
@@ -568,11 +585,17 @@ class Checker:
         loc = sc.lookup(name)
         if loc is not None:
             return ir.LocalRef(loc.ty, name)
+        if name in self.invalid_names:
+            return ir.Lit(ERROR, 0)
         if name in BUILTIN_CONSTS:
             c = BUILTIN_CONSTS[name]
             return ir.ConstRef(c.ty, name, c.value)
         sym = self.globals.get(name)
         if sym is None:
+            if name in self.pending_consts:
+                return self.bad("DAL3042", f"constant '{name}' is used before it is defined (constants are evaluated in order)", e.pos)
+            if sc.ctx == "const" and name in self.later:
+                return self.bad("DAL5002", f"a constant expression cannot read {self.later[name]} '{name}'", e.pos)
             if name in BUILTINS or name in CONSTRUCTORS:
                 return self.bad("DAL3031", f"'{name}' is a function; call it as {name}(...)", e.pos)
             cands = list(self.globals) + sc.visible_names() + list(BUILTIN_CONSTS)
@@ -743,6 +766,8 @@ class Checker:
             return ir.Lit(ERROR, 0)
         if sc.lookup(name) is not None:
             return self.bad("DAL3031", f"'{name}' is a variable, not a function", e.pos)
+        if name in self.invalid_names:
+            return ir.Lit(ERROR, 0)
         if name in CONSTRUCTORS:
             sigs = CONSTRUCTORS[name]
             r = resolve_overload(sigs, [a.ty for a in args])
@@ -760,6 +785,8 @@ class Checker:
             args = [self.widen(a) if w else a for a, w in zip(args, widen)]
             return ir.CallBuiltin(b.sigs[idx].ret, name, idx, args)
         sym = self.globals.get(name)
+        if sym is None and sc.ctx == "const" and name in self.later_fns:
+            return self.bad("DAL5002", f"a constant expression cannot call '{name}'; only built-in functions are allowed", e.pos)
         if sym is None:
             cands = list(BUILTINS) + list(CONSTRUCTORS) + [k for k, s in self.globals.items() if s.kind in ("fn", "extern")]
             return self.bad("DAL3040", f"undefined function '{name}'" + self.suggest(name, cands), e.pos)

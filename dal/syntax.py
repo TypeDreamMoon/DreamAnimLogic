@@ -110,6 +110,7 @@ class ReturnStmt(Stmt):
 @dataclass
 class Decl:
     pos: Pos
+    name_pos: Pos | None = field(default=None, kw_only=True)
 
 
 @dataclass

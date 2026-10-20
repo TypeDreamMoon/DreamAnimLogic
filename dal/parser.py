@@ -125,7 +125,7 @@ class Parser:
         kw = self.advance()
         name = self.ident("a logic name")
         self.expect_op(";", "after the logic name")
-        return S.LogicDecl(kw.pos, name.text)
+        return S.LogicDecl(kw.pos, name.text, name_pos=name.pos)
 
     def parse_enum(self) -> S.EnumDecl:
         kw = self.advance()
@@ -142,7 +142,7 @@ class Parser:
                 continue
             break
         self.expect_op("}", "to close the enum")
-        return S.EnumDecl(kw.pos, name.text, members)
+        return S.EnumDecl(kw.pos, name.text, members, name_pos=name.pos)
 
     def parse_const(self) -> S.ConstDecl:
         kw = self.advance()
@@ -152,7 +152,7 @@ class Parser:
         self.expect_op("=", "(a const needs a value)")
         init = self.parse_expr()
         self.expect_op(";", "after the constant")
-        return S.ConstDecl(kw.pos, name.text, type_name, type_pos, init)
+        return S.ConstDecl(kw.pos, name.text, type_name, type_pos, init, name_pos=name.pos)
 
     def parse_param(self) -> S.ParamDecl:
         kw = self.advance()
@@ -164,7 +164,7 @@ class Parser:
             self.advance()
             init = self.parse_expr()
         self.expect_op(";", "after the parameter")
-        return S.ParamDecl(kw.pos, name.text, type_name, type_pos, init)
+        return S.ParamDecl(kw.pos, name.text, type_name, type_pos, init, name_pos=name.pos)
 
     def parse_input(self) -> S.InputDecl:
         kw = self.advance()
@@ -182,7 +182,7 @@ class Parser:
             self.advance()
             default = self.parse_expr()
         self.expect_op(";", "after the input")
-        return S.InputDecl(kw.pos, name.text, type_name, type_pos, binding, default)
+        return S.InputDecl(kw.pos, name.text, type_name, type_pos, binding, default, name_pos=name.pos)
 
     def parse_host_binding(self) -> S.HostBinding:
         h = self.tok
@@ -216,7 +216,7 @@ class Parser:
             self.advance()
             init = self.parse_expr()
         self.expect_op(";", "after the state")
-        return S.StateDecl(kw.pos, name.text, type_name, type_pos, init)
+        return S.StateDecl(kw.pos, name.text, type_name, type_pos, init, name_pos=name.pos)
 
     def parse_params(self) -> list[S.Param]:
         self.expect_op("(", "to open the parameter list")
@@ -241,7 +241,7 @@ class Parser:
         self.expect_op("->", "(functions declare a return type: fn name(...) -> float)")
         ret_name, ret_pos = self.parse_type_name()
         body = self.parse_block()
-        return S.FnDecl(kw.pos, name.text, params, ret_name, ret_pos, body)
+        return S.FnDecl(kw.pos, name.text, params, ret_name, ret_pos, body, name_pos=name.pos)
 
     def parse_extern(self) -> S.ExternDecl:
         kw = self.advance()
@@ -250,7 +250,7 @@ class Parser:
         params = self.parse_params()
         self.expect_op("->", "(extern functions declare a return type)")
         ret_name, ret_pos = self.parse_type_name()
-        decl = S.ExternDecl(kw.pos, name.text, params, ret_name, ret_pos)
+        decl = S.ExternDecl(kw.pos, name.text, params, ret_name, ret_pos, name_pos=name.pos)
         while self.tok.kind == "KEYWORD" and self.tok.text in ("cpp", "include", "py"):
             attr = self.advance()
             s = self.tok
@@ -280,7 +280,7 @@ class Parser:
         name = self.ident("an entry name")
         dt_name, dt_pos = self.parse_dt_param("the entry name")
         body = self.parse_block()
-        return S.EntryDecl(kw.pos, name.text, dt_name, dt_pos, body)
+        return S.EntryDecl(kw.pos, name.text, dt_name, dt_pos, body, name_pos=name.pos)
 
     # ---- statements --------------------------------------------------------
 
