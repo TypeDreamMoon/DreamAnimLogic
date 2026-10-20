@@ -486,7 +486,7 @@ class CppGen:
         L.extend(self.sample_function())
         L.append("")
         u = m.update
-        L.append(f"void {cls}::DalUpdate(const float {u.dt_name if u else 'DeltaSeconds'})")
+        L.append(f"void {cls}::DalUpdate([[maybe_unused]] const float {u.dt_name if u else 'DeltaSeconds'})")
         L.append("{")
         if u is not None:
             L.extend(self.stmts(u.body, 1))
@@ -497,7 +497,7 @@ class CppGen:
         for e in m.entries:
             L.append(f"void {cls}::{e.name}()")
             L.append("{")
-            L.append(f"{T}const float {e.dt_name} = Dal_DeltaSeconds;")
+            L.append(f"{T}[[maybe_unused]] const float {e.dt_name} = Dal_DeltaSeconds;")
             L.extend(self.stmts(e.body, 1))
             L.append("}")
             L.append("")
