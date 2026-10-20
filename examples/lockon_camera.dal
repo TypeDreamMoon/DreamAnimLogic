@@ -1,0 +1,120 @@
+// lockon_camera.dal -- lock-on target selection and combat framing (language v2).
+//
+// An actor component on the player character. Pressing LockOn picks the best target in front of the
+// player (smallest angle, then nearest) from the host's target list; pressing it again lets go. While
+// locked, the control rotation turns towards the target, the spring arm gets longer the farther the
+// target is, and the lock is dropped when the target is gone or has been hidden behind geometry for
+// more than LoseSightAfter seconds. Everything the world is asked (targets, line of sight) is a host
+// query, so this runs in actor logic only.
+
+logic LockOnCamera : actor;
+
+action LockOn: bool;
+
+param MaxDistance: float = 1200.0;       // cm
+param MaxAngle: float = 55.0;            // degrees from the player's forward direction
+param EyeHeight: float = 60.0;           // cm above the actor location
+param TurnSpeed: float = 8.0;            // interp_to speed of the control rotation
+param ArmBase: float = 350.0;
+param ArmPerCm: float = 0.15;            // extra arm length per cm of distance to the target
+param ArmMax: float = 650.0;
+param ArmSpeed: float = 4.0;
+param LoseSightAfter: float = 1.5;       // seconds
+
+input Location: vec3 <- host.actor_location;
+input Rotation: quat <- host.actor_rotation;
+input Control: rotator <- host.control_rotation;
+
+state Locked: bool;
+state TargetId: int = -1;
+state TargetLocation: vec3;
+state Visible: bool;
+state Aim: rotator;
+state ArmLength: float = 350.0;
+state Distance: float;
+state Candidates: int;                   // how many targets were considered by the last search
+
+timer LostSight = 1.5;
+state Counting: bool;
+
+// Lower is better; 1000000 means "not a candidate".
+fn score(origin: vec3, forward: vec3, candidate: vec3, max_distance: float, max_angle: float) -> float {
+    let to_candidate = candidate - origin;
+    let dist = length(to_candidate);
+    let angle = angle_between(forward, to_candidate);
+    if (dist > max_distance || angle > max_angle) {
+        return 1000000.0;
+    }
+    return angle / max_angle + 0.25 * dist / max_distance;
+}
+
+fn drop_lock_state() -> int {
+    return -1;
+}
+
+on input LockOn started {
+    if (Locked) {
+        Locked = false;
+        TargetId = drop_lock_state();
+        Counting = false;
+        stop(LostSight);
+    } else {
+        let eye = Location + vec3(0.0, 0.0, EyeHeight);
+        let forward = rotate(Rotation, vec3(1.0, 0.0, 0.0));
+        var best = -1;
+        var best_score = 1000000.0;
+        var considered = 0;
+        for i in 0..8 {
+            if (i < host.target_count()) {
+                considered += 1;
+                let s = score(eye, forward, host.target_location(i), MaxDistance, MaxAngle);
+                if (s < best_score) {
+                    best_score = s;
+                    best = i;
+                }
+            }
+        }
+        Candidates = considered;
+        if (best >= 0) {
+            Locked = true;
+            TargetId = host.target_id(best);
+            Aim = Control;
+        }
+    }
+}
+
+update(dt) {
+    if (Locked) {
+        let index = host.target_index(TargetId);
+        if (index < 0) {
+            Locked = false;
+            TargetId = drop_lock_state();
+            Counting = false;
+            stop(LostSight);
+        } else {
+            let eye = Location + vec3(0.0, 0.0, EyeHeight);
+            TargetLocation = host.target_location(index);
+            Distance = distance(Location, TargetLocation);
+
+            let sight = host.trace_line(eye, TargetLocation);
+            Visible = !sight.blocking;
+            if (Visible) {
+                Counting = false;
+                stop(LostSight);
+            } else if (!Counting) {
+                Counting = true;
+                start(LostSight, LoseSightAfter);
+            }
+            if (Counting && LostSight.ready) {
+                Locked = false;
+                TargetId = drop_lock_state();
+                Counting = false;
+            } else {
+                Aim = interp_to(Aim, look_at(eye, TargetLocation), dt, TurnSpeed);
+                host.set_control_rotation(Aim);
+                ArmLength = interp_to(ArmLength, clamp(ArmBase + Distance * ArmPerCm, ArmBase, ArmMax), dt, ArmSpeed);
+                host.camera_set_arm_length(ArmLength);
+            }
+        }
+    }
+}

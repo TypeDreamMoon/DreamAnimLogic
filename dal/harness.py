@@ -111,6 +111,7 @@ def random_frames(module: ir.Module, count: int, seed: int = 1) -> list[dict]:
         f["movement_mode"] = rng.randrange(7)
         f["is_grounded"] = rng.random() < 0.6
         f["is_crouching"] = rng.random() < 0.2
+        f["actor_location"] = tuple(rng.uniform(-500, 500) for _ in range(3))
         f["actor_rotation"] = _rand_quat(rng)
         f["control_rotation"] = (rng.uniform(-90, 90), rng.uniform(-180, 180), 0.0)
         for i in module.inputs:

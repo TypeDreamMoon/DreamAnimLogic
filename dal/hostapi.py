@@ -62,6 +62,8 @@ HOST_ITEMS: dict[str, HostItem] = {
                  ue="CharacterMovement->IsMovingOnGround()"),
         HostItem("is_crouching", BOOL, doc="character is crouched",
                  ue="CharacterMovement->IsCrouching()"),
+        HostItem("actor_location", VEC3, unit="cm", doc="world location of the owning actor",
+                 ue="Pawn->GetActorLocation()"),
         HostItem("actor_rotation", QUAT, doc="world rotation of the owning actor",
                  ue="Pawn->GetActorQuat()"),
         HostItem("control_rotation", ROTATOR, unit="deg", doc="controller rotation (pitch, yaw, roll)",
@@ -206,6 +208,7 @@ class HostV0:
     movement_mode = rt.MovementMode.None_
     is_grounded = False
     is_crouching = False
+    actor_location = rt.VEC3_ZERO
     actor_rotation = rt.QUAT_IDENTITY
     control_rotation = rt.ROTATOR_ZERO
 
