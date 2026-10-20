@@ -1,0 +1,388 @@
+"""Typed intermediate representation.
+
+The checker lowers the syntax tree to this IR; both backends and the reference
+interpreter consume only the IR.  Every ``Expr`` carries its resolved type
+``ty``; implicit int -> float conversions are explicit ``ToFloat`` nodes and
+compound assignments are already expanded (``x += e`` is ``x = x + e``).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from .types import EnumType, Type
+
+
+# ---- expressions -----------------------------------------------------------------
+
+@dataclass
+class Expr:
+    ty: Type
+
+
+@dataclass
+class Lit(Expr):
+    value: object          # float / int / bool / Vec2 / Vec3 / Rotator / Quat / enum index (int)
+
+
+@dataclass
+class EnumLit(Expr):
+    member: str
+
+
+@dataclass
+class ConstRef(Expr):
+    name: str
+    value: object
+
+
+@dataclass
+class ParamRef(Expr):
+    name: str
+
+
+@dataclass
+class InputRef(Expr):
+    name: str
+
+
+@dataclass
+class StateRef(Expr):
+    name: str
+
+
+@dataclass
+class LocalRef(Expr):
+    name: str
+
+
+@dataclass
+class Unary(Expr):
+    op: str                # '-' '!'
+    x: Expr
+
+
+@dataclass
+class Binary(Expr):
+    op: str                # + - * / % == != < <= > >= && ||
+    a: Expr
+    b: Expr
+
+
+@dataclass
+class Cond(Expr):
+    c: Expr
+    a: Expr
+    b: Expr
+
+
+@dataclass
+class ToFloat(Expr):
+    x: Expr
+
+
+@dataclass
+class Member(Expr):
+    x: Expr
+    comps: str             # 'x' / 'xy' / 'xyz' ... / 'pitch' / 'yaw' / 'roll'
+
+
+@dataclass
+class Make(Expr):
+    ctor: str              # vec2 vec3 rotator quat
+    args: list[Expr]
+    sig_index: int = 0
+
+
+@dataclass
+class CallFn(Expr):
+    name: str
+    args: list[Expr]
+
+
+@dataclass
+class CallBuiltin(Expr):
+    name: str
+    sig_index: int
+    args: list[Expr]
+
+
+@dataclass
+class CallExtern(Expr):
+    name: str
+    args: list[Expr]
+
+
+# ---- statements ------------------------------------------------------------------------
+
+@dataclass
+class Stmt:
+    pass
+
+
+@dataclass
+class Let(Stmt):
+    name: str
+    ty: Type
+    init: Expr
+    mutable: bool
+
+
+@dataclass
+class Assign(Stmt):
+    kind: str              # 'state' | 'local'
+    name: str
+    value: Expr
+
+
+@dataclass
+class If(Stmt):
+    cond: Expr
+    then: list[Stmt]
+    orelse: list[Stmt]
+
+
+@dataclass
+class Return(Stmt):
+    value: Expr | None
+
+
+# ---- declarations -------------------------------------------------------------------------
+
+@dataclass
+class ConstDef:
+    name: str
+    ty: Type
+    value: object
+    source: str = ""
+
+
+@dataclass
+class ParamDef:
+    name: str
+    ty: Type
+    default: object
+
+
+@dataclass
+class HostUse:
+    item: str
+    arg: str | None = None
+
+
+@dataclass
+class InputDef:
+    name: str
+    ty: Type
+    host: HostUse | None
+    default: object
+
+
+@dataclass
+class StateDef:
+    name: str
+    ty: Type
+    default: object
+
+
+@dataclass
+class FnDef:
+    name: str
+    params: list[tuple[str, Type]]
+    ret: Type
+    body: list[Stmt]
+
+
+@dataclass
+class ExternDef:
+    name: str
+    params: list[tuple[str, Type]]
+    ret: Type
+    cpp: str
+    include: str | None
+    py: str
+
+
+@dataclass
+class UpdateDef:
+    dt_name: str
+    body: list[Stmt]
+
+
+@dataclass
+class EntryDef:
+    name: str
+    dt_name: str
+    body: list[Stmt]
+
+
+@dataclass
+class Module:
+    name: str
+    enums: list[EnumType] = field(default_factory=list)       # user enums only
+    consts: list[ConstDef] = field(default_factory=list)
+    params: list[ParamDef] = field(default_factory=list)
+    inputs: list[InputDef] = field(default_factory=list)
+    states: list[StateDef] = field(default_factory=list)
+    funcs: list[FnDef] = field(default_factory=list)          # topologically ordered: callees first
+    externs: list[ExternDef] = field(default_factory=list)
+    update: UpdateDef | None = None
+    entries: list[EntryDef] = field(default_factory=list)
+    filename: str = "<string>"
+    source_sha256: str = ""
+    standin_source: str = ""                                    # Python stand-in file text (bundled by the Python backend)
+    standin_filename: str = ""
+
+    # lookup helpers -----------------------------------------------------------
+    def find_input(self, name: str) -> InputDef | None:
+        return next((i for i in self.inputs if i.name == name), None)
+
+    def find_state(self, name: str) -> StateDef | None:
+        return next((s for s in self.states if s.name == name), None)
+
+    def find_const(self, name: str) -> ConstDef | None:
+        return next((c for c in self.consts if c.name == name), None)
+
+    def find_fn(self, name: str) -> FnDef | None:
+        return next((f for f in self.funcs if f.name == name), None)
+
+    def find_extern(self, name: str) -> ExternDef | None:
+        return next((e for e in self.externs if e.name == name), None)
+
+    def bodies(self):
+        """All statement lists with an owner label."""
+        for f in self.funcs:
+            yield ("fn " + f.name, f.body)
+        if self.update:
+            yield ("update", self.update.body)
+        for e in self.entries:
+            yield ("entry " + e.name, e.body)
+
+
+# ---- traversal ---------------------------------------------------------------------------------
+
+def children(e: Expr) -> list[Expr]:
+    if isinstance(e, (Unary, ToFloat, Member)):
+        return [e.x]
+    if isinstance(e, Binary):
+        return [e.a, e.b]
+    if isinstance(e, Cond):
+        return [e.c, e.a, e.b]
+    if isinstance(e, (Make, CallFn, CallBuiltin, CallExtern)):
+        return list(e.args)
+    return []
+
+
+def walk_exprs(e: Expr):
+    yield e
+    for c in children(e):
+        yield from walk_exprs(c)
+
+
+def walk_stmt_exprs(stmts: list[Stmt]):
+    """Yield every expression (and sub-expression) in a statement list."""
+    for s in stmts:
+        if isinstance(s, Let):
+            yield from walk_exprs(s.init)
+        elif isinstance(s, Assign):
+            yield from walk_exprs(s.value)
+        elif isinstance(s, If):
+            yield from walk_exprs(s.cond)
+            yield from walk_stmt_exprs(s.then)
+            yield from walk_stmt_exprs(s.orelse)
+        elif isinstance(s, Return) and s.value is not None:
+            yield from walk_exprs(s.value)
+
+
+# ---- text dump (debugging, tests) ----------------------------------------------------------------
+
+def _fmt_value(v) -> str:
+    return repr(v)
+
+
+def dump_expr(e: Expr) -> str:
+    if isinstance(e, Lit):
+        return _fmt_value(e.value)
+    if isinstance(e, EnumLit):
+        return f"{e.ty.name}.{e.member}"
+    if isinstance(e, ConstRef):
+        return f"const:{e.name}"
+    if isinstance(e, ParamRef):
+        return f"param:{e.name}"
+    if isinstance(e, InputRef):
+        return f"input:{e.name}"
+    if isinstance(e, StateRef):
+        return f"state:{e.name}"
+    if isinstance(e, LocalRef):
+        return f"local:{e.name}"
+    if isinstance(e, Unary):
+        return f"({e.op}{dump_expr(e.x)})"
+    if isinstance(e, Binary):
+        return f"({dump_expr(e.a)} {e.op} {dump_expr(e.b)})"
+    if isinstance(e, Cond):
+        return f"({dump_expr(e.c)} ? {dump_expr(e.a)} : {dump_expr(e.b)})"
+    if isinstance(e, ToFloat):
+        return f"float({dump_expr(e.x)})"
+    if isinstance(e, Member):
+        return f"{dump_expr(e.x)}.{e.comps}"
+    if isinstance(e, Make):
+        return f"{e.ctor}[{e.sig_index}]({', '.join(dump_expr(a) for a in e.args)})"
+    if isinstance(e, CallFn):
+        return f"fn:{e.name}({', '.join(dump_expr(a) for a in e.args)})"
+    if isinstance(e, CallBuiltin):
+        return f"{e.name}[{e.sig_index}]({', '.join(dump_expr(a) for a in e.args)})"
+    if isinstance(e, CallExtern):
+        return f"extern:{e.name}({', '.join(dump_expr(a) for a in e.args)})"
+    return f"<{type(e).__name__}>"
+
+
+def dump_stmts(stmts: list[Stmt], indent: int = 1) -> list[str]:
+    pad = "  " * indent
+    out: list[str] = []
+    for s in stmts:
+        if isinstance(s, Let):
+            kw = "var" if s.mutable else "let"
+            out.append(f"{pad}{kw} {s.name}: {s.ty} = {dump_expr(s.init)}")
+        elif isinstance(s, Assign):
+            out.append(f"{pad}{s.kind}:{s.name} = {dump_expr(s.value)}")
+        elif isinstance(s, If):
+            out.append(f"{pad}if {dump_expr(s.cond)}")
+            out.extend(dump_stmts(s.then, indent + 1))
+            if s.orelse:
+                out.append(f"{pad}else")
+                out.extend(dump_stmts(s.orelse, indent + 1))
+        elif isinstance(s, Return):
+            out.append(f"{pad}return" + (f" {dump_expr(s.value)}" if s.value is not None else ""))
+    return out
+
+
+def dump(m: Module) -> str:
+    out = [f"logic {m.name}"]
+    for en in m.enums:
+        out.append(f"enum {en.name} {{{', '.join(en.members)}}}")
+    for c in m.consts:
+        out.append(f"const {c.name}: {c.ty} = {_fmt_value(c.value)}")
+    for p in m.params:
+        out.append(f"param {p.name}: {p.ty} = {_fmt_value(p.default)}")
+    for i in m.inputs:
+        if i.host:
+            h = f"host.{i.host.item}" + (f"({i.host.arg!r})" if i.host.arg is not None else "")
+            out.append(f"input {i.name}: {i.ty} <- {h}")
+        else:
+            out.append(f"input {i.name}: {i.ty} = {_fmt_value(i.default)}")
+    for s in m.states:
+        out.append(f"state {s.name}: {s.ty} = {_fmt_value(s.default)}")
+    for x in m.externs:
+        ps = ", ".join(f"{n}: {t}" for n, t in x.params)
+        out.append(f"extern fn {x.name}({ps}) -> {x.ret}  cpp={x.cpp!r} py={x.py!r}")
+    for f in m.funcs:
+        ps = ", ".join(f"{n}: {t}" for n, t in f.params)
+        out.append(f"fn {f.name}({ps}) -> {f.ret}")
+        out.extend(dump_stmts(f.body))
+    if m.update:
+        out.append(f"update({m.update.dt_name})")
+        out.extend(dump_stmts(m.update.body))
+    for e in m.entries:
+        out.append(f"entry {e.name}({e.dt_name})")
+        out.extend(dump_stmts(e.body))
+    return "\n".join(out) + "\n"
