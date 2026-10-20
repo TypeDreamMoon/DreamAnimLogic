@@ -271,7 +271,14 @@ class HostV1(HostV0):
 
     # ---- events -----------------------------------------------------------------------------------------------
     def poll_events(self) -> list:
-        """Events since the last call, oldest first, as tuples (see EVENTS).  Called once per update."""
+        """Events since the last call, oldest first, as tuples (see EVENTS).  Called once per update.
+
+        Blender adapter: drain ``manager.events`` -- ``{"type": "ended", "montage": M, "interrupted": b}`` becomes
+        ``("montage_ended", M, b)`` and ``"blend_out_started"`` becomes ``("montage_blending_out", M, b)`` -- and turn the
+        notifies of the montage's notify queue (``manager.pending_notifies``) into ``("notify", N)`` for point notifies and
+        ``("notify_begin", N)`` / ``("notify_end", N)`` for notify states.  Input actions come from the 3C input layer
+        (``c3.input``) as ``("input", A, phase, value)``.
+        """
         return []
 
     # ---- commands: character movement ---------------------------------------------------------------------------

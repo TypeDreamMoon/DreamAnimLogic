@@ -80,6 +80,17 @@ class DiagnosticTests(unittest.TestCase):
         self.check(ACTOR + "action A: bool;\naction B: vec2;\ninput X: vec2 <- host.action(A);", ("DAL4022", 4, 30))
         self.check(ACTOR + 'action A: bool;\ninput X: float <- host.action("A");', ("DAL4022", 3, 31))
 
+    def test_handler_parameters_do_not_hide_names(self):
+        # `interrupted` / `value` are the implicit parameters of the handlers; a global of that name would be hidden
+        self.check(ACTOR + "montage M;\nstate interrupted: bool;\non montage_ended M { }", ("DAL3005", 4, 18))
+        self.check(ACTOR + "action A: float;\nstate value: float;\non input A started { }", ("DAL3005", 4, 10))
+        compile_ok(ACTOR + "montage M;\nstate Ended: bool;\non montage_ended M { Ended = interrupted; }")
+
+    def test_names_the_generated_cpp_uses_are_reserved(self):
+        for name in ("DalUpdate", "Dal_X", "DalTargets", "bDalFresh", "Owner", "TickComponent", "Pawn", "DeltaTime"):
+            self.check(ACTOR + f"state {name}: float;", ("DAL3004", 2, 7))
+        compile_ok(ACTOR + "state Dalton: float;\nstate Daly: float;")
+
     def test_hit_values(self):
         self.check(ACTOR + "state S: hit;", ("DAL4023", 2, 10))
         self.check(ACTOR + "state S: float;\nupdate(dt) { let h = host.trace_line(vec3(0.0, 0.0, 0.0), vec3(1.0, 0.0, 0.0)); S = h.point; }", ("DAL4002", 3, 85))
