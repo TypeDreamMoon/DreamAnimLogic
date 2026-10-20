@@ -774,7 +774,7 @@ class Checker:
             seen.add(sec)
         enum_name = f"{d.name}Section"
         et = EnumType(enum_name, members)
-        if self.declare_global(enum_name, "enum", d.name_pos or d.pos, et, what="the section enum of a montage"):
+        if ok and self.declare_global(enum_name, "enum", d.name_pos or d.pos, et, what="the section enum of a montage"):
             self.enums[enum_name] = et
             self.user_enums.append(et)
         mdef = ir.MontageDef(d.name, members[1:], et)
