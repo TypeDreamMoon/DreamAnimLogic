@@ -141,6 +141,8 @@ _b("rotate", ["quat vec3 -> vec3", "rotator vec3 -> vec3"], "FQuat::RotateVector
 _b("unrotate", ["quat vec3 -> vec3", "rotator vec3 -> vec3"], "FQuat::UnrotateVector / FRotator::UnrotateVector")
 _b("delta_rotator", ["rotator rotator -> rotator"], "(A - B).GetNormalized()", doc="delta_rotator(a, b)")
 _b("normalize_rotator", ["rotator -> rotator"], "FRotator::GetNormalized")
+_b("look_at", ["vec3 vec3 -> rotator"], "(To - From).ToOrientationRotator()", doc="look_at(from, to): yaw / pitch that face `to` (roll 0)")
+_b("angle_between", ["vec3 vec3 -> float"], "Acos(Dot(GetSafeNormal(A), GetSafeNormal(B)))", doc="angle in degrees, 0 if either vector is zero")
 
 
 # ---- constructors (lowered to IR 'Make' nodes, not calls) -----------------------------------
@@ -179,7 +181,7 @@ BUILTIN_CONSTS: dict[str, BuiltinConst] = {
 
 
 # Type names and other words a program may not redefine.
-TYPE_NAMES = frozenset({"float", "int", "bool", "vec2", "vec3", "rotator", "quat"})
+TYPE_NAMES = frozenset({"float", "int", "bool", "vec2", "vec3", "rotator", "quat", "hit"})
 
 
 def all_reserved_names() -> frozenset[str]:

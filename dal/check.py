@@ -22,7 +22,7 @@ from .builtins import (
     resolve_overload,
 )
 from .errors import DalError, Diagnostic, Pos, SourceFile
-from .hostapi import HOST_ITEMS
+from .hostapi import COMMANDS, HOST_ITEMS, QUERIES
 from .interp import eval_const
 from .lexer import RESERVED_WORDS
 from .names import CPP_KEYWORDS, PY_RESERVED, reserved_reason
@@ -32,7 +32,11 @@ from .types import (
     BUILTIN_ENUMS,
     ERROR,
     FLOAT,
+    HIT,
+    HIT_MEMBERS,
     INT,
+    MONTAGE,
+    MOVEMENT_MODE,
     QUAT,
     ROTATOR,
     VEC2,
@@ -88,6 +92,9 @@ class Scope:
 
 
 _SWIZZLE = {"x": 0, "y": 1, "z": 2}
+_MONTAGE_STATE = {"playing": BOOL, "active": BOOL, "position": FLOAT}   # Light1.playing ... ('section' has the montage's own enum)
+_HIT_TYPES = {"bool": BOOL, "vec3": VEC3, "float": FLOAT}
+_ACTION_TYPES = (BOOL, FLOAT, VEC2, VEC3)
 
 
 class Checker:
@@ -110,6 +117,7 @@ class Checker:
         self.later: dict[str, str] = {}   # declared variables, for better messages in constant expressions
         self.later_fns: set[str] = set()  # functions declared later in the file
         self.invalid_names: set[str] = set()  # declared with an unusable name; uses are not reported again
+        self.kind = "anim"
 
     # ---- diagnostics ---------------------------------------------------------------
     def err(self, code: str, message: str, pos: Pos) -> None:
@@ -190,11 +198,17 @@ class Checker:
                 self.err("DAL3011", "only one 'logic' declaration is allowed per file", logics[1].pos)
             self.declare_global(logics[0].name, "logic", logics[0].name_pos or logics[0].pos, what="a logic name")
             m.name = logics[0].name
+            self.kind = m.kind = logics[0].kind
 
-        # 1. enums (types are needed by everything else)
+        # 1. enums, montages and actions (types are needed by everything else)
         for d in decls:
             if isinstance(d, S.EnumDecl):
                 self.declare_enum(d)
+            elif isinstance(d, S.MontageDecl):
+                self.declare_montage(d)
+        for d in decls:
+            if isinstance(d, S.ActionDecl):
+                self.declare_action(d)
 
         for d in decls:
             if isinstance(d, S.ParamDecl):
@@ -243,8 +257,13 @@ class Checker:
         for d in decls:
             if isinstance(d, S.EntryDecl):
                 m.entries.append(self.check_entry(d))
-        if m.update is None and not m.entries:
-            self.warn("DAL5091", "the logic has no 'update' and no 'entry'; it never changes anything", Pos(1, 1, 2))
+        for d in decls:
+            if isinstance(d, S.HandlerDecl):
+                h = self.check_handler(d)
+                if h is not None:
+                    m.handlers.append(h)
+        if m.update is None and not m.entries and not m.handlers:
+            self.warn("DAL5091", "the logic has no 'update', no 'entry' and no 'on' handler; it never changes anything", Pos(1, 1, 2))
 
         self.order_functions()
         self.check_standins()
@@ -275,9 +294,16 @@ class Checker:
         self.user_enums.append(et)
         self.globals[d.name].obj = et
 
+    def storable(self, ty: Type, pos: Pos, what: str) -> Type:
+        """A hit result cannot live in state, inputs, params or constants (Unreal cannot reflect it)."""
+        if ty is HIT:
+            self.err("DAL4023", f"{what} cannot have type hit: copy the fields you need (blocking, point, normal, distance, time)", pos)
+            return ERROR
+        return ty
+
     def declare_const(self, d: S.ConstDecl) -> None:
         ok = self.declare_global(d.name, "const", d.name_pos or d.pos, what="a constant name")
-        ty = self.resolve_type(d.type_name, d.type_pos)
+        ty = self.storable(self.resolve_type(d.type_name, d.type_pos), d.type_pos, "a constant")
         sc = Scope("const")
         e = self.ex(d.init, sc)
         e = self.assignable(ty, e, d.init.pos, f"constant '{d.name}'")
@@ -324,21 +350,21 @@ class Checker:
 
     def declare_param(self, d: S.ParamDecl) -> None:
         ok = self.declare_global(d.name, "param", d.name_pos or d.pos, what="a parameter name")
-        ty = self.resolve_type(d.type_name, d.type_pos)
+        ty = self.storable(self.resolve_type(d.type_name, d.type_pos), d.type_pos, "a param")
         value = self.const_value(d.init, ty, d.pos, f"param '{d.name}'")
         if ok and ty is not ERROR:
             self.module.params.append(ir.ParamDef(d.name, ty, value))
 
     def declare_state(self, d: S.StateDecl) -> None:
         ok = self.declare_global(d.name, "state", d.name_pos or d.pos, what="a state name")
-        ty = self.resolve_type(d.type_name, d.type_pos)
+        ty = self.storable(self.resolve_type(d.type_name, d.type_pos), d.type_pos, "a state")
         value = self.const_value(d.init, ty, d.pos, f"state '{d.name}'")
         if ok and ty is not ERROR:
             self.module.states.append(ir.StateDef(d.name, ty, value))
 
     def declare_input(self, d: S.InputDecl) -> None:
         ok = self.declare_global(d.name, "input", d.name_pos or d.pos, what="an input name")
-        ty = self.resolve_type(d.type_name, d.type_pos)
+        ty = self.storable(self.resolve_type(d.type_name, d.type_pos), d.type_pos, "an input")
         host = None
         value = None
         if d.binding is not None:
@@ -357,17 +383,38 @@ class Checker:
             self.err("DAL3020", f"unknown host item 'host.{b.item}'" + self.suggest(b.item, HOST_ITEMS), b.pos)
             return None
         if item.arg and b.arg is None:
-            self.err("DAL3021", f"host.{item.name} needs a name argument, e.g. host.{item.name}(\"Name\")", b.pos)
+            what = "a declared montage" if item.arg_kind == "montage" else 'a quoted name, e.g. host.%s("Name")' % item.name
+            self.err("DAL3021", f"host.{item.name} needs an argument: {what}", b.pos)
             return None
         if not item.arg and b.arg is not None:
             self.err("DAL3021", f"host.{item.name} takes no argument", b.arg_pos or b.pos)
             return None
-        if item.arg and (not b.arg or not b.arg.replace("_", "a").isalnum() or b.arg[0].isdigit()):
-            self.err("DAL3022", f"host argument {b.arg!r} must be an identifier (letters, digits, '_')", b.arg_pos or b.pos)
-            return None
+        if item.arg:
+            apos = b.arg_pos or b.pos
+            if item.arg_kind == "montage":
+                sym = self.globals.get(b.arg or "")
+                if not b.arg_is_ident or sym is None or sym.kind != "montage":
+                    self.err("DAL3023", f"host.{item.name} takes a declared montage (montage Name;), not {b.arg!r}", apos)
+                    return None
+            elif item.arg_kind == "action" and b.arg_is_ident:
+                sym = self.globals.get(b.arg or "")
+                if sym is None or sym.kind != "action":
+                    self.err("DAL3023", f"unknown action '{b.arg}' (declare it: action {b.arg}: type;)", apos)
+                    return None
+            elif b.arg_is_ident:
+                self.err("DAL3023", f"host.{item.name} takes a quoted name, e.g. host.{item.name}(\"{b.arg}\")", apos)
+                return None
+            elif not b.arg or not b.arg.replace("_", "a").isalnum() or b.arg[0].isdigit():
+                self.err("DAL3022", f"host argument {b.arg!r} must be an identifier (letters, digits, '_')", apos)
+                return None
         if ty is ERROR:
             return None
-        if item.ty is not None:
+        if item.section:
+            info = self.globals[b.arg].obj      # type: ignore[index]
+            if ty is not info.enum:
+                self.err("DAL4020", f"host.{item.name}({b.arg}) has type {info.enum.name}, but input '{d.name}' is declared {ty}", d.type_pos)
+                return None
+        elif item.ty is not None:
             if ty is not item.ty:
                 self.err("DAL4020", f"host.{item.name} has type {item.ty}, but input '{d.name}' is declared {ty}", d.type_pos)
                 return None
@@ -375,6 +422,8 @@ class Checker:
             allowed = ", ".join(t.name for t in item.allowed)
             self.err("DAL4020", f"host.{item.name} can be read as {allowed}, not {ty}", d.type_pos)
             return None
+        if item.name == "action":
+            self.use_action(b.arg or "", ty, b.arg_pos or b.pos)
         return ir.HostUse(b.item, b.arg)
 
     def declare_params(self, params: list[S.Param]) -> list[tuple[str, Type]] | None:
@@ -434,7 +483,8 @@ class Checker:
         elif d.dt_name in self.globals:
             self.err("DAL3005", f"'{d.dt_name}' hides the {self.globals[d.dt_name].kind} of the same name", d.dt_pos)
         sc.declare(d.dt_name, Local(FLOAT, False))
-        return ir.UpdateDef(d.dt_name, self.block(d.body, sc))
+        pre = self.block(d.pre, sc)
+        return ir.UpdateDef(d.dt_name, self.block(d.body, sc), pre)
 
     def check_entry(self, d: S.EntryDecl) -> ir.EntryDef:
         sc = Scope("entry")
@@ -481,6 +531,13 @@ class Checker:
             return ir.If(c, self.block(s.then, sc), self.block(s.orelse, sc))
         if isinstance(s, S.ReturnStmt):
             return self.return_stmt(s, sc)
+        if isinstance(s, S.CmdStmt):
+            return self.cmd_stmt(s, sc)
+        if isinstance(s, S.ForStmt):
+            return self.for_stmt(s, sc)
+        if isinstance(s, S.CallStmt):
+            self.err("DAL2011", f"'{s.callee}(...);' is not a statement", s.pos)
+            return None
         raise AssertionError(s)
 
     def let_stmt(self, s: S.LetStmt, sc: Scope) -> ir.Stmt | None:
@@ -578,6 +635,8 @@ class Checker:
             return self.binary(e.op, a, b, e.pos, e.op_pos or e.pos)
         if isinstance(e, S.CondExpr):
             return self.cond(e, sc)
+        if isinstance(e, S.HostCallExpr):
+            return self.host_query(e, sc)
         raise AssertionError(e)
 
     def name_ref(self, e: S.NameRef, sc: Scope) -> ir.Expr:
@@ -621,6 +680,12 @@ class Checker:
             return {"param": ir.ParamRef, "input": ir.InputRef, "state": ir.StateRef}[k](ty, name)
         if k == "enum":
             return self.bad("DAL3030", f"enum '{name}' is a type; write {name}.<Member> to name a value", e.pos)
+        if k == "montage":
+            return self.bad("DAL3030", f"montage '{name}' is not a value: write {name}.playing, {name}.position, {name}.section or "
+                                       f"{name}.<Section>, or pass it to a host.montage_* command", e.pos)
+        if k == "action":
+            return self.bad("DAL3030", f"action '{name}' is not a value: bind it to an input (input X: type <- host.action({name});) "
+                                       f"or handle it with 'on input {name} started'", e.pos)
         if k in ("fn", "extern", "entry"):
             return self.bad("DAL3031", f"'{name}' is a {'function' if k != 'entry' else 'entry'}; " + (f"call it as {name}(...)" if k != "entry" else "entries are called by the animation graph, not from code"), e.pos)
         return self.bad("DAL3040", f"'{name}' cannot be used as a value", e.pos)
@@ -632,9 +697,28 @@ class Checker:
                 return d.ty
         return ERROR
 
+    def montage_member(self, info: ir.MontageDef, e: S.MemberRef, sc: Scope) -> ir.Expr:
+        f = e.field
+        if f in info.sections:
+            return ir.EnumLit(info.enum, f)
+        if f not in _MONTAGE_STATE and f != "section":
+            return self.bad("DAL3032", f"montage {info.name} has no member '{f}'" + self.suggest(f, list(_MONTAGE_STATE) + ["section"] + info.sections)
+                            + f" (state: playing, active, position, section; sections: {', '.join(info.sections) or 'none declared'})", e.field_pos)
+        if sc.ctx in ("fn", "const"):
+            return self.bad("DAL5011" if sc.ctx == "fn" else "DAL5002",
+                            f"{'fn bodies are pure and' if sc.ctx == 'fn' else 'a constant expression'} cannot read the state of montage {info.name}", e.pos)
+        ty = info.enum if f == "section" else _MONTAGE_STATE[f]
+        name = f"DalMontage_{info.name}_{f}"
+        if self.module.find_input(name) is None:
+            self.module.inputs.append(ir.InputDef(name, ty, ir.HostUse(f"montage_{f}", info.name), zero_value(ty)))
+        return ir.InputRef(ty, name)
+
     def member_ref(self, e: S.MemberRef, sc: Scope) -> ir.Expr:
         base = e.base
         if isinstance(base, S.NameRef) and sc.lookup(base.name) is None:
+            sym = self.globals.get(base.name)
+            if sym is not None and sym.kind == "montage":
+                return self.montage_member(sym.obj, e, sc)    # type: ignore[arg-type]
             et = self.enums.get(base.name)
             if et is not None and base.name not in BUILTIN_CONSTS:
                 if e.field in et.members:
@@ -649,6 +733,10 @@ class Checker:
         if b.ty is ERROR:
             return b
         f = e.field
+        if b.ty is HIT:
+            if f in HIT_MEMBERS:
+                return ir.Member(_HIT_TYPES[HIT_MEMBERS[f]], b, f)
+            return self.bad("DAL4030", f"hit has no member '{f}' (members: {', '.join(HIT_MEMBERS)})", e.field_pos)
         if b.ty in (VEC2, VEC3):
             dim = 2 if b.ty is VEC2 else 3
             if not f or any(c not in "xyz" for c in f) or len(f) > 3:
@@ -666,6 +754,181 @@ class Checker:
                 return ir.Member(FLOAT, b, f)
             return self.bad("DAL4030", f"quat has no member '{f}' (members: x, y, z, w)", e.field_pos)
         return self.bad("DAL4030", f"type {b.ty} has no members", e.field_pos)
+
+    # ---- v1 / v2: montages, actions, handlers, commands, queries, loops --------------------------------------------------
+    def declare_montage(self, d: S.MontageDecl) -> None:
+        ok = self.declare_global(d.name, "montage", d.name_pos or d.pos, what="a montage name")
+        members = ["None"]
+        seen: set[str] = set()
+        for sec, spos in d.sections:
+            if sec in seen:
+                self.err("DAL3001", f"section '{sec}' is declared twice in montage {d.name}", spos)
+            elif sec in _MONTAGE_STATE or sec == "section":
+                self.err("DAL3059", f"'{sec}' cannot be a section name: {d.name}.{sec} reads the montage state", spos)
+            elif sec == "None":
+                self.err("DAL3059", "'None' is the implicit 'no section' member", spos)
+            elif sec in CPP_KEYWORDS:
+                self.err("DAL3004", f"'{sec}' cannot be a section name: it is a C++ keyword", spos)
+            else:
+                members.append(sec)
+            seen.add(sec)
+        enum_name = f"{d.name}Section"
+        et = EnumType(enum_name, members)
+        if self.declare_global(enum_name, "enum", d.name_pos or d.pos, et, what="the section enum of a montage"):
+            self.enums[enum_name] = et
+            self.user_enums.append(et)
+        mdef = ir.MontageDef(d.name, members[1:], et)
+        if ok:
+            self.module.montages.append(mdef)
+            self.globals[d.name].obj = mdef
+
+    def declare_action(self, d: S.ActionDecl) -> None:
+        ok = self.declare_global(d.name, "action", d.name_pos or d.pos, what="an action name")
+        ty = self.resolve_type(d.type_name, d.type_pos)
+        if ty is not ERROR and ty not in _ACTION_TYPES:
+            self.err("DAL4021", f"an action has type bool, float, vec2 or vec3, not {ty}", d.type_pos)
+            ty = ERROR
+        if ok and ty is not ERROR:
+            adef = ir.ActionDef(d.name, ty)
+            self.module.actions.append(adef)
+            self.globals[d.name].obj = adef
+
+    def use_action(self, name: str, ty: Type, pos: Pos) -> None:
+        """host.action("Name") / host.action(Name): register the action, or check that its type agrees."""
+        existing = self.module.find_action(name)
+        if existing is None:
+            self.module.actions.append(ir.ActionDef(name, ty))
+        elif existing.ty is not ty:
+            self.err("DAL4022", f"action '{name}' is read as {ty} here but as {existing.ty} elsewhere", pos)
+
+    def check_handler(self, d: S.HandlerDecl) -> ir.HandlerDef | None:
+        pos = d.target_pos or d.pos
+        params: list[tuple[str, Type]] = []
+        if d.event in ("montage_ended", "montage_blending_out"):
+            sym = self.globals.get(d.name)
+            if sym is None or sym.kind != "montage":
+                self.err("DAL3061", f"unknown montage '{d.name}'" + self.suggest(d.name, [k for k, v in self.globals.items() if v.kind == "montage"])
+                         + " (declare it: montage Name;)", pos)
+                return None
+            params = [("interrupted", BOOL)]
+        elif d.event == "input":
+            if self.kind != "actor":
+                self.err("DAL5040", "input events are only available in actor logic (logic Name : actor;): an anim instance has no input component", d.pos)
+                return None
+            adef = self.module.find_action(d.name)
+            if adef is None:
+                self.err("DAL3062", f"unknown action '{d.name}' (declare it: action {d.name}: bool;)", pos)
+                return None
+            params = [("value", adef.ty)]
+        sc = Scope("handler")
+        for n, t in params:
+            sc.declare(n, Local(t, False))
+        body = self.block(d.body, sc)
+        return ir.HandlerDef(d.event, d.name, d.phase, params, body)
+
+    def cmd_stmt(self, s: S.CmdStmt, sc: Scope) -> ir.Stmt | None:
+        pos = s.name_pos or s.pos
+        if sc.ctx in ("fn", "const"):
+            self.err("DAL5042", "host commands are not allowed in functions (functions are pure); issue the command from update, an entry or a handler", pos)
+            return None
+        cmd = COMMANDS.get(s.name)
+        if cmd is None:
+            self.err("DAL3060", f"unknown host command 'host.{s.name}'" + self.suggest(s.name, COMMANDS), pos)
+            for a in s.args:
+                self.ex(a, sc)
+            return None
+        n = len(s.args)
+        if n < cmd.min_args or n > len(cmd.params):
+            want = str(len(cmd.params)) if cmd.min_args == len(cmd.params) else f"{cmd.min_args} to {len(cmd.params)}"
+            self.err("DAL4041", f"host.{s.name}() takes {want} argument(s), got {n}", pos)
+            return None
+        args: list[ir.Expr] = []
+        montage: ir.MontageDef | None = None
+        ok = True
+        for i, spec in enumerate(cmd.params):
+            if i >= n:
+                default = cmd.defaults[i - cmd.min_args]
+                if spec == "section":
+                    if montage is not None:
+                        args.append(ir.EnumLit(montage.enum, "None"))
+                elif isinstance(default, bool):
+                    args.append(ir.Lit(BOOL, default))
+                else:
+                    args.append(ir.Lit(spec, float(default)))
+                continue
+            a = s.args[i]
+            if spec == "montage":
+                sym = self.globals.get(a.name) if isinstance(a, S.NameRef) else None
+                if sym is None or sym.kind != "montage":
+                    self.err("DAL4024", f"argument {i + 1} of host.{s.name}() must be a declared montage (montage Name;)", a.pos)
+                    ok = False
+                    continue
+                montage = sym.obj    # type: ignore[assignment]
+                args.append(ir.MontageRef(MONTAGE, a.name))
+            elif spec == "section":
+                v = self.ex(a, sc)
+                if montage is not None and v.ty is not ERROR and v.ty is not montage.enum:
+                    self.err("DAL4025", f"argument {i + 1} of host.{s.name}() must be a section of montage {montage.name} "
+                                        f"(e.g. {montage.name}.{montage.sections[0] if montage.sections else 'Section'}), not {v.ty}", a.pos)
+                    ok = False
+                args.append(v)
+            else:
+                v = self.ex(a, sc)
+                v = self.assignable(spec, v, a.pos, f"argument {i + 1} of host.{s.name}()")
+                args.append(v)
+        if not ok:
+            return None
+        return ir.Command(s.name, args)
+
+    def host_query(self, e: S.HostCallExpr, sc: Scope) -> ir.Expr:
+        args = [self.ex(a, sc) for a in e.args]
+        q = QUERIES.get(e.name)
+        if q is None:
+            return self.bad("DAL3060", f"unknown host query 'host.{e.name}'" + self.suggest(e.name, QUERIES), e.pos)
+        if self.kind != "actor":
+            return self.bad("DAL5041", f"host.{e.name}() asks the world synchronously and is only available in actor logic (logic Name : actor;); "
+                                       "an anim instance runs on a worker thread", e.pos)
+        if sc.ctx in ("fn", "const"):
+            return self.bad("DAL5042", "host queries are not allowed in functions or constants; call them in update, an entry or a handler "
+                                       "and pass the result as an argument", e.pos)
+        if any(a.ty is ERROR for a in args):
+            return ir.Lit(ERROR, 0)
+        if len(args) != len(q.params):
+            return self.bad("DAL4041", f"host.{e.name}() takes {len(q.params)} argument(s), got {len(args)}", e.pos)
+        conv = [self.assignable(t, a, ae.pos, f"argument {i + 1} of host.{e.name}()") for i, (t, a, ae) in enumerate(zip(q.params, args, e.args))]
+        return ir.HostQuery(q.ret, e.name, conv)
+
+    def for_stmt(self, s: S.ForStmt, sc: Scope) -> ir.Stmt | None:
+        bounds: list[int] = []
+        for label, e in (("start", s.lo), ("end", s.hi)):
+            v = self.ex(e, Scope("const"))
+            if v.ty is ERROR:
+                return None
+            if v.ty is not INT:
+                self.err("DAL4026", f"the {label} of a loop range must be an int constant, not {v.ty}", e.pos)
+                return None
+            folded = self.fold(v, e.pos)
+            if folded is None:
+                return None
+            bounds.append(int(folded))
+        lo, hi = bounds
+        if hi - lo > 64:
+            self.err("DAL5050", f"a loop may run at most 64 times (this one {hi - lo}); loops are for small fixed ranges", s.pos)
+            return None
+        if hi < lo:
+            self.err("DAL5051", f"the loop range {lo}..{hi} is reversed", s.pos)
+            return None
+        vpos = s.var_pos or s.pos
+        if not self.valid_ident(s.var, vpos, "a loop variable"):
+            return None
+        if s.var in self.globals or sc.lookup(s.var) is not None:
+            self.err("DAL3005", f"'{s.var}' hides another name; pick another loop variable", vpos)
+            return None
+        sc.push()
+        sc.declare(s.var, Local(INT, False))
+        body = self.block(s.body, sc)
+        sc.pop()
+        return ir.For(s.var, lo, hi, body)
 
     def unary(self, e: S.UnaryExpr, sc: Scope) -> ir.Expr:
         x = self.ex(e.operand, sc)

@@ -113,6 +113,19 @@ class CallExtern(Expr):
     args: list[Expr]
 
 
+@dataclass
+class MontageRef(Expr):
+    """A declared montage as a command argument (compile-time only)."""
+    name: str
+
+
+@dataclass
+class HostQuery(Expr):
+    """host.trace_line(a, b): a synchronous host query (actor logic only)."""
+    name: str
+    args: list[Expr]
+
+
 # ---- statements ------------------------------------------------------------------------
 
 @dataclass
@@ -145,6 +158,22 @@ class If(Stmt):
 @dataclass
 class Return(Stmt):
     value: Expr | None
+
+
+@dataclass
+class Command(Stmt):
+    """host.montage_play(...): queued; the host runs it after the update.  ``args`` is the full canonical list."""
+    name: str
+    args: list[Expr]
+
+
+@dataclass
+class For(Stmt):
+    """for var in lo..hi { body }  with constant bounds (hi exclusive)."""
+    var: str
+    lo: int
+    hi: int
+    body: list[Stmt]
 
 
 # ---- declarations -------------------------------------------------------------------------
@@ -207,6 +236,29 @@ class ExternDef:
 class UpdateDef:
     dt_name: str
     body: list[Stmt]
+    pre: list[Stmt] = field(default_factory=list)      # timer ticks etc., run before events are handled
+
+
+@dataclass
+class MontageDef:
+    name: str
+    sections: list[str]                                  # declared section names (without the implicit None)
+    enum: EnumType = None                                # type of Montage.section / section arguments  # type: ignore[assignment]
+
+
+@dataclass
+class ActionDef:
+    name: str
+    ty: Type                                             # bool / float / vec2 / vec3
+
+
+@dataclass
+class HandlerDef:
+    event: str                                           # notify notify_begin notify_end montage_ended montage_blending_out input
+    name: str
+    phase: str | None
+    params: list[tuple[str, Type]]                       # implicit locals: interrupted / value
+    body: list[Stmt]
 
 
 @dataclass
@@ -228,6 +280,10 @@ class Module:
     externs: list[ExternDef] = field(default_factory=list)
     update: UpdateDef | None = None
     entries: list[EntryDef] = field(default_factory=list)
+    kind: str = "anim"                                          # 'anim' (UAnimInstance) | 'actor' (UActorComponent)
+    montages: list[MontageDef] = field(default_factory=list)
+    actions: list[ActionDef] = field(default_factory=list)
+    handlers: list[HandlerDef] = field(default_factory=list)
     filename: str = "<string>"
     source_sha256: str = ""
     standin_source: str = ""                                    # Python stand-in file text (bundled by the Python backend)
@@ -249,14 +305,27 @@ class Module:
     def find_extern(self, name: str) -> ExternDef | None:
         return next((e for e in self.externs if e.name == name), None)
 
+    def find_montage(self, name: str) -> "MontageDef | None":
+        return next((m for m in self.montages if m.name == name), None)
+
+    def find_action(self, name: str) -> "ActionDef | None":
+        return next((a for a in self.actions if a.name == name), None)
+
     def bodies(self):
         """All statement lists with an owner label."""
         for f in self.funcs:
             yield ("fn " + f.name, f.body)
         if self.update:
+            yield ("update.pre", self.update.pre)
             yield ("update", self.update.body)
         for e in self.entries:
             yield ("entry " + e.name, e.body)
+        for h in self.handlers:
+            yield (f"on {h.event} {h.name}", h.body)
+
+    @property
+    def uses_commands(self) -> bool:
+        return any(isinstance(n, Command) for _l, body in self.bodies() for n in walk_stmts(body))
 
 
 # ---- traversal ---------------------------------------------------------------------------------
@@ -268,7 +337,7 @@ def children(e: Expr) -> list[Expr]:
         return [e.a, e.b]
     if isinstance(e, Cond):
         return [e.c, e.a, e.b]
-    if isinstance(e, (Make, CallFn, CallBuiltin, CallExtern)):
+    if isinstance(e, (Make, CallFn, CallBuiltin, CallExtern, HostQuery)):
         return list(e.args)
     return []
 
@@ -277,6 +346,17 @@ def walk_exprs(e: Expr):
     yield e
     for c in children(e):
         yield from walk_exprs(c)
+
+
+def walk_stmts(stmts: list[Stmt]):
+    """Yield every statement, nested ones included."""
+    for s in stmts:
+        yield s
+        if isinstance(s, If):
+            yield from walk_stmts(s.then)
+            yield from walk_stmts(s.orelse)
+        elif isinstance(s, For):
+            yield from walk_stmts(s.body)
 
 
 def walk_stmt_exprs(stmts: list[Stmt]):
@@ -292,6 +372,11 @@ def walk_stmt_exprs(stmts: list[Stmt]):
             yield from walk_stmt_exprs(s.orelse)
         elif isinstance(s, Return) and s.value is not None:
             yield from walk_exprs(s.value)
+        elif isinstance(s, Command):
+            for a in s.args:
+                yield from walk_exprs(a)
+        elif isinstance(s, For):
+            yield from walk_stmt_exprs(s.body)
 
 
 # ---- text dump (debugging, tests) ----------------------------------------------------------------
@@ -333,6 +418,10 @@ def dump_expr(e: Expr) -> str:
         return f"{e.name}[{e.sig_index}]({', '.join(dump_expr(a) for a in e.args)})"
     if isinstance(e, CallExtern):
         return f"extern:{e.name}({', '.join(dump_expr(a) for a in e.args)})"
+    if isinstance(e, MontageRef):
+        return f"montage:{e.name}"
+    if isinstance(e, HostQuery):
+        return f"host.{e.name}({', '.join(dump_expr(a) for a in e.args)})"
     return f"<{type(e).__name__}>"
 
 
@@ -353,13 +442,22 @@ def dump_stmts(stmts: list[Stmt], indent: int = 1) -> list[str]:
                 out.extend(dump_stmts(s.orelse, indent + 1))
         elif isinstance(s, Return):
             out.append(f"{pad}return" + (f" {dump_expr(s.value)}" if s.value is not None else ""))
+        elif isinstance(s, Command):
+            out.append(f"{pad}host.{s.name}({', '.join(dump_expr(a) for a in s.args)})")
+        elif isinstance(s, For):
+            out.append(f"{pad}for {s.var} in {s.lo}..{s.hi}")
+            out.extend(dump_stmts(s.body, indent + 1))
     return out
 
 
 def dump(m: Module) -> str:
-    out = [f"logic {m.name}"]
+    out = [f"logic {m.name}" + (f" : {m.kind}" if m.kind != "anim" else "")]
     for en in m.enums:
         out.append(f"enum {en.name} {{{', '.join(en.members)}}}")
+    for mt in m.montages:
+        out.append(f"montage {mt.name} {{{', '.join(mt.sections)}}}")
+    for a in m.actions:
+        out.append(f"action {a.name}: {a.ty}")
     for c in m.consts:
         out.append(f"const {c.name}: {c.ty} = {_fmt_value(c.value)}")
     for p in m.params:
@@ -381,8 +479,15 @@ def dump(m: Module) -> str:
         out.extend(dump_stmts(f.body))
     if m.update:
         out.append(f"update({m.update.dt_name})")
+        if m.update.pre:
+            out.append("  pre:")
+            out.extend(dump_stmts(m.update.pre, 2))
         out.extend(dump_stmts(m.update.body))
     for e in m.entries:
         out.append(f"entry {e.name}({e.dt_name})")
         out.extend(dump_stmts(e.body))
+    for h in m.handlers:
+        ps = ", ".join(f"{n}: {t}" for n, t in h.params)
+        out.append(f"on {h.event} {h.name}" + (f" {h.phase}" if h.phase else "") + (f" ({ps})" if ps else ""))
+        out.extend(dump_stmts(h.body))
     return "\n".join(out) + "\n"

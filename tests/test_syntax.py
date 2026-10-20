@@ -158,7 +158,7 @@ class ParserTests(unittest.TestCase):
         self.assertIn("vec2", msg)
 
     def test_reserved_words_and_keywords_are_not_identifiers(self):
-        self.assertEqual(parse_error("logic A;\nstate for: float;")[0], "DAL2002")
+        self.assertEqual(parse_error("logic A;\nstate while: float;")[0], "DAL2002")
         self.assertEqual(parse_error("logic A;\nstate update: float;")[0], "DAL2003")
 
     def test_host_only_in_input_bindings(self):

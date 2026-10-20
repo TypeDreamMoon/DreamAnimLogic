@@ -187,6 +187,18 @@ namespace DalMath
 	[[nodiscard]] inline FVector3f Unrotate(const FQuat4f& Q, const FVector3f& V) { return Q.UnrotateVector(V); }
 	[[nodiscard]] inline FVector3f Unrotate(const FRotator3f& R, const FVector3f& V) { return R.Quaternion().UnrotateVector(V); }
 	[[nodiscard]] inline FRotator3f NormalizeRotator(const FRotator3f& R) { return R.GetNormalized(); }
+	[[nodiscard]] inline FRotator3f LookAt(const FVector3f& From, const FVector3f& To) { return (To - From).ToOrientationRotator(); }
+
+	[[nodiscard]] inline float AngleBetween(const FVector3f& A, const FVector3f& B)
+	{
+		const FVector3f NA = A.GetSafeNormal();
+		const FVector3f NB = B.GetSafeNormal();
+		if (NA.IsZero() || NB.IsZero())
+		{
+			return 0.0f;
+		}
+		return FMath::RadiansToDegrees(FMath::Acos(FVector3f::DotProduct(NA, NB)));
+	}
 
 	[[nodiscard]] inline FRotator3f DeltaRotator(const FRotator3f& A, const FRotator3f& B)
 	{

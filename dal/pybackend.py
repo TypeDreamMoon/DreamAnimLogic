@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from . import ir
 from .builtins import BUILTIN_CONSTS, BUILTINS
-from .types import BOOL, FLOAT, INT, QUAT, ROTATOR, VEC2, VEC3, EnumType, Type, py_member_name
+from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, EnumType, Type, py_member_name
 
 INDENT = "    "
 
@@ -21,6 +21,7 @@ _AS = {
     VEC3: "_rt.as_vec3",
     ROTATOR: "_rt.as_rotator",
     QUAT: "_rt.as_quat",
+    HIT: "_rt.as_hit",
 }
 
 
@@ -102,7 +103,7 @@ class PyGen:
         if k is ir.Cond:
             return f"({self.x(e.a)} if {self.x(e.c)} else {self.x(e.b)})"
         if k is ir.Member:
-            if len(e.comps) == 1 or e.comps in ("pitch", "yaw", "roll"):
+            if e.comps in HIT_MEMBERS or len(e.comps) == 1 or e.comps in ("pitch", "yaw", "roll"):
                 return f"{self.x(e.x)}.{e.comps}"
             return f"_rt.swizzle({self.x(e.x)}, {e.comps!r})"
         if k is ir.Make:
@@ -123,7 +124,23 @@ class PyGen:
             call = f"{ext.py}({', '.join(unparen(self.x(a)) for a in e.args)})"  # type: ignore[union-attr]
             conv = _AS.get(e.ty, "int")
             return f"{conv}({call})"
+        if k is ir.HostQuery:
+            call = f"self.host.{e.name}({', '.join(unparen(self.x(a)) for a in e.args)})"
+            return f"{_AS.get(e.ty, 'int')}({call})"
         raise AssertionError(k)
+
+    def cmd_arg(self, e: ir.Expr) -> str:
+        """How one command argument is passed to the host: names for montages and sections, runtime values otherwise."""
+        if isinstance(e, ir.MontageRef):
+            return repr(e.name)
+        ty = e.ty
+        if isinstance(ty, EnumType):
+            if ty is MOVEMENT_MODE:
+                return f"_rt.MovementMode({self.x(e)})"
+            if isinstance(e, ir.EnumLit):
+                return repr(None if e.member == "None" else e.member)
+            return f"_rt.section_name(_SEC_{ty.name}, {self.x(e)})"
+        return unparen(self.x(e))
 
     def binary(self, e: ir.Binary) -> str:
         a, b, op = self.x(e.a), self.x(e.b), e.op
@@ -172,6 +189,11 @@ class PyGen:
                     break
             elif isinstance(s, ir.Return):
                 out.append(f"{pad}return" + (f" {unparen(self.x(s.value))}" if s.value is not None else ""))
+            elif isinstance(s, ir.Command):
+                out.append(f"{pad}self._cmd({', '.join([repr(s.name)] + [self.cmd_arg(a) for a in s.args])})")
+            elif isinstance(s, ir.For):
+                out.append(f"{pad}for {s.var} in range({s.lo}, {s.hi}):")
+                out.extend(self.stmts(s.body, depth + 1) or [f"{pad}{INDENT}pass"])
         return out
 
     # ---- module -------------------------------------------------------------------------------
@@ -206,6 +228,12 @@ class PyGen:
                 L.append(f"_K_{c.name} = {py_value(c.ty, c.value)}")
             L.append("")
 
+        if m.montages:
+            L.append("")
+            for md in m.montages:
+                L.append(f"_SEC_{md.enum.name} = ({', '.join(repr(n) for n in md.enum.members)})")
+            L.append("")
+
         for f in m.funcs:
             L.append("")
             L.append(f"def _fn_{f.name}({', '.join(n for n, _ in f.params)}):")
@@ -233,6 +261,15 @@ class PyGen:
             L.append(f"{INDENT*2}({s.name!r}, {s.ty.name!r}),")
         L.append(f"{INDENT})")
         L.append(f"{INDENT}DAL_ENTRIES = ({''.join(repr(e.name) + ', ' for e in m.entries)})")
+        traffic = bool(m.handlers) or m.uses_commands
+        if m.kind != "anim" or m.handlers or m.montages or m.actions:
+            L.append(f"{INDENT}DAL_KIND = {m.kind!r}")
+        if m.handlers:
+            L.append(f"{INDENT}DAL_HANDLERS = (")
+            for k, h in enumerate(m.handlers):
+                vt = h.params[0][1].name if h.event == "input" else ""
+                L.append(f"{INDENT*2}({h.event!r}, {h.name!r}, {h.phase!r}, '_h{k}', {vt!r}),")
+            L.append(f"{INDENT})")
         L.append("")
         L.append(f"{INDENT}def __init__(self, host=None, **params):")
         L.append(f"{INDENT*2}_rt.LogicBase.__init__(self, host, params)")
@@ -241,6 +278,9 @@ class PyGen:
         L.append(f"{INDENT}def reset(self):")
         L.append(f'{INDENT*2}"""Restore every input and state to its declared default."""')
         L.append(f"{INDENT*2}self._dt = 0.0")
+        if traffic:
+            L.append(f"{INDENT*2}self._pending = []")
+            L.append(f"{INDENT*2}self._cmds = []")
         for i in m.inputs:
             L.append(f"{INDENT*2}self.{i.name} = {py_value(i.ty, i.default)}")
         for s in m.states:
@@ -255,10 +295,20 @@ class PyGen:
         for i in bound:
             h = i.host
             assert h is not None
+            if h.item == "montage_section":
+                en = i.ty.name
+                L.append(f"{INDENT*2}if {i.name!r} in ov:")
+                L.append(f"{INDENT*3}self.{i.name} = {en}(int(ov[{i.name!r}]))")
+                L.append(f"{INDENT*2}else:")
+                L.append(f"{INDENT*3}n = h.montage_section({h.arg!r})")
+                L.append(f"{INDENT*3}self.{i.name} = {en}(_SEC_{en}.index(n) if n in _SEC_{en} else 0)")
+                continue
             if h.item == "action":
                 src = f"h.action({h.arg!r}, {i.ty.name!r})"
             elif h.item == "notify":
                 src = f"h.notify({h.arg!r})"
+            elif h.item.startswith("montage_"):
+                src = f"h.{h.item}({h.arg!r})"
             else:
                 src = f"h.{h.item}"
             if isinstance(i.ty, EnumType):
@@ -273,23 +323,37 @@ class PyGen:
         L.append("")
 
         u = m.update
+        dt_name = u.dt_name if u is not None else "dt"
+        L.append(f"{INDENT}def update(self, {dt_name}):")
+        L.append(f'{INDENT*2}"""One frame: sample the inputs, collect events, tick timers, run handlers, run the body, flush commands."""')
+        L.append(f"{INDENT*2}self._sample()")
+        if m.handlers:
+            L.append(f"{INDENT*2}events = self._collect_events()")
+        L.append(f"{INDENT*2}{dt_name} = float({dt_name})")
+        L.append(f"{INDENT*2}self._dt = {dt_name}")
         if u is not None:
-            L.append(f"{INDENT}def update(self, {u.dt_name}):")
-            L.append(f'{INDENT*2}"""One frame: sample the inputs, then run the update body."""')
-            L.append(f"{INDENT*2}self._sample()")
-            L.append(f"{INDENT*2}{u.dt_name} = float({u.dt_name})")
-            L.append(f"{INDENT*2}self._dt = {u.dt_name}")
+            L.extend(self.stmts(u.pre, 2))
+        if m.handlers:
+            L.append(f"{INDENT*2}self._dispatch(events)")
+        if u is not None:
             L.extend(self.stmts(u.body, 2))
-        else:
-            L.append(f"{INDENT}def update(self, dt):")
-            L.append(f"{INDENT*2}self._sample()")
-            L.append(f"{INDENT*2}self._dt = float(dt)")
+        if m.uses_commands:
+            L.append(f"{INDENT*2}self._flush()")
         L.append("")
         for e in m.entries:
             L.append(f"{INDENT}def {e.name}(self):")
             L.append(f'{INDENT*2}"""Entry: runs with the delta time of the last update."""')
             L.append(f"{INDENT*2}{e.dt_name} = self._dt")
             L.extend(self.stmts(e.body, 2) or [f"{INDENT*2}pass"])
+            if m.uses_commands:
+                L.append(f"{INDENT*2}self._flush()")
+            L.append("")
+        for k, h in enumerate(m.handlers):
+            ps = "".join(f", {n}" for n, _t in h.params)
+            what = f"on {h.event} {h.name}" + (f" {h.phase}" if h.phase else "")
+            L.append(f"{INDENT}def _h{k}(self{ps}):")
+            L.append(f"{INDENT*2}# {what}")
+            L.extend(self.stmts(h.body, 2) or [f"{INDENT*2}pass"])
             L.append("")
         return "\n".join(L).rstrip("\n") + "\n"
 

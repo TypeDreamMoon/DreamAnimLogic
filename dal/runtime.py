@@ -155,6 +155,24 @@ class Quat(tuple):
         return f"Quat({self[0]!r}, {self[1]!r}, {self[2]!r}, {self[3]!r})"
 
 
+class Hit(tuple):
+    """Result of a host trace (UE ``FHitResult``, reduced): blocking, point, normal, distance, time (0..1 along the trace)."""
+
+    __slots__ = ()
+
+    def __new__(cls, blocking=False, point=(0.0, 0.0, 0.0), normal=(0.0, 0.0, 0.0), distance=0.0, time=1.0):
+        return tuple.__new__(cls, (bool(blocking), as_vec3(point), as_vec3(normal), float(distance), float(time)))
+
+    blocking = property(lambda s: s[0])
+    point = property(lambda s: s[1])
+    normal = property(lambda s: s[2])
+    distance = property(lambda s: s[3])
+    time = property(lambda s: s[4])
+
+    def __repr__(self):
+        return f"Hit(blocking={self[0]!r}, point={self[1]!r}, normal={self[2]!r}, distance={self[3]!r}, time={self[4]!r})"
+
+
 VEC2_ZERO = Vec2(0.0, 0.0)
 VEC3_ZERO = Vec3(0.0, 0.0, 0.0)
 ROTATOR_ZERO = Rotator(0.0, 0.0, 0.0)
@@ -196,6 +214,10 @@ def as_rotator(v):
 
 def as_quat(v):
     return v if type(v) is Quat else Quat(*v)
+
+
+def as_hit(v):
+    return v if type(v) is Hit else Hit(*v)
 
 
 # ---- arithmetic with defined edge cases ---------------------------------------
@@ -720,6 +742,22 @@ def unrotate(rot, v):
     return _rotate_q(q, v, True)
 
 
+def look_at(src, dst):
+    """(To - From).ToOrientationRotator(): yaw and pitch that face ``dst`` from ``src`` (roll 0)."""
+    dx, dy, dz = dst[0] - src[0], dst[1] - src[1], dst[2] - src[2]
+    yaw = math.atan2(dy, dx) * _RAD_TO_DEG
+    pitch = math.atan2(dz, sqrt(dx * dx + dy * dy)) * _RAD_TO_DEG
+    return Rotator(pitch, yaw, 0.0)
+
+
+def angle_between(a, b):
+    """Angle in degrees between two vectors (UE: Acos(Dot(A.GetSafeNormal(), B.GetSafeNormal()))), 0 if either is zero."""
+    na, nb = normalize(a), normalize(b)
+    if na == VEC3_ZERO or nb == VEC3_ZERO:
+        return 0.0
+    return acos(dot(na, nb)) * _RAD_TO_DEG
+
+
 def normalize_rotator(r):
     """FRotator::GetNormalized: every axis through NormalizeAxis."""
     return Rotator(normalize_axis(r[0]), normalize_axis(r[1]), normalize_axis(r[2]))
@@ -832,7 +870,7 @@ def to_plain(v):
     if isinstance(v, IntEnum):
         return int(v)
     if isinstance(v, tuple):
-        return tuple(float(c) for c in v)
+        return tuple(to_plain(c) if not isinstance(c, (int, float)) or isinstance(c, bool) else float(c) for c in v)
     if isinstance(v, bool):
         return bool(v)
     return v
@@ -854,7 +892,14 @@ _COERCE = {
     "vec3": as_vec3,
     "rotator": as_rotator,
     "quat": as_quat,
+    "hit": as_hit,
 }
+
+
+def section_name(names, value):
+    """Montage section name for an enum value (index 0 is 'None': no section)."""
+    i = int(value)
+    return None if i == 0 else names[i]
 
 
 def coerce_by_name(type_name: str, value):
@@ -876,13 +921,17 @@ class LogicBase:
     DAL_INPUTS: tuple = ()
     DAL_STATES: tuple = ()
     DAL_ENTRIES: tuple = ()
+    DAL_KIND = "anim"
+    DAL_HANDLERS: tuple = ()      # (event, name, phase, method, value type)
 
     def __init__(self, host, params: dict):
-        from .hostapi import HostV0
+        from .hostapi import HostV1
 
-        self.host = host if host is not None else HostV0()
+        self.host = host if host is not None else HostV1()
         self.overrides: dict = {}
         self._dt = 0.0
+        self._pending: list = []      # events posted by the caller
+        self._cmds: list = []         # commands queued during the update
         known = {p[0] for p in self.DAL_PARAMS}
         unknown = sorted(set(params) - known)
         if unknown:
@@ -902,6 +951,48 @@ class LogicBase:
 
     def sample_inputs(self) -> None:
         self._sample()
+
+    # ---- events and commands (v1) ---------------------------------------------------------------------
+    def post_event(self, kind: str, name: str, *args) -> None:
+        """Tell the logic that something happened; its ``on`` handlers run at the start of the next update."""
+        self._pending.append((kind, name) + args)
+
+    def _collect_events(self) -> list:
+        events, self._pending = self._pending, []
+        poll = getattr(self.host, "poll_events", None)
+        if poll is not None:
+            events = events + [tuple(ev) for ev in poll()]
+        return events
+
+    def _dispatch(self, events: list) -> None:
+        for ev in events:
+            kind, name = ev[0], ev[1]
+            for h_kind, h_name, h_phase, method, value_type in self.DAL_HANDLERS:
+                if h_kind != kind or h_name != name:
+                    continue
+                if kind in ("montage_ended", "montage_blending_out"):
+                    getattr(self, method)(bool(ev[2]))
+                elif kind == "input":
+                    if h_phase == ev[2]:
+                        getattr(self, method)(coerce_by_name(value_type, ev[3] if len(ev) > 3 else 0.0))
+                else:
+                    getattr(self, method)()
+
+    def _cmd(self, name: str, *args) -> None:
+        self._cmds.append((name, args))
+
+    def _flush(self) -> None:
+        """Hand the queued commands to the host, in order (Unreal executes them on the game thread)."""
+        cmds, self._cmds = self._cmds, []
+        for name, args in cmds:
+            fn = getattr(self.host, name, None)
+            if fn is not None:
+                fn(*args)
+
+    def take_commands(self) -> list:
+        """The commands queued since the last flush (and forget them) -- for hosts that execute them themselves."""
+        cmds, self._cmds = self._cmds, []
+        return cmds
 
     def call_entry(self, name: str) -> None:
         if name not in self.DAL_ENTRIES:

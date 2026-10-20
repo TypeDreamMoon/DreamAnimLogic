@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 from . import ir
 from .check import check
+from .lower import lower
 from .errors import DalError, Diagnostic, SourceFile
 from .parser import parse_source
 
@@ -36,7 +37,7 @@ def check_source(text: str, filename: str = "<string>", standins=None) -> Compil
     Raises ``DalError`` if the program is not valid.
     """
     source = SourceFile(text, filename)
-    unit = parse_source(source)
+    unit = lower(parse_source(source), source)
     standin = None
     if isinstance(standins, str):
         standin = (os.path.basename(standins), _read_text(standins))

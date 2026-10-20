@@ -50,8 +50,16 @@ class _ErrorType(Type):
 
 ERROR = _ErrorType()
 
+# v1 / v2: the result of a trace.  A value type usable in locals, function parameters and results;
+# it cannot be stored (state / input / param / const) because Unreal cannot reflect it.
+HIT = Type("hit")
+HIT_MEMBERS = {"blocking": "bool", "point": "vec3", "normal": "vec3", "distance": "float", "time": "float"}
+
+# v1: the type of a montage reference in a host command (compile-time only, never a value)
+MONTAGE = Type("montage")
+
 BASIC_TYPES: dict[str, Type] = {
-    t.name: t for t in (FLOAT, INT, BOOL, VEC2, VEC3, ROTATOR, QUAT)
+    t.name: t for t in (FLOAT, INT, BOOL, VEC2, VEC3, ROTATOR, QUAT, HIT)
 }
 
 
@@ -120,4 +128,6 @@ def zero_value(ty: Type):
         return rt.Quat(0.0, 0.0, 0.0, 1.0)
     if isinstance(ty, EnumType):
         return 0
+    if ty is HIT:
+        return rt.Hit(False, rt.Vec3(0.0, 0.0, 0.0), rt.Vec3(0.0, 0.0, 0.0), 0.0, 1.0)
     raise ValueError(f"no zero value for {ty}")

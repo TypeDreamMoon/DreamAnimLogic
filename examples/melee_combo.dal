@@ -1,0 +1,57 @@
+// melee_combo.dal -- a three-hit melee chain with an input buffer and cancel windows (language v1).
+//
+// A character component (logic ... : actor) running on the game thread. The attack montages carry
+//   * a "CancelWindow" notify state: while it is open the next hit may be started,
+//   * a "Hit" notify: the frame the blow lands.
+// Pressing Attack fills a 0.3 s buffer; the combo takes the buffered press when the cancel window is open
+// (or, from standing, at once). The chain ends when the last montage finishes. Walking is slowed down
+// while attacking, and a hit counter feeds the animation graph (Main.Hits).
+
+logic MeleeCombo : actor;
+
+montage Light1 { Windup, Strike, Recover }
+montage Light2 { Windup, Strike, Recover }
+montage Light3 { Windup, Strike, Recover }
+
+action Attack: bool;
+
+param WalkSpeed: float = 600.0;
+param AttackMoveSpeed: float = 120.0;
+param Light3Rate: float = 1.15;
+
+input Grounded: bool <- host.is_grounded;
+
+state Hits: int;
+state WasAttacking: bool;
+
+window Cancel <- notify_state CancelWindow closes_on Light1, Light2, Light3;
+buffer AttackBuffer = 0.3 <- input Attack started;
+
+combo Melee {
+    reset when !Grounded;
+    start on AttackBuffer when Grounded -> Hit1;
+    step Hit1 {
+        play Light1;
+        on AttackBuffer within Cancel -> Hit2;
+    }
+    step Hit2 {
+        play Light2;
+        on AttackBuffer within Cancel -> Hit3;
+    }
+    step Hit3 {
+        play Light3 rate Light3Rate;
+        enter { Hits = Hits + 1; }
+    }
+}
+
+on notify Hit {
+    Hits += 1;
+}
+
+update(dt) {
+    let attacking = Melee != MeleeStep.Idle;
+    if (attacking != WasAttacking) {
+        host.set_max_walk_speed(attacking ? AttackMoveSpeed : WalkSpeed);
+        WasAttacking = attacking;
+    }
+}

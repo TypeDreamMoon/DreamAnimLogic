@@ -11,21 +11,24 @@ KEYWORDS = frozenset(
         "logic", "enum", "const", "param", "input", "state", "fn", "extern",
         "update", "entry", "let", "var", "if", "else", "return", "true",
         "false", "cpp", "include", "py", "host",
+        # v1 / v2: these were reserved words in v0, so no v0 program can use them as names
+        "on", "for", "in", "timer", "window", "buffer", "combo", "montage",
     }
 )
 
-# Words kept free for later language versions (v1/v2).  They may not be used as
-# identifiers today so that adding them later cannot break existing programs.
+# Words kept free for later language versions.  They may not be used as
+# identifiers so that adding them later cannot break existing programs.
+# (v1 also uses a few *contextual* words -- actor, anim, action, step, play, within, after, enter, exit,
+# start, reset, closes_on, notify_state ... -- that are only special at fixed places and stay valid names.)
 RESERVED_WORDS = frozenset(
     {
-        "for", "while", "loop", "break", "continue", "match", "switch", "case",
-        "struct", "use", "import", "event", "on", "emit", "timer", "window",
-        "buffer", "combo", "montage", "cancel", "command", "self", "null",
-        "export", "static", "type", "mut", "as", "in", "do", "yield",
+        "while", "loop", "break", "continue", "match", "switch", "case",
+        "struct", "use", "import", "event", "emit", "cancel", "command",
+        "self", "null", "export", "static", "type", "mut", "as", "do", "yield",
     }
 )
 
-TWO_CHAR_OPS = ("->", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=")
+TWO_CHAR_OPS = ("->", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "..")
 ONE_CHAR_OPS = "+-*/%=<>!?:,;.(){}[]"
 
 INT_MAX = 2**31 - 1
@@ -139,7 +142,7 @@ def tokenize(source: SourceFile) -> list[Token]:
             while j < n and _is_digit(text[j]):
                 j += 1
             is_float = False
-            if j < n and text[j] == ".":
+            if j < n and text[j] == "." and not (j + 1 < n and text[j + 1] == "."):    # '0..8' is a range, not '0.'
                 if j + 1 < n and _is_digit(text[j + 1]):
                     is_float = True
                     j += 1

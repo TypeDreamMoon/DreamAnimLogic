@@ -13,6 +13,10 @@ from .lexer import RESERVED_WORDS, Token, tokenize
 
 ASSIGN_OPS = ("=", "+=", "-=", "*=", "/=")
 
+HANDLER_EVENTS = ("notify", "notify_begin", "notify_end", "montage_ended", "montage_blending_out", "input")
+INPUT_PHASES = ("started", "triggered", "ongoing", "completed", "canceled")
+LOGIC_KINDS = ("anim", "actor")
+
 
 class Parser:
     def __init__(self, source: SourceFile):
@@ -105,13 +109,21 @@ class Parser:
                 "extern": self.parse_extern,
                 "update": self.parse_update,
                 "entry": self.parse_entry,
+                "on": self.parse_handler,
+                "timer": self.parse_timer,
+                "window": self.parse_window,
+                "buffer": self.parse_buffer,
+                "combo": self.parse_combo,
+                "montage": self.parse_montage,
             }.get(t.text)
             if handler is not None:
                 return handler()
+        if t.kind == "IDENT" and t.text == "action" and self.peek().kind == "IDENT":
+            return self.parse_action()
         raise self.error(
             "DAL2001",
-            "expected a declaration (logic, enum, const, param, input, state, fn, extern, update, entry), "
-            f"found {self.describe(t)}",
+            "expected a declaration (logic, enum, const, param, input, state, fn, extern, update, entry, "
+            f"on, timer, window, buffer, combo, montage, action), found {self.describe(t)}",
         )
 
     def parse_type_name(self) -> tuple[str, Pos]:
@@ -124,8 +136,16 @@ class Parser:
     def parse_logic(self) -> S.LogicDecl:
         kw = self.advance()
         name = self.ident("a logic name")
+        kind, kind_pos = "anim", None
+        if self.tok.is_op(":"):
+            self.advance()
+            k = self.tok
+            if k.kind != "IDENT" or k.text not in LOGIC_KINDS:
+                raise self.error("DAL2020", f"expected the logic kind 'anim' or 'actor', found {self.describe(k)}")
+            self.advance()
+            kind, kind_pos = k.text, k.pos
         self.expect_op(";", "after the logic name")
-        return S.LogicDecl(kw.pos, name.text, name_pos=name.pos)
+        return S.LogicDecl(kw.pos, name.text, kind, kind_pos, name_pos=name.pos)
 
     def parse_enum(self) -> S.EnumDecl:
         kw = self.advance()
@@ -196,15 +216,19 @@ class Parser:
         self.advance()
         arg = None
         arg_pos = None
+        arg_is_ident = False
         if self.tok.is_op("("):
             self.advance()
             s = self.tok
-            if s.kind != "STRING":
-                raise self.error("DAL2001", f"expected a string argument, found {self.describe(s)}")
+            if s.kind == "STRING":
+                arg, arg_pos = s.value, s.pos
+            elif s.kind == "IDENT":
+                arg, arg_pos, arg_is_ident = s.text, s.pos, True
+            else:
+                raise self.error("DAL2001", f"expected a string or a declared name, found {self.describe(s)}")
             self.advance()
-            arg, arg_pos = s.value, s.pos
             self.expect_op(")", "after the host item argument")
-        return S.HostBinding(item.text, arg, Pos(h.pos.line, h.pos.col, item.pos.end_col), arg_pos)
+        return S.HostBinding(item.text, arg, Pos(h.pos.line, h.pos.col, item.pos.end_col), arg_pos, arg_is_ident)
 
     def parse_state(self) -> S.StateDecl:
         kw = self.advance()
@@ -300,6 +324,12 @@ class Parser:
             return self.parse_let()
         if t.is_kw("if"):
             return self.parse_if()
+        if t.is_kw("for"):
+            return self.parse_for()
+        if t.is_kw("host"):
+            return self.parse_cmd()
+        if t.kind == "IDENT" and self.peek().is_op("(") and t.text not in RESERVED_WORDS:
+            return self.parse_call_stmt()
         if t.is_kw("return"):
             self.advance()
             value = None
@@ -366,6 +396,260 @@ class Parser:
             else:
                 orelse = self.parse_block()
         return S.IfStmt(kw.pos, cond, then, orelse)
+
+    # ---- v1 / v2 statements ----------------------------------------------------------
+
+    def parse_for(self) -> S.ForStmt:
+        kw = self.advance()
+        var = self.ident("the loop variable")
+        self.expect_kw("in", "after the loop variable")
+        lo = self.parse_additive()
+        self.expect_op("..", "between the loop bounds (for i in 0..8)")
+        hi = self.parse_additive()
+        body = self.parse_block()
+        return S.ForStmt(kw.pos, var.text, lo, hi, body, var.pos)
+
+    def parse_args(self) -> list[S.Expr]:
+        self.expect_op("(", "to open the argument list")
+        args: list[S.Expr] = []
+        if not self.tok.is_op(")"):
+            while True:
+                args.append(self.parse_expr())
+                if self.tok.is_op(","):
+                    self.advance()
+                    continue
+                break
+        self.expect_op(")", "to close the argument list")
+        return args
+
+    def parse_cmd(self) -> S.CmdStmt:
+        kw = self.advance()      # host
+        self.expect_op(".", "after 'host'")
+        name = self.tok
+        if name.kind != "IDENT":
+            raise self.error("DAL2001", f"expected a host command name after 'host.', found {self.describe(name)}")
+        self.advance()
+        args = self.parse_args()
+        self.expect_op(";", "after the host command")
+        return S.CmdStmt(kw.pos, name.text, args, name.pos)
+
+    def parse_call_stmt(self) -> S.CallStmt:
+        name = self.advance()
+        args = self.parse_args()
+        self.expect_op(";", "after the statement")
+        return S.CallStmt(name.pos, name.text, args)
+
+    # ---- v1 / v2 declarations ----------------------------------------------------------
+
+    def is_word(self, text: str) -> bool:
+        return self.tok.kind == "IDENT" and self.tok.text == text
+
+    def at_left_arrow(self) -> bool:
+        return (self.tok.is_op("<") and self.peek().is_op("-") and self.peek().pos.col == self.tok.pos.col + 1
+                and self.peek().pos.line == self.tok.pos.line)
+
+    def parse_handler(self) -> S.HandlerDecl:
+        kw = self.advance()      # on
+        t = self.tok
+        if not (t.kind == "IDENT" or t.is_kw("input")):
+            raise self.error("DAL2001", f"expected an event name after 'on', found {self.describe(t)}")
+        if t.text not in HANDLER_EVENTS:
+            raise self.error("DAL2021", f"unknown event '{t.text}'; events: {', '.join(HANDLER_EVENTS)}")
+        self.advance()
+        name = self.ident("the name the event is about")
+        phase = None
+        if t.text == "input":
+            ph = self.tok
+            if ph.kind != "IDENT" or ph.text not in INPUT_PHASES:
+                raise self.error("DAL2022", f"expected the input phase ({', '.join(INPUT_PHASES)}), found {self.describe(ph)}")
+            self.advance()
+            phase = ph.text
+        body = self.parse_block()
+        return S.HandlerDecl(kw.pos, t.text, name.text, name.pos, phase, body)
+
+    def parse_montage(self) -> S.MontageDecl:
+        kw = self.advance()
+        name = self.ident("a montage name")
+        sections: list[tuple[str, Pos]] = []
+        if self.tok.is_op("{"):
+            self.advance()
+            while not self.tok.is_op("}"):
+                sec = self.ident("a section name")
+                sections.append((sec.text, sec.pos))
+                if self.tok.is_op(","):
+                    self.advance()
+                    continue
+                break
+            self.expect_op("}", "to close the section list")
+        else:
+            self.expect_op(";", "after the montage name")
+        return S.MontageDecl(kw.pos, name.text, sections, name_pos=name.pos)
+
+    def parse_action(self) -> S.ActionDecl:
+        kw = self.advance()      # action
+        name = self.ident("an action name")
+        self.expect_op(":", "after the action name")
+        type_name, type_pos = self.parse_type_name()
+        self.expect_op(";", "after the action")
+        return S.ActionDecl(kw.pos, name.text, type_name, type_pos, name_pos=name.pos)
+
+    def parse_timer(self) -> S.TimerDecl:
+        kw = self.advance()
+        name = self.ident("a timer name")
+        duration = None
+        if self.tok.is_op("="):
+            self.advance()
+            duration = self.parse_expr()
+        self.expect_op(";", "after the timer")
+        return S.TimerDecl(kw.pos, name.text, duration, name_pos=name.pos)
+
+    def parse_window(self) -> S.WindowDecl:
+        kw = self.advance()
+        name = self.ident("a window name")
+        notify = None
+        notify_pos = None
+        closes: list[tuple[str, Pos]] = []
+        if self.at_left_arrow():
+            self.advance()
+            self.advance()
+            if not self.is_word("notify_state"):
+                raise self.error("DAL2001", f"expected 'notify_state <name>' after '<-', found {self.describe(self.tok)}")
+            self.advance()
+            n = self.ident("the notify state name")
+            notify, notify_pos = n.text, n.pos
+        if self.is_word("closes_on"):
+            self.advance()
+            while True:
+                m = self.ident("a montage name")
+                closes.append((m.text, m.pos))
+                if self.tok.is_op(","):
+                    self.advance()
+                    continue
+                break
+        self.expect_op(";", "after the window")
+        return S.WindowDecl(kw.pos, name.text, notify, notify_pos, closes, name_pos=name.pos)
+
+    def parse_buffer(self) -> S.BufferDecl:
+        kw = self.advance()
+        name = self.ident("a buffer name")
+        self.expect_op("=", "(a buffer needs its window length in seconds)")
+        duration = self.parse_additive()
+        if not self.at_left_arrow():
+            raise self.error("DAL2001", f"expected '<- input <Action> <phase>' after the buffer length, found {self.describe(self.tok)}")
+        self.advance()
+        self.advance()
+        triggers: list[S.BufferTrigger] = []
+        while True:
+            self.expect_kw("input", "(buffers are filled by input events)")
+            act = self.ident("an action name")
+            ph = self.tok
+            if ph.kind != "IDENT" or ph.text not in INPUT_PHASES:
+                raise self.error("DAL2022", f"expected the input phase ({', '.join(INPUT_PHASES)}), found {self.describe(ph)}")
+            self.advance()
+            triggers.append(S.BufferTrigger(act.text, ph.text, act.pos))
+            if self.tok.is_op(","):
+                self.advance()
+                continue
+            break
+        when = None
+        if self.is_word("when"):
+            self.advance()
+            when = self.parse_expr()
+        self.expect_op(";", "after the buffer")
+        return S.BufferDecl(kw.pos, name.text, duration, triggers, when, name_pos=name.pos)
+
+    def parse_combo_rule(self, first: Token) -> S.ComboRule:
+        """[on Buffer] [within Window] [when expr] -> Target ;   (``first`` is the rule's first token, already consumed)"""
+        trigger = trigger_pos = within = within_pos = when = None
+        if first.is_kw("on"):
+            t = self.ident("a buffer name")
+            trigger, trigger_pos = t.text, t.pos
+        elif first.kind == "IDENT" and first.text == "when":
+            when = self.parse_expr()
+        if when is None and self.is_word("within"):
+            self.advance()
+            w = self.ident("a window name")
+            within, within_pos = w.text, w.pos
+        if when is None and self.is_word("when"):
+            self.advance()
+            when = self.parse_expr()
+        self.expect_op("->", "(a combo rule ends with '-> Step;')")
+        target = self.ident("a step name")
+        self.expect_op(";", "after the combo rule")
+        return S.ComboRule(trigger, trigger_pos, within, within_pos, when, target.text, target.pos, first.pos)
+
+    def parse_combo(self) -> S.ComboDecl:
+        kw = self.advance()
+        name = self.ident("a combo name")
+        self.expect_op("{", "after the combo name")
+        combo = S.ComboDecl(kw.pos, name.text, name_pos=name.pos)
+        while not self.tok.is_op("}"):
+            t = self.tok
+            if t.kind == "EOF":
+                raise self.error("DAL2001", "expected '}' to close the combo, found end of file")
+            if t.kind == "IDENT" and t.text == "reset":
+                self.advance()
+                if not self.is_word("when"):
+                    raise self.error("DAL2001", f"expected 'when <condition>' after 'reset', found {self.describe(self.tok)}")
+                self.advance()
+                combo.reset_when = self.parse_expr()
+                self.expect_op(";", "after the reset rule")
+            elif t.kind == "IDENT" and t.text == "start":
+                self.advance()
+                first = self.advance() if (self.tok.is_kw("on") or self.is_word("when")) else None
+                if first is None:
+                    raise self.error("DAL2001", f"expected 'on <buffer>' or 'when <condition>' after 'start', found {self.describe(self.tok)}")
+                combo.starts.append(self.parse_combo_rule(first))
+            elif t.kind == "IDENT" and t.text == "step":
+                combo.steps.append(self.parse_combo_step())
+            else:
+                raise self.error("DAL2001", f"expected 'start', 'step' or 'reset' in a combo, found {self.describe(t)}")
+        self.advance()
+        return combo
+
+    def parse_combo_step(self) -> S.ComboStep:
+        kw = self.advance()      # step
+        name = self.ident("a step name")
+        self.expect_op("{", "after the step name")
+        step = S.ComboStep(name.text, name.pos)
+        while not self.tok.is_op("}"):
+            t = self.tok
+            if t.kind == "EOF":
+                raise self.error("DAL2001", "expected '}' to close the step, found end of file")
+            if t.kind == "IDENT" and t.text == "play":
+                self.advance()
+                m = self.ident("a montage name")
+                play = S.ComboPlay(m.text, m.pos)
+                while self.tok.kind == "IDENT" and self.tok.text in ("rate", "from"):
+                    word = self.advance().text
+                    value = self.parse_expr()
+                    if word == "rate":
+                        play.rate = value
+                    else:
+                        play.section = value
+                self.expect_op(";", "after 'play'")
+                step.play = play
+            elif t.is_kw("on") or (t.kind == "IDENT" and t.text == "when"):
+                self.advance()
+                step.rules.append(self.parse_combo_rule(t))
+            elif t.kind == "IDENT" and t.text == "after":
+                self.advance()
+                seconds = self.parse_expr()
+                self.expect_op("->", "(a timeout rule ends with '-> Step;')")
+                target = self.ident("a step name")
+                self.expect_op(";", "after the timeout rule")
+                step.after.append((seconds, target.text, target.pos))
+            elif t.kind == "IDENT" and t.text in ("enter", "exit"):
+                self.advance()
+                block = self.parse_block()
+                if t.text == "enter":
+                    step.enter = block
+                else:
+                    step.exit = block
+            else:
+                raise self.error("DAL2001", f"expected play, on, when, after, enter or exit in a step, found {self.describe(t)}")
+        self.advance()
+        return step
 
     # ---- expressions -------------------------------------------------------
 
@@ -463,10 +747,25 @@ class Parser:
             self.advance()
             return S.NameRef(t.pos, t.text)
         if t.is_kw("host"):
+            if self.peek().is_op(".") and self.peek(2).kind == "IDENT" and self.peek(3).is_op("("):
+                self.advance()
+                self.advance()
+                name = self.advance()
+                self.advance()
+                args: list[S.Expr] = []
+                if not self.tok.is_op(")"):
+                    while True:
+                        args.append(self.parse_expr())
+                        if self.tok.is_op(","):
+                            self.advance()
+                            continue
+                        break
+                self.expect_op(")", "to close the argument list")
+                return S.HostCallExpr(t.pos, name.text, args)
             raise self.error(
                 "DAL2012",
                 "host values are not used directly in expressions; bind one to an input: "
-                "input Name: type <- host.item;",
+                "input Name: type <- host.item;  (host queries take arguments: host.trace_line(a, b))",
             )
         if t.is_op("("):
             self.advance()

@@ -14,7 +14,8 @@ from typing import Callable
 from . import ir
 from . import runtime as rt
 from .builtins import BUILTINS, CONSTRUCTORS
-from .types import BOOL, FLOAT, INT, QUAT, ROTATOR, VEC2, VEC3, EnumType, Type, zero_value
+from .hostapi import HostV1
+from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, EnumType, Type, zero_value
 
 
 class InterpError(Exception):
@@ -46,7 +47,21 @@ def coerce(ty: Type, v):
         return rt.as_quat(v)
     if isinstance(ty, EnumType):
         return int(v)
+    if ty is HIT:
+        return rt.as_hit(v)
     raise InterpError(f"cannot coerce to {ty}")
+
+
+def command_arg(expr: ir.Expr, value):
+    """What the host receives for one command argument: names for montages and sections, plain runtime values otherwise."""
+    if isinstance(expr, ir.MontageRef):
+        return expr.name
+    ty = expr.ty
+    if isinstance(ty, EnumType):
+        if ty is MOVEMENT_MODE:
+            return rt.MovementMode(int(value))
+        return None if int(value) == 0 else ty.members[int(value)]       # a montage section (0 is 'None')
+    return value
 
 
 class Evaluator:
@@ -108,6 +123,12 @@ class Evaluator:
             if fn is None:
                 raise InterpError(f"extern fn {e.name} has no stand-in")
             return coerce(e.ty, fn(*[self.ev(a, env) for a in e.args]))
+        if k is ir.HostQuery:
+            if self.owner is None:
+                raise InterpError("host queries need a running logic")
+            return self.owner.host_query(e, [self.ev(a, env) for a in e.args])
+        if k is ir.MontageRef:
+            return e.name
         raise InterpError(f"cannot evaluate {k.__name__}")
 
     def binary(self, e: ir.Binary, env: dict):
@@ -154,6 +175,8 @@ class Evaluator:
     def member(self, e: ir.Member, env: dict):
         v = self.ev(e.x, env)
         comps = e.comps
+        if comps in HIT_MEMBERS:
+            return getattr(v, comps)
         if len(comps) == 1 or comps in ("pitch", "yaw", "roll"):
             return v[_COMPS[comps]]
         picked = [v[_COMPS[c]] for c in comps]
@@ -178,6 +201,13 @@ class Evaluator:
                     self.run_block(s.orelse, env)
             elif k is ir.Return:
                 raise _ReturnValue(None if s.value is None else self.ev(s.value, env))
+            elif k is ir.Command:
+                self.owner.emit_command(s.name, [command_arg(a, self.ev(a, env)) for a in s.args])
+            elif k is ir.For:
+                for i in range(s.lo, s.hi):
+                    env[s.var] = i
+                    self.run_block(s.body, env)
+                env.pop(s.var, None)
 
     def call_fn(self, fn: ir.FnDef, args: list):
         env = {n: a for (n, _), a in zip(fn.params, args)}
@@ -203,10 +233,12 @@ class Interpreter:
 
     def __init__(self, module: ir.Module, host=None, externs: dict[str, Callable] | None = None, **params):
         self.module = module
-        self.host = host
+        self.host = host if host is not None else HostV1()
         self.overrides: dict[str, object] = {}
         self.values: dict[str, object] = {}
         self._dt = 0.0
+        self._pending: list[tuple] = []
+        self._cmds: list[tuple] = []
         self._params = {}
         for p in module.params:
             self._params[p.name] = p.default
@@ -226,6 +258,38 @@ class Interpreter:
         for s in self.module.states:
             self.values[s.name] = s.default
         self._dt = 0.0
+        self._pending = []
+        self._cmds = []
+
+    # ---- host traffic ------------------------------------------------------------------------------
+    def emit_command(self, name: str, args: list) -> None:
+        self._cmds.append((name, tuple(args)))
+
+    def host_query(self, e: ir.HostQuery, args: list):
+        fn = getattr(self.host, e.name)
+        return coerce(e.ty, fn(*args))
+
+    def post_event(self, kind: str, name: str, *args) -> None:
+        self._pending.append((kind, name) + args)
+
+    def _collect_events(self) -> list[tuple]:
+        events, self._pending = self._pending, []
+        poll = getattr(self.host, "poll_events", None)
+        if poll is not None:
+            events = events + [tuple(ev) for ev in poll()]
+        return events
+
+    def flush(self) -> None:
+        cmds, self._cmds = self._cmds, []
+        for name, args in cmds:
+            fn = getattr(self.host, name, None)
+            if fn is not None:
+                fn(*args)
+
+    def take_commands(self) -> list[tuple]:
+        """The commands queued since the last flush (and forget them) -- for hosts that execute them themselves."""
+        cmds, self._cmds = self._cmds, []
+        return cmds
 
     # the generated class names these the same way
     def set_input(self, name: str, value) -> None:
@@ -242,26 +306,58 @@ class Interpreter:
             if i.name in self.overrides:
                 self.values[i.name] = coerce(i.ty, self.overrides[i.name])
                 continue
-            if h is None:
-                continue
             item = i.host.item
             if item == "action":
                 raw = h.action(i.host.arg, i.ty.name)
             elif item == "notify":
                 raw = h.notify(i.host.arg)
+            elif item == "montage_section":
+                name = h.montage_section(i.host.arg)
+                raw = i.ty.members.index(name) if name in i.ty.members else 0    # type: ignore[attr-defined]
+            elif item.startswith("montage_"):
+                raw = getattr(h, item)(i.host.arg)
             else:
                 raw = getattr(h, item)
             self.values[i.name] = coerce(i.ty, raw)
 
+    # ---- events -------------------------------------------------------------------------------------
+    def _dispatch(self, events: list[tuple]) -> None:
+        for ev in events:
+            kind, name = ev[0], ev[1]
+            for h in self.module.handlers:
+                if h.event != kind or h.name != name:
+                    continue
+                env: dict = {}
+                if kind in ("montage_ended", "montage_blending_out"):
+                    env["interrupted"] = bool(ev[2])
+                elif kind == "input":
+                    if h.phase != ev[2]:
+                        continue
+                    env["value"] = coerce(h.params[0][1], ev[3] if len(ev) > 3 else 0.0)
+                try:
+                    self.ev.run_block(h.body, env)
+                except _ReturnValue:
+                    pass
+
+    # ---- running ---------------------------------------------------------------------------------------
     def update(self, dt: float) -> None:
+        """sample inputs, collect events, tick timers, run handlers, run the body, flush the commands."""
         self.sample_inputs()
+        events = self._collect_events() if self.module.handlers else []
         self._dt = float(dt)
         u = self.module.update
+        if u is not None:
+            try:
+                self.ev.run_block(u.pre, {u.dt_name: self._dt})
+            except _ReturnValue:
+                pass
+        self._dispatch(events)
         if u is not None:
             try:
                 self.ev.run_block(u.body, {u.dt_name: self._dt})
             except _ReturnValue:
                 pass
+        self.flush()
 
     def call_entry(self, name: str) -> None:
         for e in self.module.entries:
@@ -270,6 +366,7 @@ class Interpreter:
                     self.ev.run_block(e.body, {e.dt_name: self._dt})
                 except _ReturnValue:
                     pass
+                self.flush()
                 return
         raise InterpError(f"no entry {name!r}")
 

@@ -8,9 +8,16 @@ A *frame* is a plain dict::
      "actions": {"Move": (0.0, 1.0)},                      # host.action("Move")
      "notifies": {"Footstep": True},                       # host.notify("Footstep")
      "free": {"Aim": True},                                # inputs without a host binding
-     "calls": ["RefreshLean"]}                             # entries to call after update
+     "calls": ["RefreshLean"],                             # entries to call after update
+     # v1 / v2
+     "events": [("notify", "Hit"), ("montage_ended", "Light1", False), ("input", "Attack", "started", 1.0)],
+     "montages": {"Light1": {"playing": True, "position": 0.4, "section": "Strike"}},
+     "targets": [(7, (100.0, 0.0, 0.0))],
+     "world": {"ground_z": 0.0, "spheres": [((0.0, 0.0, 100.0), 30.0)]}}
 
-The same frame sequence drives the C++ consistency checks later (log the dict as JSON).
+The same frame sequence drives the C++ consistency checks (``tests/cpp_driver.py``).  Besides the inputs
+and states, every frame's snapshot carries ``"__cmds__"``: the host commands the logic issued that frame, so
+command sequences are compared too.
 """
 
 from __future__ import annotations
@@ -21,35 +28,30 @@ from typing import Callable
 
 from . import ir
 from . import runtime as rt
-from .hostapi import HOST_ITEMS, HostV0
+from .hostapi import HOST_ITEMS
+from .mockhost import MockHost
 from .interp import Interpreter
 from .pybackend import generate_python, load_class
 from .types import BOOL, FLOAT, INT, QUAT, ROTATOR, VEC2, VEC3, EnumType, Type
 
 
-class ScriptedHost(HostV0):
-    """A host that replays one frame dict at a time."""
-
-    def __init__(self) -> None:
-        self._actions: dict = {}
-        self._notifies: dict = {}
+class ScriptedHost(MockHost):
+    """A host that replays one frame dict at a time and records the commands it is given."""
 
     def load(self, frame: dict) -> None:
         for name in HOST_ITEMS:
-            if name in ("action", "notify"):
+            if name in ("action", "notify") or name.startswith("montage_"):
                 continue
             if name in frame:
                 setattr(self, name, frame[name])
         self._actions = frame.get("actions", {})
         self._notifies = frame.get("notifies", {})
-
-    def action(self, name: str, ty: str):
-        if name in self._actions:
-            return self._actions[name]
-        return super().action(name, ty)
-
-    def notify(self, name: str) -> bool:
-        return bool(self._notifies.get(name, False))
+        self.events = [tuple(e) for e in frame.get("events", [])]
+        self.montages = dict(frame.get("montages", {}))
+        self.targets = [(tid, tuple(loc)) for tid, loc in frame.get("targets", [])]
+        world = frame.get("world", {})
+        self.ground_z = world.get("ground_z")
+        self.spheres = [(tuple(c), r) for c, r in world.get("spheres", [])]
 
 
 def load_standins(module: ir.Module) -> dict[str, Callable]:
@@ -120,8 +122,35 @@ def random_frames(module: ir.Module, count: int, seed: int = 1) -> list[dict]:
                 f["notifies"][i.host.arg] = rng.random() < 0.25
         if module.entries:
             f["calls"] = [e.name for e in module.entries if rng.random() < 0.6]
+        if module.handlers:
+            f["events"] = _random_events(module, rng)
+        if module.montages:
+            f["montages"] = {
+                md.name: {"playing": rng.random() < 0.5, "active": rng.random() < 0.6, "position": rng.uniform(0.0, 2.0),
+                          "section": rng.choice([None] + md.sections)}
+                for md in module.montages
+            }
+        if module.kind == "actor":
+            f["targets"] = [(rng.randrange(1, 50), tuple(rng.uniform(-500, 500) for _ in range(3))) for _ in range(rng.randrange(0, 5))]
+            f["world"] = {"ground_z": rng.choice([None, 0.0, -50.0]),
+                          "spheres": [(tuple(rng.uniform(-300, 300) for _ in range(3)), rng.uniform(10, 80)) for _ in range(rng.randrange(0, 3))]}
         frames.append(f)
     return frames
+
+
+def _random_events(module: ir.Module, rng: random.Random) -> list[tuple]:
+    out: list[tuple] = []
+    for _ in range(rng.choice([0, 0, 1, 1, 2, 3])):
+        h = rng.choice(module.handlers)
+        if h.event in ("notify", "notify_begin", "notify_end"):
+            out.append((h.event, h.name))
+        elif h.event in ("montage_ended", "montage_blending_out"):
+            out.append((h.event, h.name, rng.random() < 0.5))
+        else:
+            ty = h.params[0][1]
+            value = _rand_value(rng, ty, 1.0)
+            out.append(("input", h.name, h.phase, value))
+    return out
 
 
 # ---- running -----------------------------------------------------------------------------------
@@ -129,6 +158,13 @@ def random_frames(module: ir.Module, count: int, seed: int = 1) -> list[dict]:
 def _apply_free(target, frame: dict) -> None:
     for name, value in frame.get("free", {}).items():
         target.set_input(name, value)
+
+
+def _snapshot(obj, host: ScriptedHost) -> dict:
+    snap = obj.snapshot()
+    snap["__cmds__"] = tuple(host.calls)
+    host.calls.clear()
+    return snap
 
 
 def run_interpreter(module: ir.Module, frames: list[dict], **params) -> list[dict]:
@@ -141,7 +177,7 @@ def run_interpreter(module: ir.Module, frames: list[dict], **params) -> list[dic
         it.update(f["dt"])
         for name in f.get("calls", []):
             it.call_entry(name)
-        out.append(it.snapshot())
+        out.append(_snapshot(it, host))
     return out
 
 
@@ -156,7 +192,7 @@ def run_python(module: ir.Module, frames: list[dict], source: str | None = None,
         obj.update(f["dt"])
         for name in f.get("calls", []):
             obj.call_entry(name)
-        out.append(obj.snapshot())
+        out.append(_snapshot(obj, host))
     return out
 
 
