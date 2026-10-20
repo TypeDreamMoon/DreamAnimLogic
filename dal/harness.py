@@ -126,11 +126,12 @@ def random_frames(module: ir.Module, count: int, seed: int = 1) -> list[dict]:
         if module.handlers:
             f["events"] = _random_events(module, rng)
         if module.montages:
-            f["montages"] = {
-                md.name: {"playing": rng.random() < 0.5, "active": rng.random() < 0.6, "position": rng.uniform(0.0, 2.0),
-                          "section": rng.choice([None] + md.sections)}
-                for md in module.montages
-            }
+            f["montages"] = {}
+            for md in module.montages:
+                playing = rng.random() < 0.5                     # a section exists only while the montage plays; playing implies active
+                f["montages"][md.name] = {"playing": playing, "active": playing or rng.random() < 0.3,
+                                          "position": rng.uniform(0.0, 2.0),
+                                          "section": rng.choice(md.sections) if playing and md.sections else None}
         if module.kind == "actor":
             f["targets"] = [(rng.randrange(1, 50), tuple(rng.uniform(-500, 500) for _ in range(3))) for _ in range(rng.randrange(0, 5))]
             f["world"] = {"ground_z": rng.choice([None, 0.0, -50.0]),

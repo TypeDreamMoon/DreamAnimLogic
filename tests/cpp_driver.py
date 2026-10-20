@@ -1,9 +1,15 @@
 """Build and run generated DAL C++ against the stand-in engine headers in tests/cpp_stub.
 
-``build_and_run(module, frames)`` writes the generated sources, a driver that replays the frames through
-``NativeUpdateAnimation`` / ``NativeThreadSafeUpdateAnimation`` (and the entries), compiles everything
-with whatever C++ compiler is available and returns the per-frame states printed by the program in the
-same layout as ``LogicBase.snapshot()``.  ``find_compiler()`` returns None when there is none.
+``build_and_run(module, frames)`` writes the generated sources, a driver that replays the frames through the
+generated class (``TickComponent`` for actor logic; ``NativeUpdateAnimation`` / ``NativeThreadSafeUpdateAnimation``
+and the entries for anim logic), compiles everything with whatever C++ compiler is available and returns the
+per-frame states printed by the program in the same layout as ``LogicBase.snapshot()``, plus ``"__cmds__"``: the
+host effects the generated code produced.  ``find_compiler()`` returns None when there is none.
+
+Events of a frame (``"events"``) are delivered the way the engine delivers them: the montage / notify delegates of the
+stub anim instance are broadcast and the stub enhanced input component fires the action; ``AnimNotify_<Name>`` is
+called for notifies of an anim instance.  The scripted scene (``"montages"``, ``"targets"``, ``"world"``) sets the
+state behind the montage reads, the target tag search and the traces.
 """
 
 from __future__ import annotations
@@ -11,23 +17,17 @@ from __future__ import annotations
 import functools
 import glob
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 
 from dal import ir
-from dal.cppbackend import CppOptions, generate_cpp
+from dal.cppbackend import CppGen, CppOptions, generate_cpp
 from dal.types import BOOL, FLOAT, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, EnumType
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STUB = os.path.join(HERE, "cpp_stub")
-
-FORWARDING_HEADERS = [
-    "Animation/AnimInstance.h", "Engine/EngineTypes.h", "GameFramework/Character.h",
-    "GameFramework/CharacterMovementComponent.h", "GameFramework/Pawn.h", "Engine/World.h",
-    "Engine/LocalPlayer.h", "GameFramework/PlayerController.h", "EnhancedInputSubsystems.h",
-    "EnhancedPlayerInput.h", "InputAction.h", "InputActionValue.h", "stub_empty.h",
-]
 
 
 @functools.cache
@@ -128,7 +128,45 @@ def _print_value(name, ty):
     return f'Pv("{name}", {{{", ".join(f"static_cast<double>({c})" for c in comps)}}});'
 
 
+def _comps(ty, v):
+    """The three components of an action / event value as the stub's FInputActionValue stores them."""
+    comps = [float(v)] if ty in (BOOL, FLOAT) else [float(c) for c in v]
+    return comps + [0.0] * (3 - len(comps))
+
+
+def _action_type(module, name):
+    for i in module.inputs:
+        if i.host and i.host.item == "action" and i.host.arg == name:
+            return i.ty
+    for a in module.actions:
+        if a.name == name:
+            return a.ty
+    return BOOL
+
+
+_SIMPLE = {
+    "velocity": lambda v: f"Move.Velocity = FVector({_num(v[0])}, {_num(v[1])}, {_num(v[2])});",
+    "acceleration": lambda v: f"Move.StubAcceleration = FVector({_num(v[0])}, {_num(v[1])}, {_num(v[2])});",
+    "max_acceleration": lambda v: f"Move.StubMaxAcceleration = {_num(v)}f;",
+    "max_braking_deceleration": lambda v: f"Move.StubMaxBrakingDeceleration = {_num(v)}f;",
+    "max_walk_speed": lambda v: f"Move.MaxWalkSpeed = {_num(v)}f;",
+    "movement_mode": lambda v: f"Move.MovementMode = static_cast<EMovementMode>({int(v)});",
+    "is_grounded": lambda v: f"Move.StubGrounded = {'true' if v else 'false'};",
+    "is_crouching": lambda v: f"Move.StubCrouching = {'true' if v else 'false'};",
+    "actor_location": lambda v: f"Pawn.StubLocation = FVector({_num(v[0])}, {_num(v[1])}, {_num(v[2])});",
+    "actor_rotation": lambda v: f"Pawn.StubQuat = FQuat({_num(v[0])}, {_num(v[1])}, {_num(v[2])}, {_num(v[3])});",
+    "control_rotation": lambda v: f"Pawn.StubControlRotation = FRotator({_num(v[0])}, {_num(v[1])}, {_num(v[2])});",
+}
+_TRIGGER = {"started": "Started", "triggered": "Triggered", "ongoing": "Ongoing", "completed": "Completed", "canceled": "Canceled"}
+
+
 def make_driver(module: ir.Module, frames: list[dict]) -> str:
+    gen = CppGen(module, CppOptions())
+    actor = module.kind == "actor"
+    target = "Anim" if actor else "Obj"
+    cls = f"U{module.name}"
+    slots = gen.action_slots()
+    has_cmds = bool(gen.cmds)
     L = [
         '#include "StubEngine.h"',
         f'#include "{module.name}.h"',
@@ -148,9 +186,18 @@ def make_driver(module: ir.Module, frames: list[dict]) -> str:
         '\tstd::printf("\\n");',
         "}",
         "",
+        "static void Pcmds()",
+        "{",
+        "	for (const std::string& Line : StubLog::Lines())",
+        "	{",
+        '		std::printf("CMD %s\\n", Line.c_str());',
+        "	}",
+        "	StubLog::Lines().clear();",
+        "}",
+        "",
         "int main()",
         "{",
-        f"\tU{module.name} Obj;",
+        f"\t{cls} Obj;",
         "\tUWorld World;",
         "\tACharacter Pawn;",
         "\tUCharacterMovementComponent Move;",
@@ -158,59 +205,118 @@ def make_driver(module: ir.Module, frames: list[dict]) -> str:
         "\tULocalPlayer LocalPlayer;",
         "\tUEnhancedInputLocalPlayerSubsystem Subsystem;",
         "\tUEnhancedPlayerInput PlayerInput;",
+        "\tUSkeletalMeshComponent Mesh;",
+        "\tUAnimInstance Anim;",
+        "\tUSpringArmComponent Arm;",
+        "\tUCameraComponent Camera;",
+        "\tUEnhancedInputComponent InputComp;",
+        "\tAActor Targets[8];",
         "\tPawn.StubMovement = &Move;",
         "\tPawn.StubController = &Controller;",
         "\tController.StubLocalPlayer = &LocalPlayer;",
         "\tLocalPlayer.StubSubsystem = &Subsystem;",
         "\tSubsystem.StubInput = &PlayerInput;",
-        "\tObj.StubPawn = &Pawn;",
-        "\tObj.StubWorld = &World;",
     ]
-    actions = []
-    for i in module.inputs:
-        if i.host and i.host.item == "action" and i.host.arg not in actions:
-            actions.append(i.host.arg)
-    for a in actions:
+    if actor:
+        L += [
+            "\tObj.StubOwner = &Pawn;",
+            "\tObj.StubWorld = &World;",
+            "\tPawn.StubComponents = {&Mesh, &Arm, &Camera};",
+            "\tPawn.InputComponent = &InputComp;",
+            "\tMesh.StubAnim = &Anim;",
+        ]
+    else:
+        L += [
+            "\tObj.StubPawn = &Pawn;",
+            "\tObj.StubWorld = &World;",
+        ]
+    for k in range(8):
+        L.append(f'\tTargets[{k}].Tags.push_back(FName(TEXT("DalTarget")));')
+    for a in slots:
         L.append(f"\tUInputAction Action_{a};")
         L.append(f"\tObj.DalAction_{a} = &Action_{a};")
-    L.append("\tObj.NativeInitializeAnimation();")
+    for md in module.montages:
+        L.append(f"\tUAnimMontage Montage_{md.name};")
+        L.append(f'\tMontage_{md.name}.StubName = "{md.name}";')
+        L.append(f"\tObj.DalMontage_{md.name} = &Montage_{md.name};")
+    L.append("\tObj.BeginPlay();" if actor else "\tObj.NativeInitializeAnimation();")
+    by_name = {i.host.arg: i for i in module.inputs if i.host and i.host.item == "action"}
+    notify_inputs = {i.host.arg for i in module.inputs if i.host and i.host.item == "notify"}
+    anim_notifies = set(gen.anim_notify_funcs())
     for n, f in enumerate(frames):
         L.append(f"\t// ---- frame {n}")
         L.append("\t{")
         if "time" in f:
             L.append(f"\t\tWorld.Time = {_num(f['time'])};")
-        simple = {
-            "velocity": lambda v: f"Move.Velocity = FVector({_num(v[0])}, {_num(v[1])}, {_num(v[2])});",
-            "acceleration": lambda v: f"Move.StubAcceleration = FVector({_num(v[0])}, {_num(v[1])}, {_num(v[2])});",
-            "max_acceleration": lambda v: f"Move.StubMaxAcceleration = {_num(v)}f;",
-            "max_braking_deceleration": lambda v: f"Move.StubMaxBrakingDeceleration = {_num(v)}f;",
-            "max_walk_speed": lambda v: f"Move.MaxWalkSpeed = {_num(v)}f;",
-            "movement_mode": lambda v: f"Move.MovementMode = static_cast<EMovementMode>({int(v)});",
-            "is_grounded": lambda v: f"Move.StubGrounded = {'true' if v else 'false'};",
-            "is_crouching": lambda v: f"Move.StubCrouching = {'true' if v else 'false'};",
-            "actor_rotation": lambda v: f"Pawn.StubQuat = FQuat({_num(v[0])}, {_num(v[1])}, {_num(v[2])}, {_num(v[3])});",
-            "control_rotation": lambda v: f"Pawn.StubControlRotation = FRotator({_num(v[0])}, {_num(v[1])}, {_num(v[2])});",
-        }
-        for key, fmt in simple.items():
+        for key, fmt in _SIMPLE.items():
             if key in f:
                 L.append("\t\t" + fmt(f[key]))
-        by_name = {i.host.arg: i for i in module.inputs if i.host and i.host.item == "action"}
         for a, v in f.get("actions", {}).items():
             if a not in by_name:
                 continue
-            ty = by_name[a].ty
-            comps = [v] if ty in (BOOL, FLOAT) else list(v)
-            comps = [float(c) for c in comps] + [0.0] * (3 - len(comps))
-            L.append(f"\t\tPlayerInput.Values[&Action_{a}] = FInputActionValue({_num(comps[0])}, {_num(comps[1])}, {_num(comps[2])});")
+            c = _comps(by_name[a].ty, v)
+            L.append(f"\t\tPlayerInput.Values[&Action_{a}] = FInputActionValue({_num(c[0])}, {_num(c[1])}, {_num(c[2])});")
         for name, v in f.get("free", {}).items():
             inp = module.find_input(name)
             L.append(f"\t\tObj.{name} = {_lit(inp.ty, v)};")
+        # the scene behind the montage reads, the target search and the traces
+        for name, st in f.get("montages", {}).items():
+            if module.find_montage(name) is None:
+                continue
+            sec = f'FName(TEXT("{st["section"]}"))' if st.get("section") else "FName()"
+            playing = "true" if st.get("playing") else "false"
+            active = "true" if st.get("active") else "false"
+            L.append(f"\t\t{target}.StubMontages[&Montage_{name}] = UAnimInstance::FStubMontage{{{playing}, {active}, {_num(st.get('position', 0.0))}f, {sec}}};")
+        if actor:
+            L.append("\t\tWorld.StubActors.clear();")
+            for k, (tid, loc) in enumerate(f.get("targets", [])[:8]):
+                L.append(f"\t\tTargets[{k}].StubId = {int(tid)}u; Targets[{k}].StubLocation = FVector({_num(loc[0])}, {_num(loc[1])}, {_num(loc[2])}); "
+                         f"World.StubActors.push_back(&Targets[{k}]);")
+            world = f.get("world", {})
+            if "ground_z" in world:
+                if world["ground_z"] is None:
+                    L.append("\t\tWorld.HasGround = false;")
+                else:
+                    L.append(f"\t\tWorld.HasGround = true; World.GroundZ = {_num(world['ground_z'])};")
+            if "spheres" in world:
+                L.append("\t\tWorld.Spheres.clear();")
+                for c, r in world["spheres"]:
+                    L.append(f"\t\tWorld.Spheres.push_back({{FVector({_num(c[0])}, {_num(c[1])}, {_num(c[2])}), {_num(r)}}});")
+        # a notify read through host.notify(...) that fired this frame
         for name, fired in f.get("notifies", {}).items():
-            if fired and any(i.host and i.host.item == "notify" and i.host.arg == name for i in module.inputs):
+            if not fired or name not in notify_inputs:
+                continue
+            if actor:
+                L.append(f'\t\t{{ FBranchingPointNotifyPayload Payload; Anim.OnPlayMontageNotifyBegin.Broadcast(FName(TEXT("{name}")), Payload); }}')
+            else:
                 L.append(f"\t\tObj.AnimNotify_{name}();")
+        # events, oldest first
+        for ev in f.get("events", []):
+            kind, name = ev[0], ev[1]
+            if kind == "notify":
+                if not actor and name in anim_notifies:
+                    L.append(f"\t\tObj.AnimNotify_{name}();")
+                else:
+                    L.append(f'\t\t{{ FBranchingPointNotifyPayload Payload; {target}.OnPlayMontageNotifyBegin.Broadcast(FName(TEXT("{name}")), Payload); }}')
+            elif kind in ("notify_begin", "notify_end"):
+                delegate = "OnPlayMontageNotifyBegin" if kind == "notify_begin" else "OnPlayMontageNotifyEnd"
+                L.append("\t\t{ FBranchingPointNotifyPayload Payload; FAnimNotifyEvent StateEvent; UAnimNotifyState StateClass; "
+                         "StateEvent.NotifyStateClass = &StateClass; Payload.NotifyEvent = &StateEvent; "
+                         f'{target}.{delegate}.Broadcast(FName(TEXT("{name}")), Payload); }}')
+            elif kind in ("montage_ended", "montage_blending_out"):
+                delegate = "OnMontageEnded" if kind == "montage_ended" else "OnMontageBlendingOut"
+                L.append(f"\t\t{target}.{delegate}.Broadcast(&Montage_{name}, {'true' if ev[2] else 'false'});")
+            elif kind == "input":
+                c = _comps(_action_type(module, name), ev[3])
+                L.append(f"\t\tInputComp.Fire(&Action_{name}, ETriggerEvent::{_TRIGGER[ev[2]]}, "
+                         f"FInputActionValue({_num(c[0])}, {_num(c[1])}, {_num(c[2])}));")
         dt = _num(f["dt"])
-        L.append(f"\t\tObj.NativeUpdateAnimation({dt}f);")
-        L.append(f"\t\tObj.NativeThreadSafeUpdateAnimation({dt}f);")
+        L.append("\t\tStubLog::Lines().clear();")
+        if actor:
+            L.append(f"\t\tObj.TickComponent({dt}f, LEVELTICK_All, nullptr);")
+        else:
+            L.append(f"\t\tObj.NativeUpdateAnimation({dt}f);")
+            L.append(f"\t\tObj.NativeThreadSafeUpdateAnimation({dt}f);")
         for call in f.get("calls", []):
             L.append(f"\t\tObj.{call}();")
         L.append(f'\t\tstd::printf("FRAME {n}\\n");')
@@ -218,14 +324,26 @@ def make_driver(module: ir.Module, frames: list[dict]) -> str:
             L.append("\t\t" + _print_value(i.name, i.ty))
         for s in module.states:
             L.append("\t\t" + _print_value(s.name, s.ty))
+        L.append("\t\tPcmds();")
         L.append("\t}")
+    if not actor and has_cmds:
+        # on an anim instance the commands of the last update run at the start of the next one
+        L.append("\tStubLog::Lines().clear();")
+        L.append("\tObj.NativeUpdateAnimation(0.0f);")
+        L.append('\tstd::printf("FINAL\\n");')
+        L.append("\tPcmds();")
     L.append("\treturn 0;")
     L.append("}")
     return "\n".join(L) + "\n"
 
 
 def parse_output(module: ir.Module, text: str) -> list[dict]:
-    """Rebuild snapshots (plain tuples / numbers) from the driver's output."""
+    """Rebuild snapshots (plain tuples / numbers) from the driver's output.
+
+    Each frame has ``"__cmds__"``: the host effects the generated code produced (tuples of a name and its arguments).
+    For anim logic with commands the last element is ``{"__final__": True, "__cmds__": ...}``: the commands the last
+    update queued, run by one more NativeUpdateAnimation (an anim instance runs them one update late).
+    """
     types = {i.name: i.ty for i in module.inputs}
     types.update({s.name: s.ty for s in module.states})
     frames: list[dict] = []
@@ -234,7 +352,19 @@ def parse_output(module: ir.Module, text: str) -> list[dict]:
         if not parts:
             continue
         if parts[0] == "FRAME":
-            frames.append({})
+            frames.append({"__cmds__": []})
+            continue
+        if parts[0] == "FINAL":
+            frames.append({"__final__": True, "__cmds__": []})
+            continue
+        if parts[0] == "CMD":
+            toks = []
+            for t in parts[2:]:
+                try:
+                    toks.append(float(t))
+                except ValueError:
+                    toks.append(t)
+            frames[-1]["__cmds__"].append((parts[1], *toks))
             continue
         name, vals = parts[0], parts[1:]
         ty = types[name]
@@ -247,6 +377,19 @@ def parse_output(module: ir.Module, text: str) -> list[dict]:
         else:
             frames[-1][name] = tuple(float(v) for v in vals)
     return frames
+
+
+def forwarding_headers(files: dict[str, str], module_name: str, extra_include: str | None) -> list[str]:
+    """Engine headers the generated sources include that the stub folder does not have: they all forward to StubEngine.h."""
+    known = set(files) | {"CoreMinimal.h", "StubEngine.h", f"{module_name}.generated.h", "stub_empty.h"}
+    if extra_include:
+        known |= set(os.listdir(extra_include))
+    wanted = []
+    for text in files.values():
+        for m in re.finditer(r'^#include "([^"]+)"', text, re.M):
+            if m.group(1) not in known and m.group(1) not in wanted:
+                wanted.append(m.group(1))
+    return wanted
 
 
 class CompileFailed(Exception):
@@ -265,12 +408,13 @@ def build_and_run(module: ir.Module, frames: list[dict], extra_include: str | No
         gen, inc = os.path.join(work, "gen"), os.path.join(work, "inc")
         os.makedirs(gen, exist_ok=True)
         os.makedirs(inc, exist_ok=True)
-        for name, text in generate_cpp(module, options or CppOptions()).items():
+        files = generate_cpp(module, options or CppOptions())
+        for name, text in files.items():
             with open(os.path.join(gen, name), "w", encoding="utf-8", newline="\n") as f:
                 f.write(text)
         for name in ("CoreMinimal.h", "StubEngine.h"):
             shutil.copy(os.path.join(STUB, name), os.path.join(inc, name))
-        for name in FORWARDING_HEADERS:
+        for name in forwarding_headers(files, module.name, extra_include) + ["stub_empty.h"]:
             target = os.path.join(inc, name)
             os.makedirs(os.path.dirname(target), exist_ok=True)
             with open(target, "w", encoding="utf-8", newline="\n") as f:
@@ -283,13 +427,14 @@ def build_and_run(module: ir.Module, frames: list[dict], extra_include: str | No
         exe = os.path.join(work, "run.exe" if kind == "msvc" else "run")
         includes = [inc, gen] + ([os.path.abspath(extra_include)] if extra_include else [])
         src = os.path.join(gen, f"{module.name}.cpp")
+        parent = CppGen(module, options or CppOptions()).parent
         if kind == "msvc":
-            cmd = [path, "/nologo", "/std:c++20", "/EHsc", "/W4", "/DDAL_STUB_SUPER=UAnimInstance", *[f"/D{d}" for d in (defines or [])], *[f"/I{d}" for d in includes],
+            cmd = [path, "/nologo", "/std:c++20", "/EHsc", "/W4", f"/DDAL_STUB_SUPER={parent}", *[f"/D{d}" for d in (defines or [])], *[f"/I{d}" for d in includes],
                    driver, src, f"/Fe:{exe}", f"/Fo:{work}\\"]
             if warnings_as_errors:
                 cmd.insert(5, "/WX")
         else:
-            cmd = [path, "-std=c++20", "-Wall", "-Wextra", "-DDAL_STUB_SUPER=UAnimInstance", *[f"-D{d}" for d in (defines or [])], *[f"-I{d}" for d in includes], driver, src, "-o", exe]
+            cmd = [path, "-std=c++20", "-Wall", "-Wextra", f"-DDAL_STUB_SUPER={parent}", *[f"-D{d}" for d in (defines or [])], *[f"-I{d}" for d in includes], driver, src, "-o", exe]
             if warnings_as_errors:
                 cmd.append("-Werror")
         build = subprocess.run(cmd, cwd=work, env=env, capture_output=True, text=True, errors="replace")

@@ -110,8 +110,8 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--cpp", metavar="DIR", help="write <Logic>.h/.cpp and DalMath.h here")
     c.add_argument("--module", default="", metavar="MYGAME_API", help="module API macro for the generated UCLASS")
     c.add_argument("--standins", metavar="FILE", help="Python stand-ins for extern fns (default: <file>_standins.py)")
-    c.add_argument("--parent-class", default="UAnimInstance", help="C++ base class of the generated class")
-    c.add_argument("--parent-include", default="Animation/AnimInstance.h", help="header that declares the base class")
+    c.add_argument("--parent-class", default="", help="C++ base class of the generated class (default: UAnimInstance, or UActorComponent for actor logic)")
+    c.add_argument("--parent-include", default="", help="header that declares the base class")
     c.set_defaults(func=cmd_compile)
 
     k = sub.add_parser("check", help="parse and type-check only")

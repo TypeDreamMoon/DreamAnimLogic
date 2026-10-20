@@ -51,9 +51,70 @@ def compare(py, cpp, tolerances, default):
         return [f"frame count {len(py)} != {len(cpp)}"]
     for i, (a, b) in enumerate(zip(py, cpp)):
         for name in a:
+            if name.startswith("__"):
+                continue
             if not close(a[name], b[name], tolerances.get(name, default)):
                 problems.append(f"frame {i} {name}: python={a[name]!r} c++={b[name]!r}")
     return problems
+
+
+STUB_BLEND_OUT = 0.25            # UAnimMontage::GetDefaultBlendOutTime() of the stub
+
+
+def py_effects(calls):
+    """The Python host's command calls as the stub engine logs them: (name, *numbers and names)."""
+    out = []
+
+    def flat(args):
+        toks = []
+        for a in args:
+            if isinstance(a, (tuple, list)):
+                toks.extend(flat(a))
+            elif isinstance(a, bool):
+                toks.append(float(a))
+            elif isinstance(a, (int, float)):
+                toks.append(float(a))
+            elif a is not None:
+                toks.append(a)
+        return toks
+
+    for name, args in calls:
+        if name == "montage_play":
+            out.append(("montage_play", args[0], float(args[1])))
+            if args[2]:
+                out.append(("montage_jump_to_section", args[0], args[2]))
+        elif name == "montage_stop":
+            out.append(("montage_stop", args[0], STUB_BLEND_OUT if args[1] < 0 else float(args[1])))
+        elif name == "montage_stop_all":
+            out.append(("montage_stop_all", 0.0 if args[0] < 0 else float(args[0])))
+        else:
+            out.append((name, *flat(args)))
+    return out
+
+
+def close_token(a, b, rel):
+    if isinstance(a, str) or isinstance(b, str):
+        return a == b
+    return close(a, b, rel)
+
+
+def compare_effects(module, py, cpp, rel):
+    """Host effects: per frame for actor logic; over the whole run for an anim instance (it runs commands one update late)."""
+    problems = []
+    py_frames = [py_effects(f["__cmds__"]) for f in py]
+    if module.kind == "actor":
+        cpp_frames = [list(f["__cmds__"]) for f in cpp]
+    else:
+        py_frames = [[e for fr in py_frames for e in fr]]
+        cpp_frames = [[e for f in cpp for e in f["__cmds__"]]]
+    for i, (a, b) in enumerate(zip(py_frames, cpp_frames)):
+        if len(a) != len(b):
+            problems.append(f"frame {i}: {len(a)} python effects, {len(b)} c++ effects: {a[:4]} vs {b[:4]}")
+            continue
+        for x, y in zip(a, b):
+            if len(x) != len(y) or x[0] != y[0] or not all(close_token(u, v, rel) for u, v in zip(x[1:], y[1:])):
+                problems.append(f"frame {i}: python {x} != c++ {y}")
+    return problems, sum(len(f) for f in py_frames)
 
 
 def round_frames(frames):
@@ -74,6 +135,7 @@ def round_frames(frames):
 @unittest.skipIf(COMPILER is None, "no C++ compiler found")
 class CppCompileTests(unittest.TestCase):
     def run_case(self, module, frames, tolerances=None, default=1e-4, **kwargs):
+        """Compile + run the C++; compare states and host effects with the Python backend.  Returns the number of effects."""
         frames = round_frames(frames)
         try:
             cpp, output = cpp_driver.build_and_run(module, frames, **kwargs)
@@ -82,8 +144,12 @@ class CppCompileTests(unittest.TestCase):
         if COMPILER[0] == "msvc":
             self.assertNotIn("warning", output.lower(), output)
         py = harness.run_python(module, frames)
-        problems = compare(py, cpp, tolerances or {}, default)
+        states = [f for f in cpp if not f.get("__final__")]
+        problems = compare(py, states, tolerances or {}, default)
         self.assertEqual(problems[:5], [], f"{len(problems)} mismatches")
+        effects, count = compare_effects(module, py, cpp, max(default, 1e-3))
+        self.assertEqual(effects[:5], [], f"{len(effects)} effect mismatches")
+        return count
 
     def test_als_lean_matches_python(self):
         module = dal.check_file(os.path.join(EXAMPLES, "als_lean.dal")).module
@@ -112,6 +178,77 @@ class CppCompileTests(unittest.TestCase):
         for _ in range(25):
             frames.append({"dt": 0.016, "free": {i.name: rand_input(rng, i.ty) for i in module.inputs}})
         self.run_case(module, frames, default=3e-3)
+
+
+    # ---- v1 / v2: components, montages, events, commands, traces ---------------------------------------------------
+    def test_melee_combo_matches_python(self):
+        module = dal.check_file(os.path.join(EXAMPLES, "melee_combo.dal")).module
+        effects = 0
+        for seed in (1, 2, 3):
+            effects += self.run_case(module, harness.random_frames(module, 300, seed), warnings_as_errors=True)
+        self.assertGreater(effects, 20)               # the sessions really issued host commands
+
+    def test_melee_combo_through_a_scripted_session(self):
+        module = dal.check_file(os.path.join(EXAMPLES, "melee_combo.dal")).module
+        press = ("input", "Attack", "started", True)
+        frames = []
+        for i in range(120):
+            f = {"dt": 1 / 60, "is_grounded": True, "events": []}
+            if i in (2, 32, 62):
+                f["events"].append(press)
+            if i in (30, 60):
+                f["events"].append(("notify_begin", "CancelWindow"))
+            if i in (38, 66):
+                f["events"].append(("notify_end", "CancelWindow"))
+            if i in (45,):
+                f["events"].append(("notify", "Hit"))
+            if i == 100:
+                f["events"].append(("montage_ended", "Light3", False))
+            frames.append(f)
+        effects = self.run_case(module, frames, warnings_as_errors=True)
+        self.assertGreaterEqual(effects, 5)           # three montage_play and the walk speed going down and up
+
+    def test_lockon_camera_matches_python(self):
+        module = dal.check_file(os.path.join(EXAMPLES, "lockon_camera.dal")).module
+        for seed in (1, 2):
+            self.run_case(module, harness.random_frames(module, 200, seed), warnings_as_errors=True)
+
+    def test_lockon_camera_through_a_scripted_session(self):
+        module = dal.check_file(os.path.join(EXAMPLES, "lockon_camera.dal")).module
+        wall = [((250.0, 10.0, 60.0), 40.0)]
+        frames = []
+        for i in range(260):
+            f = {"dt": 1 / 60, "actor_location": (0.0, 0.0, 0.0), "actor_rotation": (0.0, 0.0, 0.0, 1.0),
+                 "control_rotation": (0.0, 0.0, 0.0),
+                 "targets": [(1, (500.0, 20.0, 60.0)), (2, (300.0, 250.0, 60.0))],
+                 "world": {"ground_z": None, "spheres": wall if 60 <= i < 100 else []}, "events": []}
+            if i in (2, 200):
+                f["events"].append(("input", "LockOn", "started", True))
+            frames.append(f)
+        effects = self.run_case(module, frames, default=2e-4, warnings_as_errors=True)
+        self.assertGreater(effects, 100)              # control rotation and arm length every locked frame
+
+    def test_every_host_command_matches_python(self):
+        module = dal.check_source(ALL_COMMANDS, "all_commands.dal").module
+        effects = self.run_case(module, harness.random_frames(module, 40, 4), warnings_as_errors=True)
+        self.assertGreaterEqual(effects, 40 * 25)
+
+    def test_traces_and_targets_match_python(self):
+        module = dal.check_source(PROBE, "probe.dal").module
+        for seed in (1, 2, 3):
+            self.run_case(module, harness.random_frames(module, 60, seed), default=2e-3, warnings_as_errors=True)
+
+    def test_anim_instance_with_events_commands_and_montage_reads(self):
+        module = dal.check_source(ANIM_V1, "anim_v1.dal").module
+        effects = 0
+        for seed in (1, 2, 3):
+            effects += self.run_case(module, harness.random_frames(module, 200, seed), warnings_as_errors=True)
+        self.assertGreater(effects, 20)
+
+    def test_actor_parent_class_option(self):
+        module = dal.check_file(os.path.join(EXAMPLES, "melee_combo.dal")).module
+        frames = harness.random_frames(module, 10, 5)
+        self.run_case(module, frames, options=CppOptions(module_api="DAL_TEST_API"), defines=["DAL_TEST_API="])
 
 
 POOL = {FLOAT: ("F", 5), INT: ("I", 3), VEC2: ("U", 2), VEC3: ("V", 2), ROTATOR: ("R", 2), QUAT: ("Q", 2)}
@@ -162,6 +299,127 @@ def rand_input(rng, ty):
         n = math.sqrt(sum(c * c for c in v))
         return tuple(c / n for c in v)
     raise ValueError(ty)
+
+
+ALL_COMMANDS = """
+logic AllCommands : actor;
+montage Swing { Windup, Strike }
+input F: float;
+input V: vec3;
+input R: rotator;
+input B: bool;
+input S: int;
+input Mode: MovementMode;
+state N: int;
+update(dt) {
+    host.set_max_walk_speed(F);
+    host.set_max_acceleration(F * 2.0);
+    host.set_braking_deceleration_walking(F + 1.0);
+    host.set_gravity_scale(F);
+    host.set_jump_z_velocity(F);
+    host.set_air_control(F);
+    host.set_rotation_rate(R);
+    host.set_orient_rotation_to_movement(B);
+    host.set_use_controller_desired_rotation(!B);
+    host.set_movement_mode(Mode);
+    if (B) { host.jump(); } else { host.stop_jumping(); }
+    if (S > 0) { host.crouch(); } else { host.uncrouch(); }
+    host.add_movement_input(V);
+    host.add_movement_input(V, F);
+    host.launch(V);
+    host.launch(V, B, !B);
+    host.montage_play(Swing);
+    host.montage_play(Swing, F, Swing.Strike);
+    host.montage_stop(Swing);
+    host.montage_stop(Swing, 0.1);
+    host.montage_stop_all();
+    host.montage_stop_all(0.3);
+    host.montage_jump_to_section(Swing, Swing.Windup);
+    host.montage_set_next_section(Swing, Swing.Windup, Swing.Strike);
+    host.montage_set_play_rate(Swing, F);
+    host.set_control_rotation(R);
+    host.camera_set_arm_length(F);
+    host.camera_set_socket_offset(V);
+    host.camera_set_fov(F);
+    N += 1;
+}
+"""
+
+PROBE = """
+logic Probe : actor;
+input A: vec3;
+input B: vec3;
+input Radius: float;
+state Blocked: bool;
+state P: vec3;
+state N: vec3;
+state D: float;
+state T: float;
+state SphereBlocked: bool;
+state SphereP: vec3;
+state SphereD: float;
+state Count: int;
+state FirstId: int;
+state FirstLoc: vec3;
+state Back: int;
+state Gone: vec3;
+update(dt) {
+    let h = host.trace_line(A, B);
+    Blocked = h.blocking;
+    P = h.point;
+    N = h.normal;
+    D = h.distance;
+    T = h.time;
+    let s = host.trace_sphere(A, B, abs(Radius));
+    SphereBlocked = s.blocking;
+    SphereP = s.point;
+    SphereD = s.distance;
+    Count = host.target_count();
+    FirstId = host.target_id(0);
+    FirstLoc = host.target_location(0);
+    Back = host.target_index(FirstId);
+    Gone = host.target_location(7);
+}
+"""
+
+ANIM_V1 = """
+logic AnimV1;
+montage Slash { Wind, Hit, Rec }
+action Fire: float;
+input Fired: float <- host.action(Fire);
+state Count: int;
+state Open: bool;
+state Ended: int;
+state Blend: int;
+state Phase: SlashSection;
+state Pos: float;
+state WasPlaying: bool;
+on notify HitNotify {
+    Count += 1;
+    host.set_gravity_scale(2.0);
+}
+on notify_begin Window { Open = true; }
+on notify_end Window { Open = false; }
+on montage_ended Slash {
+    Ended += 1;
+    if (interrupted) { host.jump(); }
+}
+on montage_blending_out Slash { Blend += 1; }
+update(dt) {
+    if (Fired > 0.5 && !Slash.playing) {
+        host.montage_play(Slash, 1.0, Slash.Hit);
+    }
+    Phase = Slash.section;
+    Pos = Slash.position;
+    WasPlaying = Slash.playing;
+    if (Slash.active && Pos > 1.5) {
+        host.montage_set_next_section(Slash, Slash.Hit, Slash.Rec);
+    }
+}
+entry Kick(dt) {
+    host.montage_stop(Slash);
+}
+"""
 
 
 if __name__ == "__main__":

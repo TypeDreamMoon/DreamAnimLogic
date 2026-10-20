@@ -1,32 +1,44 @@
-"""C++ backend: IR -> an Unreal Engine 5.8 ``UAnimInstance`` parent class.
+"""C++ backend: IR -> an Unreal Engine 5.8 class.
 
 Generated files (``generate_cpp``):
 
-* ``<Logic>.h`` / ``<Logic>.cpp`` -- ``UCLASS() class [API] U<Logic> : public UAnimInstance``;
-* ``DalMath.h`` -- the static math library (``dal/cpp/DalMath.h``).
+* ``<Logic>.h`` / ``<Logic>.cpp`` -- ``UCLASS() class [API] U<Logic>``, a ``UAnimInstance`` parent class for
+  ``logic X;`` and a ``UActorComponent`` (the character component) for ``logic X : actor;``;
+* ``DalMath.h`` -- the static math library (``dal/cpp/DalMath.h``);
+* ``DalHost.h`` -- event / command / trace-result types, only for programs that use host traffic
+  (``on`` handlers, ``host.<command>(...)``, actor logic).
 
-Threading model (matches ``UAnimInstance``):
+Threading model of the anim instance (matches ``UAnimInstance``):
 
-* ``NativeUpdateAnimation`` (game thread) reads the host -- owning pawn, character movement,
-  enhanced input, world time -- into the input properties (``DalSampleInputs``);
-* ``NativeThreadSafeUpdateAnimation`` (worker thread) runs the logic (``DalUpdate``), which only
-  touches the class's own properties, params, constants and pure functions;
+* ``NativeUpdateAnimation`` (game thread) runs the commands the previous update queued, then reads the
+  host -- owning pawn, character movement, enhanced input, montages, world time -- into the input
+  properties (``DalSampleInputs``) and takes the events that arrived (``DalTakeEvents``);
+* ``NativeThreadSafeUpdateAnimation`` (worker thread) runs the logic (``DalUpdate``): timer ticks, event
+  handlers, the update body.  It only touches the class's own properties, params, constants and pure
+  functions; host commands go into a queue;
 * entries are ``BlueprintThreadSafe`` UFUNCTIONs that ``.dab`` can name in ``Call(Self.Entry)``.
 
-The output is deterministic (no timestamps) and tab-indented like UE code.
+Actor component (``TickComponent``, game thread, ``TG_PrePhysics``): bind the animation / input delegates,
+sample, take events, run ``DalUpdate`` (which may ask the world: traces, targets) and execute the queued
+commands -- all in one tick.
+
+The output is deterministic (no timestamps) and tab-indented like UE code.  Every name the backend adds to
+the class starts with ``Dal`` (``bDal`` for booleans); ``names.py`` keeps user names away from them.
 """
 
 from __future__ import annotations
 
 import os
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import ir
 from .builtins import BUILTIN_CONSTS, BUILTINS
+from .hostapi import COMMANDS, QUERIES
 from .types import (
     BOOL,
     FLOAT,
+    HIT,
     INT,
     MOVEMENT_MODE,
     QUAT,
@@ -43,8 +55,30 @@ T = "\t"
 @dataclass
 class CppOptions:
     module_api: str = ""                           # e.g. "MYGAME_API"
-    parent_class: str = "UAnimInstance"
-    parent_include: str = "Animation/AnimInstance.h"
+    parent_class: str = ""                         # "" = UAnimInstance for anim logic, UActorComponent for actor logic
+    parent_include: str = ""                       # "" = Animation/AnimInstance.h resp. Components/ActorComponent.h
+
+
+KIND_PARENT = {
+    "anim": ("UAnimInstance", "Animation/AnimInstance.h"),
+    "actor": ("UActorComponent", "Components/ActorComponent.h"),
+}
+
+HIT_MEMBER_CPP = {"blocking": "bBlocking", "point": "Point", "normal": "Normal", "distance": "Distance", "time": "Time"}
+
+
+def camel(name: str) -> str:
+    """set_max_walk_speed -> SetMaxWalkSpeed"""
+    return "".join(p[:1].upper() + p[1:] for p in name.split("_"))
+
+
+def cmd_cpp(name: str) -> str:
+    """C++ name of a host command: the DalHost::ECommand member and the DalHost::Cmd:: constructor."""
+    return "UnCrouch" if name == "uncrouch" else camel(name)
+
+
+def query_cpp(name: str) -> str:
+    return "Dal" + camel(name)
 
 
 # ---- literals and types ---------------------------------------------------------------------
@@ -107,6 +141,8 @@ def cpp_type(ty: Type) -> str:
         return "FRotator3f"
     if ty is QUAT:
         return "FQuat4f"
+    if ty is HIT:
+        return "DalHost::FHit"
     if isinstance(ty, EnumType):
         return ty.cpp_type
     raise ValueError(ty)
@@ -192,10 +228,14 @@ class CppExprGen:
         if k is ir.CallExtern:
             ext = self.m.find_extern(e.name)
             return f"{ext.cpp}({', '.join(unparen(self.x(a)) for a in e.args)})"  # type: ignore[union-attr]
+        if k is ir.HostQuery:
+            return f"{query_cpp(e.name)}({', '.join(unparen(self.x(a)) for a in e.args)})"
         raise AssertionError(k)
 
     def member(self, e: ir.Member) -> str:
         base = self.x(e.x)
+        if e.x.ty is HIT:
+            return f"{base}.{HIT_MEMBER_CPP[e.comps]}"
         if len(e.comps) == 1 or e.comps in ("pitch", "yaw", "roll"):
             return f"{base}.{_COMP_CPP[e.comps]}"
         idx = ", ".join(str(_SWIZ_IDX[c]) for c in e.comps)
@@ -217,6 +257,116 @@ class CppExprGen:
             return f"DalMath::Mod({a}, {b})"
         return f"({a} {op} {b})"
 
+# ---- host commands: how the game thread executes them -------------------------------------------------------------
+#
+# name -> (guards, body).  Every guard opens an `if (...)` block (nested in order); the body lines use relative tabs.
+
+_G_MOVEMENT = "if (UCharacterMovementComponent* DalMovement = DalGetMovement())"
+_G_CHARACTER = "if (ACharacter* DalCharacter = DalGetCharacter())"
+_G_PAWN = "if (APawn* DalPawn = DalGetPawn())"
+_G_CONTROLLER = "if (AController* DalController = DalPawn->GetController())"
+_G_ARM = "if (USpringArmComponent* DalArm = DalPawn->FindComponentByClass<USpringArmComponent>())"
+_G_CAMERA = "if (UCameraComponent* DalCamera = DalPawn->FindComponentByClass<UCameraComponent>())"
+_G_ANIM = "if (UAnimInstance* DalAnim = DalGetAnimInstance())"
+_G_ASSET = "if (UAnimMontage* DalAsset = DalMontageAsset(DalCommand.Montage))"
+
+EXEC: dict[str, tuple[list[str], list[str]]] = {
+    "set_max_walk_speed": ([_G_MOVEMENT], ["DalMovement->MaxWalkSpeed = DalCommand.F;"]),
+    "set_max_acceleration": ([_G_MOVEMENT], ["DalMovement->MaxAcceleration = DalCommand.F;"]),
+    "set_braking_deceleration_walking": ([_G_MOVEMENT], ["DalMovement->BrakingDecelerationWalking = DalCommand.F;"]),
+    "set_gravity_scale": ([_G_MOVEMENT], ["DalMovement->GravityScale = DalCommand.F;"]),
+    "set_jump_z_velocity": ([_G_MOVEMENT], ["DalMovement->JumpZVelocity = DalCommand.F;"]),
+    "set_air_control": ([_G_MOVEMENT], ["DalMovement->AirControl = DalCommand.F;"]),
+    "set_rotation_rate": ([_G_MOVEMENT], ["DalMovement->RotationRate = FRotator(DalCommand.R);"]),
+    "set_orient_rotation_to_movement": ([_G_MOVEMENT], ["DalMovement->bOrientRotationToMovement = DalCommand.B0;"]),
+    "set_use_controller_desired_rotation": ([_G_MOVEMENT], ["DalMovement->bUseControllerDesiredRotation = DalCommand.B0;"]),
+    "set_movement_mode": ([_G_MOVEMENT], ["DalMovement->SetMovementMode(static_cast<EMovementMode>(DalCommand.Mode));"]),
+    "jump": ([_G_CHARACTER], ["DalCharacter->Jump();"]),
+    "stop_jumping": ([_G_CHARACTER], ["DalCharacter->StopJumping();"]),
+    "crouch": ([_G_CHARACTER], ["DalCharacter->Crouch();"]),
+    "uncrouch": ([_G_CHARACTER], ["DalCharacter->UnCrouch();"]),
+    "add_movement_input": ([_G_PAWN], ["DalPawn->AddMovementInput(FVector(DalCommand.V), DalCommand.F);"]),
+    "launch": ([_G_CHARACTER], ["DalCharacter->LaunchCharacter(FVector(DalCommand.V), DalCommand.B0, DalCommand.B1);"]),
+    "montage_play": ([_G_ANIM, _G_ASSET], [
+        "DalAnim->Montage_Play(DalAsset, DalCommand.F);",
+        "if (DalCommand.SectionA != 0)",
+        "{",
+        "\tDalAnim->Montage_JumpToSection(DalSectionName(DalCommand.Montage, DalCommand.SectionA), DalAsset);",
+        "}",
+    ]),
+    "montage_stop": ([_G_ANIM, _G_ASSET], [
+        "DalAnim->Montage_Stop(DalCommand.F >= 0.0f ? DalCommand.F : DalAsset->GetDefaultBlendOutTime(), DalAsset);",
+    ]),
+    "montage_stop_all": ([_G_ANIM], [
+        "const UAnimMontage* DalActive = DalAnim->GetCurrentActiveMontage();",
+        "DalAnim->Montage_Stop(DalCommand.F >= 0.0f ? DalCommand.F : (DalActive != nullptr ? DalActive->GetDefaultBlendOutTime() : 0.0f));",
+    ]),
+    "montage_jump_to_section": ([_G_ANIM, _G_ASSET], [
+        "DalAnim->Montage_JumpToSection(DalSectionName(DalCommand.Montage, DalCommand.SectionA), DalAsset);",
+    ]),
+    "montage_set_next_section": ([_G_ANIM, _G_ASSET], [
+        "DalAnim->Montage_SetNextSection(DalSectionName(DalCommand.Montage, DalCommand.SectionA), "
+        "DalSectionName(DalCommand.Montage, DalCommand.SectionB), DalAsset);",
+    ]),
+    "montage_set_play_rate": ([_G_ANIM, _G_ASSET], ["DalAnim->Montage_SetPlayRate(DalAsset, DalCommand.F);"]),
+    "set_control_rotation": ([_G_PAWN, _G_CONTROLLER], ["DalController->SetControlRotation(FRotator(DalCommand.R));"]),
+    "camera_set_arm_length": ([_G_PAWN, _G_ARM], ["DalArm->TargetArmLength = DalCommand.F;"]),
+    "camera_set_socket_offset": ([_G_PAWN, _G_ARM], ["DalArm->SocketOffset = FVector(DalCommand.V);"]),
+    "camera_set_fov": ([_G_PAWN, _G_CAMERA], ["DalCamera->SetFieldOfView(DalCommand.F);"]),
+}
+
+# input trigger events (handler phase -> ETriggerEvent / DalHost::EInputPhase members)
+_TRIGGER = {"started": "Started", "triggered": "Triggered", "ongoing": "Ongoing", "completed": "Completed", "canceled": "Canceled"}
+
+_MOVEMENT_ITEMS = ("velocity", "acceleration", "max_acceleration", "max_braking_deceleration",
+                   "max_walk_speed", "movement_mode", "is_grounded", "is_crouching")
+_PAWN_ITEMS = ("actor_location", "actor_rotation", "control_rotation", "action")
+
+
+@dataclass
+class Method:
+    """A member function of the generated class: declared in the header, defined in the source."""
+
+    ret: str
+    name: str
+    params: str = ""
+    body: list[str] = field(default_factory=list)       # relative tabs inside the string; indented by one level on output
+    def_params: str | None = None                       # parameter list of the definition when it differs (attributes, const)
+    ufunction: bool = False
+    access: str = "private"
+    doc: str = ""
+    const: bool = False
+
+    def decl(self) -> list[str]:
+        out = []
+        if self.doc:
+            out.append(f"{T}/** {self.doc} */")
+        if self.ufunction:
+            out.append(f"{T}UFUNCTION()")
+        out.append(f"{T}{self.ret} {self.name}({self.params}){' const' if self.const else ''};")
+        return out
+
+    def define(self, cls: str) -> list[str]:
+        params = self.def_params if self.def_params is not None else self.params
+        out = [f"{self.ret} {cls}::{self.name}({params}){' const' if self.const else ''}", "{"]
+        out.extend(T + line if line else "" for line in self.body)
+        out.append("}")
+        return out
+
+
+def _guarded(guards: list[str], body: list[str], depth: int) -> list[str]:
+    out: list[str] = []
+    pad = T * depth
+    for g in guards:
+        out.append(f"{pad}{g}")
+        out.append(f"{pad}{{")
+        pad += T
+    out.extend(pad + line for line in body)
+    for _ in guards:
+        pad = pad[:-1]
+        out.append(f"{pad}}}")
+    return out
+
 
 class CppGen:
     def __init__(self, module: ir.Module, options: CppOptions):
@@ -225,8 +375,50 @@ class CppGen:
         self.ex = CppExprGen(module)
         self.cls = "U" + module.name
         self.api = (options.module_api + " ") if options.module_api else ""
+        self.actor = module.kind == "actor"
+        parent, include = KIND_PARENT[module.kind]
+        self.parent = options.parent_class or parent
+        self.parent_include = options.parent_include or include
+        # ---- what the program uses
+        used_cmds, used_queries = set(), set()
+        for _label, body in module.bodies():
+            for s in ir.walk_stmts(body):
+                if isinstance(s, ir.Command):
+                    used_cmds.add(s.name)
+            for e in ir.walk_stmt_exprs(body):
+                if isinstance(e, ir.HostQuery):
+                    used_queries.add(e.name)
+        self.cmds = [n for n in COMMANDS if n in used_cmds]
+        self.queries = [n for n in QUERIES if n in used_queries]
+        self.has_events = bool(module.handlers)
+        self.has_cmds = bool(self.cmds)
+        self.hosth = self.actor or self.has_events or self.has_cmds         # DalHost.h is part of the output
+        kinds = {h.event for h in module.handlers}
+        self.bind_begin = bool(kinds & {"notify", "notify_begin"}) or (self.actor and bool(self.notify_names()))
+        self.bind_end = "notify_end" in kinds
+        self.bind_ended = "montage_ended" in kinds
+        self.bind_blend = "montage_blending_out" in kinds
+        self.bind_input = "input" in kinds
+        self.bind_anim = self.bind_begin or self.bind_end or self.bind_ended or self.bind_blend
+        self.montage_reads = [i for i in module.inputs if i.host is not None and i.host.item.startswith("montage_")]
+        self.section_reads = [i for i in self.montage_reads if i.host.item == "montage_section"]  # type: ignore[union-attr]
+        self.section_cmds = bool({"montage_play", "montage_jump_to_section", "montage_set_next_section"} & set(self.cmds))
+        self.montage_cmds = [c for c in self.cmds if c.startswith("montage_")]
+        self.needs_anim = bool(self.montage_reads or self.montage_cmds or self.bind_anim)
+        self.arm = bool({"camera_set_arm_length", "camera_set_socket_offset"} & set(self.cmds))
+        self.camera = "camera_set_fov" in self.cmds
+        self.controller = "set_control_rotation" in self.cmds
+        self.movement_cmds = [c for c in self.cmds if EXEC[c][0][0] == _G_MOVEMENT]
+        self.character_cmds = [c for c in self.cmds if EXEC[c][0][0] == _G_CHARACTER]
 
     # ---- statements ---------------------------------------------------------------------------
+    def cmd_arg(self, e: ir.Expr) -> str:
+        if isinstance(e, ir.MontageRef):
+            return f"Dal_MontageId_{e.name}"
+        if isinstance(e.ty, EnumType):
+            return f"static_cast<int32>({unparen(self.ex.x(e))})"
+        return unparen(self.ex.x(e))
+
     def stmts(self, body: list[ir.Stmt], depth: int) -> list[str]:
         pad = T * depth
         out: list[str] = []
@@ -240,6 +432,14 @@ class CppGen:
                 out.extend(self.if_chain(s, depth))
             elif isinstance(s, ir.Return):
                 out.append(f"{pad}return" + (f" {unparen(self.ex.x(s.value))}" if s.value is not None else "") + ";")
+            elif isinstance(s, ir.Command):
+                args = ", ".join(self.cmd_arg(a) for a in s.args)
+                out.append(f"{pad}DalEnqueue(DalHost::Cmd::{cmd_cpp(s.name)}({args}));")
+            elif isinstance(s, ir.For):
+                out.append(f"{pad}for (int32 {s.var} = {s.lo}; {s.var} < {s.hi}; ++{s.var})")
+                out.append(f"{pad}{{")
+                out.extend(self.stmts(s.body, depth + 1))
+                out.append(f"{pad}}}")
         return out
 
     def if_chain(self, s: ir.If, depth: int) -> list[str]:
@@ -268,17 +468,47 @@ class CppGen:
         return [(i, i.host) for i in self.m.inputs if i.host is not None]
 
     def action_names(self) -> list[str]:
+        """Actions read by `input X <- host.action(...)`."""
         seen: list[str] = []
         for _i, h in self.host_items():
             if h.item == "action" and h.arg not in seen:
                 seen.append(h.arg)  # type: ignore[arg-type]
         return seen
 
+    def action_slots(self) -> list[str]:
+        """Every action the class needs an asset slot for: the read ones, then those only handled by `on input`."""
+        seen = self.action_names()
+        for h in self.m.handlers:
+            if h.event == "input" and h.name not in seen:
+                seen.append(h.name)
+        return seen
+
     def notify_names(self) -> list[str]:
+        """Notifies read by `input X <- host.notify("N")`."""
         seen: list[str] = []
         for _i, h in self.host_items():
             if h.item == "notify" and h.arg not in seen:
                 seen.append(h.arg)  # type: ignore[arg-type]
+        return seen
+
+    def notify_ids(self) -> list[str]:
+        """Notify names that travel as events: the handled ones, and (actor logic) the read ones."""
+        seen: list[str] = []
+        for h in self.m.handlers:
+            if h.event in ("notify", "notify_begin", "notify_end") and h.name not in seen:
+                seen.append(h.name)
+        if self.actor:
+            for n in self.notify_names():
+                if n not in seen:
+                    seen.append(n)
+        return seen
+
+    def anim_notify_funcs(self) -> list[str]:
+        """AnimNotify_<N> functions of an anim instance: the read notifies, then those with an `on notify` handler."""
+        seen = self.notify_names()
+        for h in self.m.handlers:
+            if h.event == "notify" and h.name not in seen:
+                seen.append(h.name)
         return seen
 
     def uses(self, *items: str) -> bool:
@@ -286,9 +516,17 @@ class CppGen:
 
     def modules(self) -> list[str]:
         mods = ["Core", "CoreUObject", "Engine"]
-        if self.action_names():
+        if self.action_slots():
             mods += ["EnhancedInput"]
         return mods
+
+    @property
+    def needs_movement_read(self) -> bool:
+        return self.uses(*_MOVEMENT_ITEMS)
+
+    @property
+    def needs_pawn_helper(self) -> bool:
+        return bool(self.cmds and any(EXEC[c][0][0] in (_G_PAWN, _G_MOVEMENT, _G_CHARACTER) for c in self.cmds)) or self.bind_input
 
     # ---- header -------------------------------------------------------------------------------------------
     def banner(self) -> list[str]:
@@ -300,6 +538,345 @@ class CppGen:
             f"// Do not edit: change the .dal source and recompile.",
         ]
 
+    def methods(self) -> list[Method]:
+        """The v1 member functions (everything beyond the v0 overrides, sampling and update)."""
+        m = self.m
+        out: list[Method] = []
+        events, cmds = self.has_events, self.has_cmds
+
+        # ---- helpers
+        if self.needs_pawn_helper:
+            out.append(Method("APawn*", "DalGetPawn", body=[
+                "return TryGetPawnOwner();" if not self.actor else "return Cast<APawn>(GetOwner());"]))
+        if self.character_cmds or self.movement_cmds:
+            out.append(Method("ACharacter*", "DalGetCharacter", body=["return Cast<ACharacter>(DalGetPawn());"]))
+        if self.movement_cmds:
+            out.append(Method("UCharacterMovementComponent*", "DalGetMovement", body=[
+                "ACharacter* DalCharacter = DalGetCharacter();",
+                "return DalCharacter != nullptr ? DalCharacter->GetCharacterMovement() : nullptr;"]))
+        if self.needs_anim:
+            if self.actor:
+                out.append(Method("UAnimInstance*", "DalGetAnimInstance", body=[
+                    "const AActor* DalOwner = GetOwner();",
+                    "USkeletalMeshComponent* DalMesh = DalOwner != nullptr ? DalOwner->FindComponentByClass<USkeletalMeshComponent>() : nullptr;",
+                    "return DalMesh != nullptr ? DalMesh->GetAnimInstance() : nullptr;"]))
+            else:
+                out.append(Method("UAnimInstance*", "DalGetAnimInstance", body=["return this;"]))
+        if self.montage_cmds:
+            out.append(Method("UAnimMontage*", "DalMontageAsset", "const int32 DalMontage", body=self.montage_asset_body()))
+        if self.bind_ended or self.bind_blend:
+            out.append(Method("int32", "DalMontageIndex", "const UAnimMontage* DalMontage", body=self.montage_index_body()))
+
+        # ---- events
+        if events:
+            out.append(Method("void", "DalPostEvent", "const DalHost::FEvent& DalEvent", doc="Called by the host callbacks; the update takes the events at its start.", body=[
+                "FScopeLock DalLock(&DalQueueLock);",
+                "DalEventQueue.Add(DalEvent);"]))
+            out.append(Method("void", "DalTakeEvents", body=[
+                "FScopeLock DalLock(&DalQueueLock);",
+                "DalFrameEvents.Append(DalEventQueue);",
+                "DalEventQueue.Reset();"]))
+            out.append(Method("void", "DalDispatchEvents", doc="Run the handlers for the events taken at the start of the update, oldest first.", body=self.dispatch_body()))
+            for k, h in enumerate(m.handlers):
+                params = ", ".join(f"{cpp_type(t)} {n}" for n, t in h.params)
+                dparams = ", ".join(f"[[maybe_unused]] const {cpp_type(t)} {n}" for n, t in h.params)
+                out.append(Method("void", f"DalHandler_{k}", params, def_params=dparams, body=self.stmts(h.body, 0),
+                                  doc="on " + h.event + " " + h.name + (f" {h.phase}" if h.phase else "")))
+        # ---- commands
+        if cmds:
+            out.append(Method("void", "DalEnqueue", "const DalHost::FCommand& DalCommand", doc="Queue a host command; it runs on the game thread after the update.", body=[
+                "FScopeLock DalLock(&DalQueueLock);",
+                "DalCommandQueue.Add(DalCommand);"]))
+            out.append(Method("void", "DalFlushCommands", doc="Game thread: run the queued host commands, oldest first.", body=[
+                "TArray<DalHost::FCommand> DalPending;",
+                "{",
+                "\tFScopeLock DalLock(&DalQueueLock);",
+                "\tDalPending = MoveTemp(DalCommandQueue);",
+                "\tDalCommandQueue.Reset();",
+                "}",
+                "for (const DalHost::FCommand& DalCommand : DalPending)",
+                "{",
+                "\tDalExecuteCommand(DalCommand);",
+                "}"]))
+            out.append(Method("void", "DalExecuteCommand", "const DalHost::FCommand& DalCommand", body=self.execute_body()))
+        # ---- binding to the animation instance / input component
+        if self.bind_anim:
+            out.append(Method("void", "DalBindAnim", "UAnimInstance* DalAnim", doc="Subscribe to the animation instance's montage and notify delegates.", body=self.bind_body(True)))
+            out.append(Method("void", "DalUnbindAnim", "UAnimInstance* DalAnim", body=self.bind_body(False)))
+            if self.bind_ended:
+                out.append(Method("void", "DalOnMontageEnded", "UAnimMontage* DalMontage, bool bDalInterrupted", ufunction=True, body=self.montage_callback("MontageEnded")))
+            if self.bind_blend:
+                out.append(Method("void", "DalOnMontageBlendingOut", "UAnimMontage* DalMontage, bool bDalInterrupted", ufunction=True, body=self.montage_callback("MontageBlendingOut")))
+            if self.bind_begin:
+                out.append(Method("void", "DalOnPlayMontageNotifyBegin", "FName DalNotifyName, const FBranchingPointNotifyPayload& DalPayload", ufunction=True, body=self.notify_begin_body()))
+            if self.bind_end:
+                out.append(Method("void", "DalOnPlayMontageNotifyEnd", "FName DalNotifyName, const FBranchingPointNotifyPayload& DalPayload",
+                                  def_params="const FName DalNotifyName, [[maybe_unused]] const FBranchingPointNotifyPayload& DalPayload", ufunction=True, body=[
+                    "const int32 DalId = DalFindNotifyId(DalNotifyName);",
+                    "if (DalId != INDEX_NONE)",
+                    "{",
+                    "\tDalHost::FEvent DalEvent;",
+                    "\tDalEvent.Kind = DalHost::EEventKind::NotifyEnd;",
+                    "\tDalEvent.Id = DalId;",
+                    "\tDalPostEvent(DalEvent);",
+                    "}"]))
+        if self.actor and (self.bind_anim or self.bind_input):
+            out.append(Method("void", "DalBindHost", doc="Subscribe to the owner's animation instance and input component (retried every tick until they exist).", body=self.bind_host_body()))
+        if self.bind_input:
+            out.append(Method("void", "DalPostInput", "const int32 DalAction, const DalHost::EInputPhase DalPhase, const FInputActionValue& DalValue", body=[
+                "DalHost::FEvent DalEvent;",
+                "DalEvent.Kind = DalHost::EEventKind::Input;",
+                "DalEvent.Id = DalAction;",
+                "DalEvent.Phase = DalPhase;",
+                "DalEvent.Value = FVector3f(DalValue.Get<FVector>());",
+                "DalPostEvent(DalEvent);"]))
+            for a, phase in self.input_pairs():
+                out.append(Method("void", f"DalOnInput_{a}_{_TRIGGER[phase]}", "const FInputActionValue& DalValue", body=[
+                    f"DalPostInput(Dal_ActionId_{a}, DalHost::EInputPhase::{_TRIGGER[phase]}, DalValue);"]))
+        # ---- queries
+        out.extend(self.query_methods())
+        return out
+
+    def input_pairs(self) -> list[tuple[str, str]]:
+        seen: list[tuple[str, str]] = []
+        for h in self.m.handlers:
+            if h.event == "input" and (h.name, h.phase) not in seen:
+                seen.append((h.name, h.phase))  # type: ignore[arg-type]
+        return seen
+
+    def montage_asset_body(self) -> list[str]:
+        out = ["switch (DalMontage)", "{"]
+        for md in self.m.montages:
+            out.append(f"case Dal_MontageId_{md.name}:")
+            out.append(f"\treturn DalMontage_{md.name};")
+        out += ["default:", "\treturn nullptr;", "}"]
+        return out
+
+    def montage_index_body(self) -> list[str]:
+        out = ["if (DalMontage != nullptr)", "{"]
+        for md in self.m.montages:
+            out += [f"\tif (DalMontage == DalMontage_{md.name}.Get())", "\t{", f"\t\treturn Dal_MontageId_{md.name};", "\t}"]
+        out += ["}", "return INDEX_NONE;"]
+        return out
+
+    def montage_callback(self, kind: str) -> list[str]:
+        return [
+            "const int32 DalId = DalMontageIndex(DalMontage);",
+            "if (DalId != INDEX_NONE)",
+            "{",
+            "\tDalHost::FEvent DalEvent;",
+            f"\tDalEvent.Kind = DalHost::EEventKind::{kind};",
+            "\tDalEvent.Id = DalId;",
+            "\tDalEvent.bFlag = bDalInterrupted;",
+            "\tDalPostEvent(DalEvent);",
+            "}",
+        ]
+
+    def notify_begin_body(self) -> list[str]:
+        out = [
+            "const int32 DalId = DalFindNotifyId(DalNotifyName);",
+            "if (DalId == INDEX_NONE)",
+            "{",
+            "\treturn;",
+            "}",
+            "",
+            "// a notify window (PlayMontageNotifyWindow) is a state; a PlayMontageNotify is a point",
+            "const bool bDalWindow = DalPayload.NotifyEvent != nullptr && DalPayload.NotifyEvent->NotifyStateClass != nullptr;",
+        ]
+        if self.has_events:
+            out += [
+                "DalHost::FEvent DalEvent;",
+                "DalEvent.Kind = bDalWindow ? DalHost::EEventKind::NotifyBegin : DalHost::EEventKind::Notify;",
+                "DalEvent.Id = DalId;",
+                "DalPostEvent(DalEvent);",
+            ]
+        if self.actor and self.notify_names():
+            out += ["", "if (!bDalWindow)", "{"]
+            for n in self.notify_names():
+                out += [f"\tif (DalId == Dal_NotifyId_{n})", "\t{", f"\t\tDalNotify_{n} = true;", "\t}"]
+            out += ["}"]
+        return out
+
+    def bind_body(self, add: bool) -> list[str]:
+        verb = "AddUniqueDynamic" if add else "RemoveDynamic"
+        cls = self.cls
+        out = []
+        if self.bind_ended:
+            out.append(f"DalAnim->OnMontageEnded.{verb}(this, &{cls}::DalOnMontageEnded);")
+        if self.bind_blend:
+            out.append(f"DalAnim->OnMontageBlendingOut.{verb}(this, &{cls}::DalOnMontageBlendingOut);")
+        if self.bind_begin:
+            out.append(f"DalAnim->OnPlayMontageNotifyBegin.{verb}(this, &{cls}::DalOnPlayMontageNotifyBegin);")
+        if self.bind_end:
+            out.append(f"DalAnim->OnPlayMontageNotifyEnd.{verb}(this, &{cls}::DalOnPlayMontageNotifyEnd);")
+        return out
+
+    def bind_host_body(self) -> list[str]:
+        cls = self.cls
+        out: list[str] = []
+        if self.bind_anim:
+            out += [
+                "UAnimInstance* DalAnim = DalGetAnimInstance();",
+                "if (DalAnim != DalBoundAnim.Get())",
+                "{",
+                "\tif (DalBoundAnim.IsValid())",
+                "\t{",
+                "\t\tDalUnbindAnim(DalBoundAnim.Get());",
+                "\t}",
+                "\tDalBoundAnim = DalAnim;",
+                "\tif (DalAnim != nullptr)",
+                "\t{",
+                "\t\tDalBindAnim(DalAnim);",
+                "\t}",
+                "}",
+            ]
+        if self.bind_input:
+            if out:
+                out.append("")
+            out += [
+                "const APawn* DalPawn = DalGetPawn();",
+                "UEnhancedInputComponent* DalInput = DalPawn != nullptr ? Cast<UEnhancedInputComponent>(DalPawn->InputComponent) : nullptr;",
+                "if (DalInput != nullptr && DalInput != DalBoundInput.Get())",
+                "{",
+                "\tDalBoundInput = DalInput;",
+            ]
+            for a, phase in self.input_pairs():
+                out += [
+                    f"\tif (DalAction_{a} != nullptr)",
+                    "\t{",
+                    f"\t\tDalInput->BindAction(DalAction_{a}, ETriggerEvent::{_TRIGGER[phase]}, this, &{cls}::DalOnInput_{a}_{_TRIGGER[phase]});",
+                    "\t}",
+                ]
+            out.append("}")
+        return out
+
+    def dispatch_body(self) -> list[str]:
+        m = self.m
+        out = ["for (const DalHost::FEvent& DalEvent : DalFrameEvents)", "{"]
+        kinds = {"notify": "Notify", "notify_begin": "NotifyBegin", "notify_end": "NotifyEnd",
+                 "montage_ended": "MontageEnded", "montage_blending_out": "MontageBlendingOut", "input": "Input"}
+        for k, h in enumerate(m.handlers):
+            what = f"on {h.event} {h.name}" + (f" {h.phase}" if h.phase else "")
+            kind = kinds[h.event]
+            if h.event in ("notify", "notify_begin", "notify_end"):
+                ident = f"Dal_NotifyId_{h.name}"
+            elif h.event == "input":
+                ident = f"Dal_ActionId_{h.name}"
+            else:
+                ident = f"Dal_MontageId_{h.name}"
+            cond = f"DalEvent.Kind == DalHost::EEventKind::{kind} && DalEvent.Id == {ident}"
+            args = ""
+            if h.event == "input":
+                cond += f" && DalEvent.Phase == DalHost::EInputPhase::{_TRIGGER[h.phase]}"  # type: ignore[index]
+                ty = h.params[0][1]
+                args = {BOOL: "DalEvent.Value.X != 0.0f", FLOAT: "DalEvent.Value.X",
+                        VEC2: "FVector2f(DalEvent.Value.X, DalEvent.Value.Y)", VEC3: "DalEvent.Value"}[ty]
+            elif h.event in ("montage_ended", "montage_blending_out"):
+                args = "DalEvent.bFlag"
+            out += [f"\t// {what}", f"\tif ({cond})", "\t{", f"\t\tDalHandler_{k}({args});", "\t}"]
+        out += ["}", "DalFrameEvents.Reset();"]
+        return out
+
+    def execute_body(self) -> list[str]:
+        out = ["switch (DalCommand.Kind)", "{"]
+        for c in self.cmds:
+            guards, body = EXEC[c]
+            out.append(f"case DalHost::ECommand::{cmd_cpp(c)}:")
+            out.extend(_guarded(guards, body, 1))
+            out.append("\tbreak;")
+        out += ["default:", "\tbreak;", "}"]
+        return out
+
+    def query_methods(self) -> list[Method]:
+        out: list[Method] = []
+        q = self.queries
+        targets = [n for n in q if n.startswith("target_")]
+        if "trace_line" in q:
+            out.append(Method("DalHost::FHit", "DalTraceLine", "const FVector3f& DalStart, const FVector3f& DalEnd",
+                              doc="host.trace_line: the first blocking hit on the trace channel, the owner ignored.",
+                              body=self.trace_body(False)))
+        if "trace_sphere" in q:
+            out.append(Method("DalHost::FHit", "DalTraceSphere", "const FVector3f& DalStart, const FVector3f& DalEnd, const float DalRadius",
+                              doc="host.trace_sphere: a sphere sweep from start to end.", body=self.trace_body(True)))
+        if targets:
+            out.append(Method("void", "DalRefreshTargets", doc="Collect the actors tagged DalTargetTag, once per tick.", body=[
+                "if (bDalTargetsFresh)",
+                "{",
+                "\treturn;",
+                "}",
+                "bDalTargetsFresh = true;",
+                "DalTargets.Reset();",
+                "const UWorld* DalWorld = GetWorld();",
+                "if (DalWorld == nullptr)",
+                "{",
+                "\treturn;",
+                "}",
+                "TArray<AActor*> DalFound;",
+                "UGameplayStatics::GetAllActorsWithTag(DalWorld, DalTargetTag, DalFound);",
+                "for (AActor* DalActor : DalFound)",
+                "{",
+                "\tif (DalActor != GetOwner())",
+                "\t{",
+                "\t\tDalTargets.Add(DalActor);",
+                "\t}",
+                "}"]))
+        if "target_count" in q:
+            out.append(Method("int32", "DalTargetCount", body=["DalRefreshTargets();", "return DalTargets.Num();"]))
+        if "target_id" in q:
+            out.append(Method("int32", "DalTargetId", "const int32 DalIndex", body=[
+                "DalRefreshTargets();",
+                "const AActor* DalActor = DalTargets.IsValidIndex(DalIndex) ? DalTargets[DalIndex].Get() : nullptr;",
+                "return DalActor != nullptr ? static_cast<int32>(DalActor->GetUniqueID()) : -1;"]))
+        if "target_location" in q:
+            out.append(Method("FVector3f", "DalTargetLocation", "const int32 DalIndex", body=[
+                "DalRefreshTargets();",
+                "const AActor* DalActor = DalTargets.IsValidIndex(DalIndex) ? DalTargets[DalIndex].Get() : nullptr;",
+                "return DalActor != nullptr ? FVector3f(DalActor->GetActorLocation()) : FVector3f(0.0f, 0.0f, 0.0f);"]))
+        if "target_index" in q:
+            out.append(Method("int32", "DalTargetIndex", "const int32 DalId", body=[
+                "DalRefreshTargets();",
+                "for (int32 DalIndex = 0; DalIndex < DalTargets.Num(); ++DalIndex)",
+                "{",
+                "\tconst AActor* DalActor = DalTargets[DalIndex].Get();",
+                "\tif (DalActor != nullptr && static_cast<int32>(DalActor->GetUniqueID()) == DalId)",
+                "\t{",
+                "\t\treturn DalIndex;",
+                "\t}",
+                "}",
+                "return -1;"]))
+        return out
+
+    def trace_body(self, sweep: bool) -> list[str]:
+        out = [
+            "DalHost::FHit DalResult;",
+            "DalResult.Point = DalEnd;",
+            "const UWorld* DalWorld = GetWorld();",
+            "if (DalWorld == nullptr)",
+            "{",
+            "\treturn DalResult;",
+            "}",
+            "FHitResult DalHit;",
+            "FCollisionQueryParams DalParams(SCENE_QUERY_STAT(DalTrace), false, GetOwner());",
+        ]
+        if sweep:
+            out.append("const bool bDalBlocked = DalWorld->SweepSingleByChannel(DalHit, FVector(DalStart), FVector(DalEnd), FQuat::Identity, "
+                       "DalTraceChannel, FCollisionShape::MakeSphere(DalRadius), DalParams);")
+        else:
+            out.append("const bool bDalBlocked = DalWorld->LineTraceSingleByChannel(DalHit, FVector(DalStart), FVector(DalEnd), DalTraceChannel, DalParams);")
+        out += [
+            "if (bDalBlocked)",
+            "{",
+            "\tDalResult.bBlocking = true;",
+            "\tDalResult.Point = FVector3f(DalHit.ImpactPoint);",
+            "\tDalResult.Normal = FVector3f(DalHit.ImpactNormal);",
+            "\tDalResult.Distance = DalHit.Distance;",
+            "\tDalResult.Time = DalHit.Time;",
+            "}",
+            "return DalResult;",
+        ]
+        return out
+
+    # ---- header text ---------------------------------------------------------------------------------------------
     def header(self) -> str:
         m, o = self.m, self.o
         L = self.banner()
@@ -307,13 +884,27 @@ class CppGen:
         L.append("#pragma once")
         L.append("")
         L.append('#include "CoreMinimal.h"')
-        L.append(f'#include "{o.parent_include}"')
-        if any(i.ty is MOVEMENT_MODE for i in [*m.params, *m.inputs, *m.states]) or self.uses("movement_mode"):
+        L.append(f'#include "{self.parent_include}"')
+        if self.hosth:
+            L.append('#include "DalHost.h"')
+        if (any(i.ty is MOVEMENT_MODE for i in [*m.params, *m.inputs, *m.states]) or self.uses("movement_mode")
+                or any(q.startswith("trace_") for q in self.queries)):
             L.append('#include "Engine/EngineTypes.h"')
+        if self.bind_begin or self.bind_end:
+            L.append('#include "Animation/AnimNotifies/AnimNotify.h"')
         L.append(f'#include "{m.name}.generated.h"')
         L.append("")
-        if self.action_names():
-            L.append("class UInputAction;")
+        fwd: list[str] = []
+        if self.action_slots():
+            fwd.append("class UInputAction;")
+        if self.bind_input:
+            fwd += ["class UEnhancedInputComponent;", "struct FInputActionValue;"]
+        if m.montages:
+            fwd.append("class UAnimMontage;")
+        if self.actor and self.needs_anim:
+            fwd.append("class UAnimInstance;")
+        if fwd:
+            L.extend(fwd)
             L.append("")
         for en in m.enums:
             L.append("UENUM(BlueprintType)")
@@ -323,12 +914,18 @@ class CppGen:
                 L.append(f"{T}{mem},")
             L.append("};")
             L.append("")
-        L.append("UCLASS()")
-        L.append(f"class {self.api}{self.cls} : public {o.parent_class}")
+        if self.actor:
+            L.append("UCLASS(ClassGroup = (Dal), Meta = (BlueprintSpawnableComponent))")
+        else:
+            L.append("UCLASS()")
+        L.append(f"class {self.api}{self.cls} : public {self.parent}")
         L.append("{")
         L.append(f"{T}GENERATED_BODY()")
         L.append("")
         L.append("public:")
+        if self.actor:
+            L.append(f"{T}{self.cls}();")
+            L.append("")
         if m.params:
             L.append(f"{T}// ---- params: tunable in the editor, read-only for the logic ----")
             for p in m.params:
@@ -353,162 +950,409 @@ class CppGen:
                 L.append(f'{T}UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "DAL|State", Transient)')
                 L.append(f"{T}{cpp_prop_type(s.ty)} {s.name} = {cpp_value(s.ty, s.default)};")
                 L.append("")
-        actions = self.action_names()
-        if actions:
-            L.append(f"{T}// ---- enhanced input assets read by host.action(...); assign them in the class defaults ----")
-            for a in actions:
+        slots = self.action_slots()
+        if slots:
+            if self.bind_input:
+                L.append(f"{T}// ---- enhanced input assets read by host.action(...) or handled by `on input`; assign them in the class defaults ----")
+            else:
+                L.append(f"{T}// ---- enhanced input assets read by host.action(...); assign them in the class defaults ----")
+            for a in slots:
                 L.append(f'{T}UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "DAL|Host")')
                 L.append(f"{T}TObjectPtr<UInputAction> DalAction_{a};")
                 L.append("")
-        L.append(f"{T}virtual void NativeInitializeAnimation() override;")
-        L.append(f"{T}virtual void NativeUpdateAnimation(float DeltaSeconds) override;")
-        L.append(f"{T}virtual void NativeThreadSafeUpdateAnimation(float DeltaSeconds) override;")
+        if m.montages:
+            L.append(f"{T}// ---- montage assets declared with `montage Name {{...}};`; assign them in the class defaults ----")
+            for md in m.montages:
+                L.append(f'{T}UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "DAL|Host")')
+                L.append(f"{T}TObjectPtr<UAnimMontage> DalMontage_{md.name};")
+                L.append("")
+        if any(q.startswith("target_") for q in self.queries):
+            L.append(f"{T}// ---- targets: actors carrying this tag are what host.target_*() sees ----")
+            L.append(f'{T}UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "DAL|Host")')
+            L.append(f'{T}FName DalTargetTag = FName(TEXT("DalTarget"));')
+            L.append("")
+        if any(q.startswith("trace_") for q in self.queries):
+            L.append(f"{T}// ---- the collision channel host.trace_line / host.trace_sphere use ----")
+            L.append(f'{T}UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "DAL|Host")')
+            L.append(f"{T}TEnumAsByte<ECollisionChannel> DalTraceChannel = ECC_Visibility;")
+            L.append("")
+        if self.actor:
+            L.append(f"{T}virtual void BeginPlay() override;")
+            if self.bind_anim:
+                L.append(f"{T}virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;")
+            L.append(f"{T}virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;")
+        else:
+            L.append(f"{T}virtual void NativeInitializeAnimation() override;")
+            L.append(f"{T}virtual void NativeUpdateAnimation(float DeltaSeconds) override;")
+            L.append(f"{T}virtual void NativeThreadSafeUpdateAnimation(float DeltaSeconds) override;")
         L.append("")
         L.append(f"{T}/** Restore every input and state to its declared default. */")
         L.append(f"{T}void DalResetState();")
         L.append("")
+        thread_safe = "" if self.actor else ", Meta = (BlueprintThreadSafe)"
         for e in m.entries:
-            L.append(f"{T}/** Entry: call from a .dab with Call(Self.{e.name}). Uses the delta time of the current update. */")
-            L.append(f'{T}UFUNCTION(BlueprintCallable, Category = "DAL|Entry", Meta = (BlueprintThreadSafe))')
+            L.append(f"{T}/** Entry: call from a .dab with Call(Self.{e.name}). Uses the delta time of the current update. */"
+                     if not self.actor else f"{T}/** Entry: callable from Blueprints. Uses the delta time of the last tick. */")
+            L.append(f'{T}UFUNCTION(BlueprintCallable, Category = "DAL|Entry"{thread_safe})')
             L.append(f"{T}void {e.name}();")
             L.append("")
-        for n in self.notify_names():
-            L.append(f"{T}/** Animation notify '{n}': read through host.notify(\"{n}\"). */")
-            L.append(f"{T}UFUNCTION()")
-            L.append(f"{T}void AnimNotify_{n}();")
-            L.append("")
+        notify_flags = self.notify_names()
+        if not self.actor:
+            for n in self.anim_notify_funcs():
+                if n in notify_flags:
+                    L.append(f"{T}/** Animation notify '{n}': read through host.notify(\"{n}\")" + (" and `on notify`" if self.has_events else "") + ". */")
+                else:
+                    L.append(f"{T}/** Animation notify '{n}': handled by `on notify {n}`. */")
+                L.append(f"{T}UFUNCTION()")
+                L.append(f"{T}void AnimNotify_{n}();")
+                L.append("")
         L.append("protected:")
         L.append(f"{T}/** Game thread: read the host into the input properties. */")
         L.append(f"{T}void DalSampleInputs();")
         L.append("")
-        L.append(f"{T}/** Worker thread: the update body. Touches only this object's properties. */")
+        queued = " (host commands are queued)" if (not self.actor and self.has_cmds) else ""
+        L.append(f"{T}/** {'Game thread' if self.actor else 'Worker thread'}: the update body. Touches only this object's properties{queued}. */")
         L.append(f"{T}void DalUpdate(float DeltaSeconds);")
         L.append("")
         L.append("private:")
         L.append(f"{T}float Dal_DeltaSeconds = 0.0f;")
-        for n in self.notify_names():
+        for n in notify_flags:
             L.append(f"{T}bool DalNotify_{n} = false;")
+        if self.hosth:
+            L.append("")
+            if self.has_events or self.has_cmds:
+                L.append(f"{T}FCriticalSection DalQueueLock;                   // guards the two queues below")
+            if self.has_events:
+                L.append(f"{T}TArray<DalHost::FEvent> DalEventQueue;           // posted by the host callbacks")
+                L.append(f"{T}TArray<DalHost::FEvent> DalFrameEvents;          // taken for the running update")
+            if self.has_cmds:
+                L.append(f"{T}TArray<DalHost::FCommand> DalCommandQueue;       // queued by the update, run on the game thread")
+            if self.actor and self.bind_anim:
+                L.append(f"{T}TWeakObjectPtr<UAnimInstance> DalBoundAnim;")
+            if self.actor and self.bind_input:
+                L.append(f"{T}TWeakObjectPtr<UEnhancedInputComponent> DalBoundInput;")
+            if any(q.startswith("target_") for q in self.queries):
+                L.append(f"{T}TArray<TWeakObjectPtr<AActor>> DalTargets;")
+                L.append(f"{T}bool bDalTargetsFresh = false;")
+        methods = self.methods()
+        if methods:
+            L.append("")
+            for mt in methods:
+                L.extend(mt.decl())
+                L.append("")
+            while L[-1] == "":
+                L.pop()
         L.append("};")
         return "\n".join(L) + "\n"
 
     # ---- source -------------------------------------------------------------------------------------------------
+    def source_includes(self) -> list[str]:
+        m = self.m
+        inc: list[str] = []
+
+        def add(x: str) -> None:
+            if x not in inc:
+                inc.append(x)
+
+        if self.actor:
+            add("GameFramework/Actor.h")
+        if self.uses("time") or self.queries:
+            add("Engine/World.h")
+        if self.needs_movement_read or self.movement_cmds or self.character_cmds:
+            add("GameFramework/Character.h")
+            add("GameFramework/CharacterMovementComponent.h")
+        if self.uses(*_PAWN_ITEMS) or self.needs_pawn_helper or self.controller or self.arm or self.camera:
+            add("GameFramework/Pawn.h")
+        if self.action_names():
+            for x in ("Engine/LocalPlayer.h", "GameFramework/PlayerController.h", "EnhancedInputSubsystems.h",
+                      "EnhancedPlayerInput.h", "InputAction.h", "InputActionValue.h"):
+                add(x)
+        # ---- v1
+        if self.bind_input:
+            for x in ("EnhancedInputComponent.h", "InputAction.h", "InputActionValue.h"):
+                add(x)
+        if self.needs_anim:
+            add("Animation/AnimInstance.h")
+            add("Animation/AnimMontage.h")
+            if self.actor:
+                add("Components/SkeletalMeshComponent.h")
+        if self.bind_begin:
+            add("Animation/AnimTypes.h")
+        if self.controller:
+            add("GameFramework/Controller.h")
+        if self.arm:
+            add("GameFramework/SpringArmComponent.h")
+        if self.camera:
+            add("Camera/CameraComponent.h")
+        if any(q.startswith("trace_") for q in self.queries):
+            add("CollisionQueryParams.h")
+            add("Engine/HitResult.h")
+        if any(q.startswith("target_") for q in self.queries):
+            add("GameFramework/Actor.h")
+            add("Kismet/GameplayStatics.h")
+        if self.has_events or self.has_cmds:
+            add("Misc/ScopeLock.h")
+        for x in m.externs:
+            if x.include:
+                add(x.include)
+        return inc
+
+    def namespace_block(self) -> list[str]:
+        m = self.m
+        v1_ids = bool(m.montages or self.notify_ids() or (self.bind_input and self.action_slots()))
+        v1_tables = bool(self.notify_ids() or self.section_cmds or self.section_reads)
+        if not (m.consts or m.funcs or self.action_names() or v1_ids or v1_tables):
+            return []
+        L = ["namespace", "{"]
+        for c in m.consts:
+            L.append(f"{T}// const {c.name}: {c.ty} = {c.source.rstrip(';').split('=', 1)[-1].strip()}")
+            L.append(f"{T}[[maybe_unused]] const {cpp_type(c.ty)} Dal_K_{c.name} = {cpp_value(c.ty, c.value)};")
+        if m.consts:
+            L.append("")
+        for f in m.funcs:
+            params = ", ".join(f"{cpp_type(t)} {n}" for n, t in f.params)
+            L.append(f"{T}[[maybe_unused]] {cpp_type(f.ret)} Dal_Fn_{f.name}({params})")
+            L.append(f"{T}{{")
+            L.extend(self.stmts(f.body, 2))
+            L.append(f"{T}}}")
+            L.append("")
+        if self.action_names():
+            L.append(f"{T}const UEnhancedPlayerInput* DalGetPlayerInput(const APawn* Pawn)")
+            L.append(f"{T}{{")
+            L.append(f"{T}{T}const APlayerController* Controller = Pawn != nullptr ? Cast<APlayerController>(Pawn->GetController()) : nullptr;")
+            L.append(f"{T}{T}const ULocalPlayer* LocalPlayer = Controller != nullptr ? Controller->GetLocalPlayer() : nullptr;")
+            L.append(f"{T}{T}const UEnhancedInputLocalPlayerSubsystem* Subsystem =")
+            L.append(f"{T}{T}{T}LocalPlayer != nullptr ? LocalPlayer->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>() : nullptr;")
+            L.append(f"{T}{T}return Subsystem != nullptr ? Subsystem->GetPlayerInput() : nullptr;")
+            L.append(f"{T}}}")
+            L.append("")
+        if v1_ids:
+            L.append(f"{T}// ---- ids of the host traffic: indices into this logic's tables ----")
+            for i, md in enumerate(m.montages):
+                L.append(f"{T}[[maybe_unused]] constexpr int32 Dal_MontageId_{md.name} = {i};")
+            for i, n in enumerate(self.notify_ids()):
+                L.append(f"{T}[[maybe_unused]] constexpr int32 Dal_NotifyId_{n} = {i};")
+            if self.bind_input:
+                for i, a in enumerate(self.action_slots()):
+                    L.append(f"{T}[[maybe_unused]] constexpr int32 Dal_ActionId_{a} = {i};")
+            L.append("")
+        if self.notify_ids():
+            L.append(f"{T}[[maybe_unused]] int32 DalFindNotifyId(const FName Name)")
+            L.append(f"{T}{{")
+            L.append(f"{T}{T}static const FName Names[] =")
+            L.append(f"{T}{T}{{")
+            for n in self.notify_ids():
+                L.append(f'{T}{T}{T}FName(TEXT("{n}")),')
+            L.append(f"{T}{T}}};")
+            L.append(f"{T}{T}for (int32 Index = 0; Index < static_cast<int32>(UE_ARRAY_COUNT(Names)); ++Index)")
+            L.append(f"{T}{T}{{")
+            L.append(f"{T}{T}{T}if (Names[Index] == Name)")
+            L.append(f"{T}{T}{T}{{")
+            L.append(f"{T}{T}{T}{T}return Index;")
+            L.append(f"{T}{T}{T}}}")
+            L.append(f"{T}{T}}}")
+            L.append(f"{T}{T}return INDEX_NONE;")
+            L.append(f"{T}}}")
+            L.append("")
+        if self.section_cmds or self.section_reads:
+            L.append(f"{T}// The sections of a montage, indexed like its section enum (0 = None).")
+            L.append(f"{T}[[maybe_unused]] const FName* DalSectionTable(const int32 Montage, int32& OutCount)")
+            L.append(f"{T}{{")
+            L.append(f"{T}{T}switch (Montage)")
+            L.append(f"{T}{T}{{")
+            for md in m.montages:
+                L.append(f"{T}{T}case Dal_MontageId_{md.name}:")
+                L.append(f"{T}{T}{{")
+                L.append(f"{T}{T}{T}static const FName Names[] =")
+                L.append(f"{T}{T}{T}{{")
+                L.append(f"{T}{T}{T}{T}NAME_None,")
+                for sec in md.sections:
+                    L.append(f'{T}{T}{T}{T}FName(TEXT("{sec}")),')
+                L.append(f"{T}{T}{T}}};")
+                L.append(f"{T}{T}{T}OutCount = static_cast<int32>(UE_ARRAY_COUNT(Names));")
+                L.append(f"{T}{T}{T}return Names;")
+                L.append(f"{T}{T}}}")
+            L.append(f"{T}{T}default:")
+            L.append(f"{T}{T}{T}OutCount = 0;")
+            L.append(f"{T}{T}{T}return nullptr;")
+            L.append(f"{T}{T}}}")
+            L.append(f"{T}}}")
+            L.append("")
+            if self.section_cmds:
+                L.append(f"{T}[[maybe_unused]] FName DalSectionName(const int32 Montage, const int32 Section)")
+                L.append(f"{T}{{")
+                L.append(f"{T}{T}int32 Count = 0;")
+                L.append(f"{T}{T}const FName* Names = DalSectionTable(Montage, Count);")
+                L.append(f"{T}{T}return Names != nullptr && Section >= 0 && Section < Count ? Names[Section] : FName(NAME_None);")
+                L.append(f"{T}}}")
+                L.append("")
+            if self.section_reads:
+                L.append(f"{T}[[maybe_unused]] int32 DalSectionIndex(const int32 Montage, const FName Section)")
+                L.append(f"{T}{{")
+                L.append(f"{T}{T}int32 Count = 0;")
+                L.append(f"{T}{T}const FName* Names = DalSectionTable(Montage, Count);")
+                L.append(f"{T}{T}for (int32 Index = 1; Index < Count; ++Index)")
+                L.append(f"{T}{T}{{")
+                L.append(f"{T}{T}{T}if (Names[Index] == Section)")
+                L.append(f"{T}{T}{T}{{")
+                L.append(f"{T}{T}{T}{T}return Index;")
+                L.append(f"{T}{T}{T}}}")
+                L.append(f"{T}{T}}}")
+                L.append(f"{T}{T}return 0;")
+                L.append(f"{T}}}")
+                L.append("")
+        while L[-1] == "":
+            L.pop()
+        L.append("}")
+        return L
+
     def source(self) -> str:
         m = self.m
+        cls = self.cls
         L = self.banner()
         L.append(f'#include "{m.name}.h"')
         L.append("")
         L.append('#include "DalMath.h"')
-        if self.uses("time"):
-            L.append('#include "Engine/World.h"')
-        movement_items = ("velocity", "acceleration", "max_acceleration", "max_braking_deceleration",
-                          "max_walk_speed", "movement_mode", "is_grounded", "is_crouching")
-        if self.uses(*movement_items):
-            L.append('#include "GameFramework/Character.h"')
-            L.append('#include "GameFramework/CharacterMovementComponent.h"')
-        if self.uses("actor_rotation", "control_rotation", "action"):
-            L.append('#include "GameFramework/Pawn.h"')
-        if self.action_names():
-            for inc in ("Engine/LocalPlayer.h", "GameFramework/PlayerController.h", "EnhancedInputSubsystems.h",
-                        "EnhancedPlayerInput.h", "InputAction.h", "InputActionValue.h"):
-                L.append(f'#include "{inc}"')
-        for x in m.externs:
-            if x.include:
-                L.append(f'#include "{x.include}"')
+        for inc in self.source_includes():
+            L.append(f'#include "{inc}"')
         L.append("")
         L.append(f"#include UE_INLINE_GENERATED_CPP_BY_NAME({m.name})")
         L.append("")
-
-        if m.consts or m.funcs or self.action_names():
-            L.append("namespace")
-            L.append("{")
-            for c in m.consts:
-                L.append(f"{T}// const {c.name}: {c.ty} = {c.source.rstrip(';').split('=', 1)[-1].strip()}")
-                L.append(f"{T}[[maybe_unused]] const {cpp_type(c.ty)} Dal_K_{c.name} = {cpp_value(c.ty, c.value)};")
-            if m.consts:
-                L.append("")
-            for f in m.funcs:
-                params = ", ".join(f"{cpp_type(t)} {n}" for n, t in f.params)
-                L.append(f"{T}[[maybe_unused]] {cpp_type(f.ret)} Dal_Fn_{f.name}({params})")
-                L.append(f"{T}{{")
-                L.extend(self.stmts(f.body, 2))
-                L.append(f"{T}}}")
-                L.append("")
-            if self.action_names():
-                L.append(f"{T}const UEnhancedPlayerInput* DalGetPlayerInput(const APawn* Pawn)")
-                L.append(f"{T}{{")
-                L.append(f"{T}{T}const APlayerController* Controller = Pawn != nullptr ? Cast<APlayerController>(Pawn->GetController()) : nullptr;")
-                L.append(f"{T}{T}const ULocalPlayer* LocalPlayer = Controller != nullptr ? Controller->GetLocalPlayer() : nullptr;")
-                L.append(f"{T}{T}const UEnhancedInputLocalPlayerSubsystem* Subsystem =")
-                L.append(f"{T}{T}{T}LocalPlayer != nullptr ? LocalPlayer->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>() : nullptr;")
-                L.append(f"{T}{T}return Subsystem != nullptr ? Subsystem->GetPlayerInput() : nullptr;")
-                L.append(f"{T}}}")
-                L.append("")
-            while L[-1] == "":
-                L.pop()
-            L.append("}")
+        ns = self.namespace_block()
+        if ns:
+            L.extend(ns)
             L.append("")
 
-        cls = self.cls
-        L.append(f"void {cls}::NativeInitializeAnimation()")
-        L.append("{")
-        L.append(f"{T}Super::NativeInitializeAnimation();")
-        L.append("")
-        L.append(f"{T}DalResetState();")
-        L.append("}")
-        L.append("")
-        L.append(f"void {cls}::NativeUpdateAnimation(const float DeltaSeconds)")
-        L.append("{")
-        L.append(f"{T}Super::NativeUpdateAnimation(DeltaSeconds);")
-        L.append("")
-        L.append(f"{T}// Game thread: gather the host values; the worker thread only reads this object.")
-        L.append(f"{T}DalSampleInputs();")
-        L.append("}")
-        L.append("")
-        L.append(f"void {cls}::NativeThreadSafeUpdateAnimation(const float DeltaSeconds)")
-        L.append("{")
-        L.append(f"{T}Super::NativeThreadSafeUpdateAnimation(DeltaSeconds);")
-        L.append("")
-        L.append(f"{T}Dal_DeltaSeconds = DeltaSeconds;")
-        L.append(f"{T}DalUpdate(DeltaSeconds);")
-        L.append("}")
-        L.append("")
-        L.append(f"void {cls}::DalResetState()")
-        L.append("{")
-        L.append(f"{T}Dal_DeltaSeconds = 0.0f;")
-        for n in self.notify_names():
-            L.append(f"{T}DalNotify_{n} = false;")
-        for i in m.inputs:
-            L.append(f"{T}{i.name} = {cpp_value(i.ty, i.default)};")
-        for s in m.states:
-            L.append(f"{T}{s.name} = {cpp_value(s.ty, s.default)};")
-        L.append("}")
-        L.append("")
-        L.extend(self.sample_function())
-        L.append("")
-        u = m.update
-        L.append(f"void {cls}::DalUpdate([[maybe_unused]] const float {u.dt_name if u else 'DeltaSeconds'})")
-        L.append("{")
-        if u is not None:
-            L.extend(self.stmts(u.body, 1))
+        blocks: list[list[str]] = []
+        traffic = self.has_events or self.has_cmds
+
+        # ---- lifecycle
+        if self.actor:
+            blocks.append([f"{cls}::{cls}()", "{",
+                           f"{T}PrimaryComponentTick.bCanEverTick = true;",
+                           f"{T}PrimaryComponentTick.TickGroup = TG_PrePhysics;", "}"])
+            begin = [f"void {cls}::BeginPlay()", "{", f"{T}Super::BeginPlay();", "", f"{T}DalResetState();"]
+            if self.bind_anim or self.bind_input:
+                begin.append(f"{T}DalBindHost();")
+            begin.append("}")
+            blocks.append(begin)
+            if self.bind_anim:
+                blocks.append([f"void {cls}::EndPlay(const EEndPlayReason::Type EndPlayReason)", "{",
+                               f"{T}if (DalBoundAnim.IsValid())", f"{T}{{",
+                               f"{T}{T}DalUnbindAnim(DalBoundAnim.Get());", f"{T}}}",
+                               f"{T}DalBoundAnim.Reset();", "",
+                               f"{T}Super::EndPlay(EndPlayReason);", "}"])
+            tick = [f"void {cls}::TickComponent(const float DeltaTime, const ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)", "{",
+                    f"{T}Super::TickComponent(DeltaTime, TickType, ThisTickFunction);", ""]
+            if any(q.startswith("target_") for q in self.queries):
+                tick.append(f"{T}bDalTargetsFresh = false;")
+            if self.bind_anim or self.bind_input:
+                tick.append(f"{T}DalBindHost();")
+            tick.append(f"{T}DalSampleInputs();")
+            if self.has_events:
+                tick.append(f"{T}DalTakeEvents();")
+            tick.append(f"{T}Dal_DeltaSeconds = DeltaTime;")
+            tick.append(f"{T}DalUpdate(DeltaTime);")
+            if self.has_cmds:
+                tick.append(f"{T}DalFlushCommands();")
+            tick.append("}")
+            blocks.append(tick)
         else:
-            L.append(f"{T}// (no update body)")
-        L.append("}")
-        L.append("")
-        for e in m.entries:
-            L.append(f"void {cls}::{e.name}()")
-            L.append("{")
-            L.append(f"{T}[[maybe_unused]] const float {e.dt_name} = Dal_DeltaSeconds;")
-            L.extend(self.stmts(e.body, 1))
-            L.append("}")
-            L.append("")
+            init = [f"void {cls}::NativeInitializeAnimation()", "{", f"{T}Super::NativeInitializeAnimation();", "", f"{T}DalResetState();"]
+            if self.bind_anim:
+                init.append(f"{T}DalBindAnim(this);")
+            init.append("}")
+            blocks.append(init)
+            upd = [f"void {cls}::NativeUpdateAnimation(const float DeltaSeconds)", "{",
+                   f"{T}Super::NativeUpdateAnimation(DeltaSeconds);", ""]
+            if traffic:
+                upd.append(f"{T}// Game thread: run what the previous update asked for, gather the host values and the events;")
+                upd.append(f"{T}// the worker thread only reads this object.")
+                if self.has_cmds:
+                    upd.append(f"{T}DalFlushCommands();")
+                upd.append(f"{T}DalSampleInputs();")
+                if self.has_events:
+                    upd.append(f"{T}DalTakeEvents();")
+            else:
+                upd.append(f"{T}// Game thread: gather the host values; the worker thread only reads this object.")
+                upd.append(f"{T}DalSampleInputs();")
+            upd.append("}")
+            blocks.append(upd)
+            blocks.append([f"void {cls}::NativeThreadSafeUpdateAnimation(const float DeltaSeconds)", "{",
+                           f"{T}Super::NativeThreadSafeUpdateAnimation(DeltaSeconds);", "",
+                           f"{T}Dal_DeltaSeconds = DeltaSeconds;",
+                           f"{T}DalUpdate(DeltaSeconds);", "}"])
+
+        # ---- reset
+        reset = [f"void {cls}::DalResetState()", "{", f"{T}Dal_DeltaSeconds = 0.0f;"]
         for n in self.notify_names():
-            L.append(f"void {cls}::AnimNotify_{n}()")
-            L.append("{")
-            L.append(f"{T}DalNotify_{n} = true;")
-            L.append("}")
-            L.append("")
-        while L[-1] == "":
-            L.pop()
+            reset.append(f"{T}DalNotify_{n} = false;")
+        for i in m.inputs:
+            reset.append(f"{T}{i.name} = {cpp_value(i.ty, i.default)};")
+        for s in m.states:
+            reset.append(f"{T}{s.name} = {cpp_value(s.ty, s.default)};")
+        if self.has_events:
+            reset.append(f"{T}DalEventQueue.Reset();")
+            reset.append(f"{T}DalFrameEvents.Reset();")
+        if self.has_cmds:
+            reset.append(f"{T}DalCommandQueue.Reset();")
+        if any(q.startswith("target_") for q in self.queries):
+            reset.append(f"{T}DalTargets.Reset();")
+            reset.append(f"{T}bDalTargetsFresh = false;")
+        reset.append("}")
+        blocks.append(reset)
+        blocks.append(self.sample_function())
+
+        # ---- v1 members (helpers, events, commands, binding, queries)
+        for mt in self.methods():
+            if mt.name == "DalDispatchEvents" or mt.name.startswith("DalHandler_"):
+                continue
+            blocks.append(mt.define(cls))
+
+        # ---- update
+        u = m.update
+        upd_lines = [f"void {cls}::DalUpdate([[maybe_unused]] const float {u.dt_name if u else 'DeltaSeconds'})", "{"]
+        body: list[str] = []
+        if u is not None and u.pre:
+            body.extend(self.stmts(u.pre, 1))
+        if self.has_events:
+            body.append(f"{T}DalDispatchEvents();")
+        if u is not None:
+            body.extend(self.stmts(u.body, 1))
+        if not body and u is None:
+            body.append(f"{T}// (no update body)")
+        upd_lines.extend(body)
+        upd_lines.append("}")
+        for mt in self.methods():
+            if mt.name == "DalDispatchEvents" or mt.name.startswith("DalHandler_"):
+                blocks.append(mt.define(cls))
+        blocks.append(upd_lines)
+        for e in m.entries:
+            lines = [f"void {cls}::{e.name}()", "{",
+                     f"{T}[[maybe_unused]] const float {e.dt_name} = Dal_DeltaSeconds;"]
+            lines.extend(self.stmts(e.body, 1))
+            if self.actor and self.has_cmds:
+                lines.append(f"{T}DalFlushCommands();")
+            lines.append("}")
+            blocks.append(lines)
+        if not self.actor:
+            handled = {h.name for h in m.handlers if h.event == "notify"}
+            flags = set(self.notify_names())
+            for n in self.anim_notify_funcs():
+                lines = [f"void {cls}::AnimNotify_{n}()", "{"]
+                if n in flags:
+                    lines.append(f"{T}DalNotify_{n} = true;")
+                if n in handled:
+                    lines += [f"{T}DalHost::FEvent DalEvent;",
+                              f"{T}DalEvent.Kind = DalHost::EEventKind::Notify;",
+                              f"{T}DalEvent.Id = Dal_NotifyId_{n};",
+                              f"{T}DalPostEvent(DalEvent);"]
+                lines.append("}")
+                blocks.append(lines)
+        for k, blk in enumerate(blocks):
+            if k:
+                L.append("")
+            L.extend(blk)
         return "\n".join(L) + "\n"
 
     def sample_function(self) -> list[str]:
@@ -519,12 +1363,10 @@ class CppGen:
             L.append(f"{T}// (no host-bound inputs)")
             L.append("}")
             return L
-        movement_items = ("velocity", "acceleration", "max_acceleration", "max_braking_deceleration",
-                          "max_walk_speed", "movement_mode", "is_grounded", "is_crouching")
-        needs_movement = self.uses(*movement_items)
-        needs_pawn = needs_movement or self.uses("actor_rotation", "control_rotation", "action")
+        needs_movement = self.needs_movement_read
+        needs_pawn = needs_movement or self.uses(*_PAWN_ITEMS)
         if needs_pawn:
-            L.append(f"{T}const APawn* Pawn = TryGetPawnOwner();")
+            L.append(f"{T}const APawn* Pawn = " + ("Cast<APawn>(GetOwner());" if self.actor else "TryGetPawnOwner();"))
         if needs_movement:
             L.append(f"{T}const ACharacter* Character = Cast<ACharacter>(Pawn);")
             L.append(f"{T}const UCharacterMovementComponent* Movement = IsValid(Character) ? Character->GetCharacterMovement() : nullptr;")
@@ -532,6 +1374,8 @@ class CppGen:
             L.append(f"{T}const UEnhancedPlayerInput* PlayerInput = DalGetPlayerInput(Pawn);")
         if self.uses("time"):
             L.append(f"{T}const UWorld* World = GetWorld();")
+        if self.montage_reads:
+            L.append(f"{T}const UAnimInstance* DalAnim = DalGetAnimInstance();")
         L.append("")
         for i, h in host:
             default = cpp_value(i.ty, i.default)
@@ -544,6 +1388,24 @@ class CppGen:
                 L.append(f"{T}{name} = DalNotify_{h.arg};")
                 L.append(f"{T}DalNotify_{h.arg} = false;")
                 continue
+            if it.startswith("montage_"):
+                slot = f"DalMontage_{h.arg}"
+                L.append(f"{T}{name} = {default};")
+                cond = f"DalAnim != nullptr && {slot} != nullptr"
+                if it == "montage_playing":
+                    value = f"DalAnim->Montage_IsPlaying({slot})"
+                elif it == "montage_active":
+                    value = f"DalAnim->Montage_IsActive({slot})"
+                elif it == "montage_position":
+                    value = f"DalAnim->Montage_GetPosition({slot})"
+                else:
+                    cond += f" && DalAnim->Montage_IsPlaying({slot})"
+                    value = f"static_cast<{i.ty.cpp_type}>(DalSectionIndex(Dal_MontageId_{h.arg}, DalAnim->Montage_GetCurrentSection({slot})))"  # type: ignore[attr-defined]
+                L.append(f"{T}if ({cond})")
+                L.append(f"{T}{{")
+                L.append(f"{T}{T}{name} = {value};")
+                L.append(f"{T}}}")
+                continue
             movement_expr = {
                 "velocity": "FVector3f(Movement->Velocity)",
                 "acceleration": "FVector3f(Movement->GetCurrentAcceleration())",
@@ -555,6 +1417,7 @@ class CppGen:
                 "is_crouching": "Movement->IsCrouching()",
             }
             pawn_expr = {
+                "actor_location": "FVector3f(Pawn->GetActorLocation())",
                 "actor_rotation": "FQuat4f(Pawn->GetActorQuat())",
                 "control_rotation": "FRotator3f(Pawn->GetControlRotation())",
             }
@@ -594,14 +1457,20 @@ class CppGen:
 
 
 def generate_cpp(module: ir.Module, options: CppOptions | None = None) -> dict[str, str]:
-    """Return ``{filename: text}`` for the generated header, source and the math header."""
+    """Return ``{filename: text}`` for the generated header, source, the math header and (v1 host traffic) DalHost.h."""
     options = options or CppOptions()
     g = CppGen(module, options)
-    math_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cpp", "DalMath.h")
-    with open(math_path, "r", encoding="utf-8", newline="") as f:
-        math_text = f.read().replace("\r\n", "\n")
-    return {
+    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cpp")
+
+    def read(name: str) -> str:
+        with open(os.path.join(here, name), "r", encoding="utf-8", newline="") as f:
+            return f.read().replace("\r\n", "\n")
+
+    files = {
         f"{module.name}.h": g.header(),
         f"{module.name}.cpp": g.source(),
-        "DalMath.h": math_text,
+        "DalMath.h": read("DalMath.h"),
     }
+    if g.hosth:
+        files["DalHost.h"] = read("DalHost.h")
+    return files

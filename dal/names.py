@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import keyword
+import re
 
 PY_RESERVED = frozenset(keyword.kwlist) | frozenset(getattr(keyword, "softkwlist", [])) | frozenset(
     {"self", "cls", "True", "False", "None"}
@@ -23,6 +24,10 @@ UE_RESERVED = frozenset(
     """TRUE FALSE NULL INDEX_NONE check checkf verify ensure ensureMsgf TEXT UE_LOG UPROPERTY UFUNCTION UCLASS USTRUCT
     UENUM GENERATED_BODY interface small near far IN OUT OPTIONAL ERROR DELETE CONST PI MAX_int32 MIN_int32 MAX_FLT
     WITH_EDITOR DalMath""".split()
+) | frozenset(
+    # locals and parameters of the generated sampling code and of the overrides
+    """Pawn Character Movement World PlayerInput LocalPlayer Subsystem Controller
+    DeltaSeconds DeltaTime TickType ThisTickFunction EndPlayReason""".split()
 )
 
 # Members of UAnimInstance that a state/input/param could shadow.
@@ -42,6 +47,9 @@ PY_CLASS_API = frozenset(
 
 RESERVED_PREFIXES = ("Dal_", "DAL_", "DalHost_", "DalNotify_", "DalAction_", "DalMontage_", "AnimNotify_", "Montage_", "Native", "Blueprint")
 
+# Everything the C++ backend adds to the generated class is called Dal<Upper> / Dal_<...> / bDal<Upper>.
+_GENERATED_NAME = re.compile(r"^b?Dal[A-Z_]")
+
 
 def reserved_reason(name: str, allow_py_keyword: bool = False) -> str | None:
     """Why ``name`` cannot be declared, or None if it is fine."""
@@ -55,6 +63,8 @@ def reserved_reason(name: str, allow_py_keyword: bool = False) -> str | None:
         return "it is an attribute of the generated class API"
     if name in ANIM_INSTANCE_MEMBERS:
         return "it is a member of UAnimInstance"
+    if _GENERATED_NAME.match(name):
+        return "names starting with 'Dal' followed by a capital letter or '_' are reserved for generated code"
     for p in RESERVED_PREFIXES:
         if name.startswith(p):
             return f"names starting with '{p}' are reserved for generated code and the engine"

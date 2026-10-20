@@ -13,13 +13,17 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <string>
 #include <type_traits>
+#include <utility>
+#include <vector>
 
 using int32 = std::int32_t;
 using uint8 = std::uint8_t;
 using uint32 = std::uint32_t;
 using int64 = std::int64_t;
 
+#define INDEX_NONE (-1)
 #define MAX_int32 INT32_MAX
 #define MIN_int32 INT32_MIN
 #define UE_PI (3.1415926535897932f)
@@ -29,6 +33,8 @@ using int64 = std::int64_t;
 #define UE_SMALL_NUMBER (1.e-8f)
 #define UE_KINDA_SMALL_NUMBER (1.e-4f)
 #define UE_ARRAY_COUNT(array) (sizeof(array) / sizeof((array)[0]))
+
+#define TEXT(x) x
 
 // reflection macros are empty outside UHT
 #define UCLASS(...)
@@ -49,6 +55,7 @@ struct TObjectPtr
 	TObjectPtr& operator=(T* In) { Ptr = In; return *this; }
 	operator T*() const { return Ptr; }
 	T* operator->() const { return Ptr; }
+	T* Get() const { return Ptr; }
 	bool operator==(std::nullptr_t) const { return Ptr == nullptr; }
 	bool operator!=(std::nullptr_t) const { return Ptr != nullptr; }
 };
@@ -62,6 +69,55 @@ struct TEnumAsByte
 	TEnumAsByte& operator=(E In) { Value = static_cast<uint8>(In); return *this; }
 	operator E() const { return static_cast<E>(Value); }
 	E GetValue() const { return static_cast<E>(Value); }
+};
+
+// ---- names, containers, locks ------------------------------------------------------------------
+// Only the calls the generated code makes; semantics follow Containers/Array.h, UObject/NameTypes.h,
+// Misc/ScopeLock.h of UE 5.8.
+
+struct FName
+{
+	std::string Text;                       // empty = NAME_None
+	FName() = default;
+	FName(const char* In) : Text(In) {}
+	bool operator==(const FName& O) const { return Text == O.Text; }
+	bool operator!=(const FName& O) const { return Text != O.Text; }
+	std::string ToString() const { return Text.empty() ? "None" : Text; }
+};
+inline const FName NAME_None;
+
+template <class T>
+struct TArray
+{
+	std::vector<T> V;
+	int32 Num() const { return static_cast<int32>(V.size()); }
+	bool IsValidIndex(int32 I) const { return I >= 0 && I < Num(); }
+	int32 Add(const T& In) { V.push_back(In); return Num() - 1; }
+	int32 Add(T&& In) { V.push_back(std::move(In)); return Num() - 1; }
+	void Append(const TArray& Other) { V.insert(V.end(), Other.V.begin(), Other.V.end()); }
+	void Reset() { V.clear(); }
+	T& operator[](int32 I) { return V[static_cast<size_t>(I)]; }
+	const T& operator[](int32 I) const { return V[static_cast<size_t>(I)]; }
+	auto begin() { return V.begin(); }
+	auto end() { return V.end(); }
+	auto begin() const { return V.begin(); }
+	auto end() const { return V.end(); }
+};
+
+template <class T>
+T&& MoveTemp(T& Object) { return static_cast<T&&>(Object); }
+
+struct FCriticalSection
+{
+	FCriticalSection() {}
+	~FCriticalSection() {}
+};
+
+struct FScopeLock
+{
+	explicit FScopeLock(FCriticalSection* InSection) : Section(InSection) {}
+	~FScopeLock() { Section = nullptr; }
+	FCriticalSection* Section;
 };
 
 // ---- FMath -------------------------------------------------------------------------------------
@@ -263,6 +319,8 @@ namespace UE::Math
 			const T Scale = FMath::InvSqrt(SquareSum);
 			return TVector(X * Scale, Y * Scale, Z * Scale);
 		}
+		bool IsZero() const { return X == 0 && Y == 0 && Z == 0; }
+		TRotator<T> ToOrientationRotator() const;
 		TVector GetClampedToMaxSize(T MaxSize) const
 		{
 			if (MaxSize < UE_KINDA_SMALL_NUMBER) { return TVector(0, 0, 0); }
@@ -400,6 +458,16 @@ namespace UE::Math
 		}
 	};
 	template <class T> const TQuat<T> TQuat<T>::Identity(0, 0, 0, 1);
+
+	template <class T>
+	TRotator<T> TVector<T>::ToOrientationRotator() const
+	{
+		TRotator<T> R;
+		R.Yaw = FMath::RadiansToDegrees(FMath::Atan2(Y, X));
+		R.Pitch = FMath::RadiansToDegrees(FMath::Atan2(Z, FMath::Sqrt(X * X + Y * Y)));
+		R.Roll = 0;
+		return R;
+	}
 
 	template <class T>
 	TQuat<T> TRotator<T>::Quaternion() const
