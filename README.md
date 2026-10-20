@@ -214,7 +214,7 @@ identical apart from the version in the banner).
 python -I -m unittest discover -s tests
 ```
 
-300 tests, about 50 s. Python 3.11+ syntax; also run under Blender 5.2's embedded Python 3.13.
+295 tests, about 1 minute (the C++ compile tests are most of it). Python 3.11+ syntax; also run under Blender 5.2's embedded Python 3.13.
 
 | File | What it checks |
 |---|---|
