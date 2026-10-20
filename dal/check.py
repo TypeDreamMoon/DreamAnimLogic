@@ -822,6 +822,10 @@ class Checker:
             params = [("value", adef.ty)]
         sc = Scope("handler")
         for n, t in params:
+            if n in self.globals:
+                self.err("DAL3005", f"'{n}' is the implicit parameter of this handler ({'interrupted flag' if n == 'interrupted' else 'action value'}) "
+                                    f"and also the name of the {self.globals[n].kind}; rename the {self.globals[n].kind}", pos)
+                continue
             sc.declare(n, Local(t, False))
         body = self.block(d.body, sc)
         return ir.HandlerDef(d.event, d.name, d.phase, params, body)

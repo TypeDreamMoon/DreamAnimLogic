@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 import _bootstrap  # noqa: F401
+import dal
 from _bootstrap import EXAMPLES, ROOT
 
 LEAN = os.path.join(EXAMPLES, "als_lean.dal")
@@ -117,7 +118,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(run("compile", os.path.join(self.tmp, "missing.dal"), "--py", self.tmp)[0], 1)
         code, out, _ = run("--version")
         self.assertEqual(code, 0)
-        self.assertIn("dal 0.1.0", out)
+        self.assertIn(f"dal {dal.__version__}", out)
 
     def test_warnings_do_not_fail_the_build(self):
         src = os.path.join(self.tmp, "warn.dal")

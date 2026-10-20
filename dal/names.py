@@ -40,6 +40,14 @@ ANIM_INSTANCE_MEMBERS = frozenset(
     Montage_Play Montage_Stop Montage_Pause Montage_Resume""".split()
 )
 
+# Members of UActorComponent (and UObject) that a state/input/param of actor logic could shadow.
+ACTOR_COMPONENT_MEMBERS = frozenset(
+    """Activate Deactivate ToggleActive IsActive SetActive GetOwner GetWorld Owner bAutoActivate bIsActive ComponentTags
+    PrimaryComponentTick RegisterComponent UnregisterComponent DestroyComponent IsRegistered BeginPlay EndPlay
+    TickComponent InitializeComponent UninitializeComponent OnRegister OnUnregister GetName GetClass GetOuter IsA
+    Rename""".split()
+)
+
 # Attributes of the generated Python class (and its LogicBase) that a DAL name must not hide.
 PY_CLASS_API = frozenset(
     "reset snapshot overrides set_input sample_inputs call_entry values host update".split()
@@ -63,6 +71,8 @@ def reserved_reason(name: str, allow_py_keyword: bool = False) -> str | None:
         return "it is an attribute of the generated class API"
     if name in ANIM_INSTANCE_MEMBERS:
         return "it is a member of UAnimInstance"
+    if name in ACTOR_COMPONENT_MEMBERS:
+        return "it is a member of UActorComponent"
     if _GENERATED_NAME.match(name):
         return "names starting with 'Dal' followed by a capital letter or '_' are reserved for generated code"
     for p in RESERVED_PREFIXES:

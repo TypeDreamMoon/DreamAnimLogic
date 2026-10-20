@@ -24,6 +24,7 @@ from dal.builtins import BUILTINS
 from dal.cppbackend import CppOptions
 from dal.types import BOOL, FLOAT, INT, QUAT, ROTATOR, VEC2, VEC3
 from test_als_lean import make_sequence
+from v1_sources import ALL_COMMANDS, ANIM_V1, PROBE
 
 COMPILER = cpp_driver.find_compiler()
 
@@ -300,126 +301,6 @@ def rand_input(rng, ty):
         return tuple(c / n for c in v)
     raise ValueError(ty)
 
-
-ALL_COMMANDS = """
-logic AllCommands : actor;
-montage Swing { Windup, Strike }
-input F: float;
-input V: vec3;
-input R: rotator;
-input B: bool;
-input S: int;
-input Mode: MovementMode;
-state N: int;
-update(dt) {
-    host.set_max_walk_speed(F);
-    host.set_max_acceleration(F * 2.0);
-    host.set_braking_deceleration_walking(F + 1.0);
-    host.set_gravity_scale(F);
-    host.set_jump_z_velocity(F);
-    host.set_air_control(F);
-    host.set_rotation_rate(R);
-    host.set_orient_rotation_to_movement(B);
-    host.set_use_controller_desired_rotation(!B);
-    host.set_movement_mode(Mode);
-    if (B) { host.jump(); } else { host.stop_jumping(); }
-    if (S > 0) { host.crouch(); } else { host.uncrouch(); }
-    host.add_movement_input(V);
-    host.add_movement_input(V, F);
-    host.launch(V);
-    host.launch(V, B, !B);
-    host.montage_play(Swing);
-    host.montage_play(Swing, F, Swing.Strike);
-    host.montage_stop(Swing);
-    host.montage_stop(Swing, 0.1);
-    host.montage_stop_all();
-    host.montage_stop_all(0.3);
-    host.montage_jump_to_section(Swing, Swing.Windup);
-    host.montage_set_next_section(Swing, Swing.Windup, Swing.Strike);
-    host.montage_set_play_rate(Swing, F);
-    host.set_control_rotation(R);
-    host.camera_set_arm_length(F);
-    host.camera_set_socket_offset(V);
-    host.camera_set_fov(F);
-    N += 1;
-}
-"""
-
-PROBE = """
-logic Probe : actor;
-input A: vec3;
-input B: vec3;
-input Radius: float;
-state Blocked: bool;
-state P: vec3;
-state N: vec3;
-state D: float;
-state T: float;
-state SphereBlocked: bool;
-state SphereP: vec3;
-state SphereD: float;
-state Count: int;
-state FirstId: int;
-state FirstLoc: vec3;
-state Back: int;
-state Gone: vec3;
-update(dt) {
-    let h = host.trace_line(A, B);
-    Blocked = h.blocking;
-    P = h.point;
-    N = h.normal;
-    D = h.distance;
-    T = h.time;
-    let s = host.trace_sphere(A, B, abs(Radius));
-    SphereBlocked = s.blocking;
-    SphereP = s.point;
-    SphereD = s.distance;
-    Count = host.target_count();
-    FirstId = host.target_id(0);
-    FirstLoc = host.target_location(0);
-    Back = host.target_index(FirstId);
-    Gone = host.target_location(7);
-}
-"""
-
-ANIM_V1 = """
-logic AnimV1;
-montage Slash { Wind, Hit, Rec }
-action Fire: float;
-input Fired: float <- host.action(Fire);
-state Count: int;
-state Open: bool;
-state Ended: int;
-state Blend: int;
-state Phase: SlashSection;
-state Pos: float;
-state WasPlaying: bool;
-on notify HitNotify {
-    Count += 1;
-    host.set_gravity_scale(2.0);
-}
-on notify_begin Window { Open = true; }
-on notify_end Window { Open = false; }
-on montage_ended Slash {
-    Ended += 1;
-    if (interrupted) { host.jump(); }
-}
-on montage_blending_out Slash { Blend += 1; }
-update(dt) {
-    if (Fired > 0.5 && !Slash.playing) {
-        host.montage_play(Slash, 1.0, Slash.Hit);
-    }
-    Phase = Slash.section;
-    Pos = Slash.position;
-    WasPlaying = Slash.playing;
-    if (Slash.active && Pos > 1.5) {
-        host.montage_set_next_section(Slash, Slash.Hit, Slash.Rec);
-    }
-}
-entry Kick(dt) {
-    host.montage_stop(Slash);
-}
-"""
 
 
 if __name__ == "__main__":
