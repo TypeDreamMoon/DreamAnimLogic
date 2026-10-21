@@ -8,8 +8,10 @@ compiler, two backends**:
 | Python | a self-contained module with one class (`__init__(host)`, `update(dt)`, state fields) | Blender (DreamVEd), tests, tools |
 | Unreal C++ | `U<Logic>.h/.cpp` (+ `DalMath.h`, `DalHost.h`): a `UAnimInstance` parent class (`logic X;`) or a `UActorComponent` character component (`logic X : actor;`) | Unreal Engine 5.8: the C++ parent of a `.dab` Animation Blueprint, or a component on the character |
 
-The language is specified in Chinese in `I:\DCC\Plan\dal-syntax-v0.md` (v0: values, math, anim instance logic)
-and `I:\DCC\Plan\dal-syntax-v1.md` (v1 / v2: host commands, events, montages, combos, queries, camera).
+The language is specified in Chinese in `I:\DCC\Plan\dal-syntax-v0.md` (v0: values, math, anim instance logic),
+`I:\DCC\Plan\dal-syntax-v1.md` (v1 / v2: host commands, events, montages, combos, queries, camera) and
+`I:\DCC\Plan\dal-syntax-v3.md` (v3, version 0.3.0: libraries, structs, tags, methods and peers, tick slots, settings and curves,
+entries with parameters, transforms, scene queries -- the language ALS-Refactored is rewritten in, see `als-dal-rewrite.md`).
 This README covers the repository.
 
 ```
@@ -54,26 +56,32 @@ update(dt) { host.set_max_walk_speed(Melee != MeleeStep.Idle ? 120.0 : 600.0); }
 ```
 dal/                  the package (pure Python 3.11+, no dependencies) -- this is what gets vendored
   lexer.py parser.py syntax.py    source -> syntax tree (errors with line/column)
+  libs.py                         `use "x.dal";`: finds, loads and merges library files (shared declarations)
   lower.py                        timer / window / buffer / combo -> core language (on the syntax tree)
   check.py names.py types.py      name resolution, static types, constant folding -> IR
+  peers.py                        what one logic knows about another (`peer`): its variables, pub methods, linked entries
+  values.py curve.py settings.py  struct / settings values, FRichCurve evaluation, the loader of settings data (JSON, dicts)
   ir.py                           typed IR (both backends and the interpreter read only this)
   builtins.py                     the standard library table
   hostapi.py                      the host protocol: reads, commands, queries, events; HostV0 / HostV1 base classes
   mockhost.py                     MockHost (recording) and SimHost (plays montages, produces events) for tests and tools
-  runtime.py                      value types (Vec2/Vec3/Rotator/Quat/Hit) + math with UE semantics + LogicBase
+  runtime.py                      value types (Vec2/Vec3/Rotator/Quat/Transform/Hit/...) + math with UE semantics + LogicBase
   interp.py                       reference interpreter over the IR
   pybackend.py                    Python backend
-  cppbackend.py  cpp/             C++ backend and its static headers (DalMath.h, DalHost.h)
+  cppbackend.py  cpp/             C++ backend and its static headers (DalMath.h, DalHost.h, DalData.h)
   harness.py                      interpreter-vs-generated-Python consistency harness (states and host commands)
   api.py cli.py __main__.py       entry points
 examples/
   als_lean.dal                    ALS-Refactored's lean logic (+ als_lean_standins.py, AlsLeanLibrary.h)
   hero_gait.dal                   enums, input actions, notifies, entries
+  als/als_lib.dal                 the shared declarations of ALS-Refactored in .dal: 8 tag sets, enums, state structs, 23 settings
+                                  types (they load the data assets of G:\DCC\AlsPack) and the pure math helpers
   melee_combo.dal                 three-hit chain: montages, input buffer, cancel windows, combo (actor logic)
   lockon_camera.dal               lock-on target selection, line-of-sight trace, camera framing (actor logic)
 tests/                            python -I -m unittest discover -s tests
   oracles/                        independent hand-written ports (ALS lean, melee, lock-on); they do not import dal
   cpp_stub/ cpp_driver.py         stand-in engine headers + build/run helper for the C++ tests
+  cpp_system.py                   the same for several logics wired to one actor (peers, tick slots, linked instances)
   golden/                         golden C++ output
 Unreal/
   DalLive/                        UE plugin: hot reload of .dal in the editor (editor-Python interpreter + a thin C++ component)
@@ -90,6 +98,7 @@ python -m dal compile examples/als_lean.dal --py out/py --cpp out/cpp --module M
 python -m dal compile examples/hero_gait.dal --cpp out/cpp --bag      # also U<Logic>Bag, the property-bag AnimInstance for DalLive
 python -m dal check   examples/als_lean.dal
 python -m dal verify  examples/melee_combo.dal --frames 500 --seed 7   # interpreter vs generated Python
+python -m dal verify  prog.dal --param Cfg=cs_default.json --pack G:\DCC\AlsPack   # settings params from data files, curves from the pack
 python -m dal dump-ir examples/als_lean.dal
 python -m dal host                                                      # the host protocol as Markdown tables
 ```
@@ -104,6 +113,9 @@ python -m dal host                                                      # the ho
 * `--standins FILE` provides the Python stand-ins of `extern fn`s (default: `<source>_standins.py`).
 * `--bag` (anim logic): also write `U<Logic>Bag` into `<Logic>.h`, a `UAnimInstance` with the same params / inputs / states
   and none of the logic -- the parent class of an Animation Blueprint while DalLive interprets the program.
+* A file without a `logic` line that only declares shared things is a library (`use "x.dal";`): it checks and compiles on
+  its own (`python -m dal compile examples/als/als_lib.dal --cpp out`) into `<Stem>.h` / `.cpp` (the types, tags, inline functions).
+  `--cpp` also writes `DalData.h` when the program has settings.
 * Exit code 0 = ok, 1 = compile errors (`file:line:col: error DALnnnn: message` plus the source line and a
   caret), 2 = usage error.
 
@@ -130,10 +142,10 @@ mock hosts implement them.
 
 | | what | in the language | when it takes effect |
 |---|---|---|---|
-| reads | CMC values, actor transform, input actions, notify flags, montage state | `input X: type <- host.item` | sampled once at the start of an update |
+| reads | CMC values, actor transform, capsule, input actions, notify flags, montage state, animation curves, bone and mesh transforms, reference skeleton, the consumed pre-penetration velocity | `input X: type <- host.item` | sampled once at the start of an update |
 | events | notify / notify window begin+end, montage ended / blending out, input action phases | `on notify Hit { ... }` | handlers run at the start of the next update, oldest first |
 | commands | CMC writes, jump / crouch / launch, montage play / stop / jump to section ..., control rotation, spring arm, FOV | `host.set_max_walk_speed(v);` | **queued**; the host runs them in order after the update |
-| queries | line / sphere trace, target list | `let h = host.trace_line(a, b);` (actor logic only) | answered immediately (game thread) |
+| queries | line / sphere / capsule traces on a channel, overlap, walkable test, component reads, target list | `let h = host.trace_line(a, b);`, `host.sweep_capsule(a, b, r, hh, ch, blocking)` | answered immediately; the scene queries (marked in `python -m dal host`) also from an anim instance's worker thread, the rest game thread only |
 
 Python hosts subclass `dal.hostapi.HostV1` (every method documents the DreamVEd call it maps to:
 `MontageManager.play / stop / jump_to_section / set_next_section`, `CharacterMovement.jump / add_movement_input /
@@ -144,13 +156,16 @@ what happens into the events the logic polls -- enough to test combos without Bl
 
 ## Generated Python class
 
-* `Class(host=None, **params)`; `update(dt)`; `reset()`; `snapshot()` (inputs then states as plain data);
-  `set_input(name, value)` for free inputs; `call_entry(name)` / `Entry()` for entries;
+* `Class(host=None, **params)` (a settings param takes a JSON path, a dict or an instance; `resolver=` finds curves by name);
+  `update(dt)`; `reset()`; `snapshot()` (inputs then states as plain data, struct members as `State.Member`);
+  `set_input(name, value)` for free inputs; `call_entry(name, *args, **named)` / `Entry(...)` for entries (parameters by name,
+  enum arguments by member name, defaults filled in); `connect(peer, other)` for peers and the `Parent` of a linked instance;
   `overrides = {"Velocity": ...}` forces a host-bound input (for a variable panel).
 * One `update(dt)`: sample the inputs, collect the events (`post_event(...)` and `host.poll_events()`), tick the timers,
   run the handlers, run the body, hand the queued commands to the host (`take_commands()` returns them instead, for
   hosts that execute commands themselves).
-* Metadata for UIs: `DAL_PARAMS`, `DAL_INPUTS`, `DAL_STATES`, `DAL_ENTRIES`, `DAL_KIND`, `DAL_HANDLERS`.
+* Metadata for UIs: `DAL_PARAMS`, `DAL_INPUTS`, `DAL_STATES`, `DAL_ENTRIES`, `DAL_ENTRY_PARAMS`, `DAL_KIND`, `DAL_HANDLERS`,
+  `DAL_PEERS`, `DAL_METHODS`, `DAL_VIEWS`, `DAL_PHASES`; a settings class has `DAL_SCHEMA` / `.load(source, resolver, report)`.
 * Imports only `dal.runtime` (and `dal.hostapi` lazily): the `dal` package must be importable, which is
   why it is vendored as a whole.
 
@@ -197,6 +212,16 @@ Window** (state) notifies named like the handler; an anim instance additionally 
 Enum names (user enums and the `<Montage>Section` enums) become `E<Name>` in the module: keep them unique across the logics
 of one module.
 
+From v3 on (`Generated C++` is described in `dal-syntax-v3.md` section 11): structs become `USTRUCT`s, tag sets native gameplay
+tags (`FGameplayTag`), `settings` types `UDataAsset` classes (`U<Name>`, `TObjectPtr` param with the class defaults as fallback, derived
+members recomputed in `PostLoad`) or nested `USTRUCT`s, curves `TObjectPtr<UCurveFloat/UCurveVector>`, tables and lists `TMap` /
+`TArray`; `method` / `view` / `entry` become member functions (`pub` ones `UFUNCTION`s with the thread-safe meta for anim
+instances); a peer is a `TObjectPtr<U<Logic>>` found when play begins and a call to an anim instance goes through a queue;
+`update(dt) in <slot>` blocks get their own `FActorComponentTickFunction` with prerequisites; a `linked(Main)` anim logic gets
+`Parent` / `Character` / `GetParent()` and a forwarder per `linked` entry. Libraries share one header per file, the enum name
+clash of several logics in one module disappears for enums declared in a library. Two modules are assumed that stock UE does not
+have: `DalRuntime` (`UDalCharacterMovementComponent::TryConsumePrePenetrationAdjustmentVelocity`, only for that read).
+
 `extern fn` declarations call hand-written C++ (`cpp "Ns::Fn" include "Header.h"`); see
 `examples/AlsLeanLibrary.h` for the pattern. The functions must be pure and thread safe.
 
@@ -217,12 +242,13 @@ Both consumers carry **the same version of the package folder**:
 * DreamVEd: `blender-moon-engine/scripts/modules/dal`
 * DreamAnim: `DreamAnim/Tools/dal`
 
-Copy the `dal/` directory (including `dal/cpp/DalMath.h` and `dal/cpp/DalHost.h`, excluding `__pycache__`); do not copy
-`tests/` or `examples/`. `dal.__version__` identifies the version (0.2.0); the generated files record it in their first
+Copy the `dal/` directory (including `dal/cpp/DalMath.h`, `dal/cpp/DalHost.h` and `dal/cpp/DalData.h`, excluding `__pycache__`);
+do not copy `tests/` or `examples/`. `dal.__version__` identifies the version (0.3.0); the generated files record it in their first
 line. Blender calls `dal.check_file(...)` + `load_class(...)`; Unreal's editor Python calls
 `dal.cli.main(["compile", file, "--cpp", dir, "--module", API])` (or `python -m dal`). The compiler does
-not depend on Unreal or on the project directory. Programs written for 0.1.0 compile unchanged (their generated C++ is
-identical apart from the version in the banner).
+not depend on Unreal or on the project directory. Programs written for 0.1.0 or 0.2.0 compile unchanged (their generated C++ is
+identical apart from the version in the banner; the goldens in `tests/golden` changed by that line only). Version 0.3.0 changes one
+behaviour of a v0 program: assigning to a vector component (`v.x = 1.0;`) is now allowed instead of error DAL2010.
 
 ## Tests
 
@@ -230,7 +256,7 @@ identical apart from the version in the banner).
 python -I -m unittest discover -s tests
 ```
 
-379 tests when DalLive was added (about 1.5 minutes; the C++ compile tests are most of it). Python 3.11+ syntax; also run under Blender 5.2's embedded Python 3.13.
+608 tests (about 4.5 minutes; the C++ compile tests are most of it): 379 when DalLive was added, 184 of them from v0 unchanged. Python 3.11+ syntax; also run under Blender 5.2's embedded Python 3.13.
 
 | File | What it checks |
 |---|---|
@@ -246,9 +272,17 @@ python -I -m unittest discover -s tests
 | `test_lockon.py` | `examples/lockon_camera.dal` vs `oracles/lockon_oracle.py`: scenarios and 24 random sessions |
 | `test_cpp.py` | golden C++ text of the v0 examples, structural invariants (worker-thread code never touches the world), `DalMath.h` has an overload for every built-in signature |
 | `test_cpp_v1.py` | golden C++ text of the two actor examples and an anim instance with host traffic; invariants of the component (tick order, queues, delegates, input binding, executors) |
-| `test_cpp_compile.py` | compiles the generated C++ (MSVC `/W4 /WX`, or g++/clang++) against stand-in engine headers (`tests/cpp_stub`) and compares states **and the host effects** (CMC writes, montage calls ...) with the Python backend, for the v0 examples, both actor examples, every host command, traces / targets and an anim instance with events; skipped when no compiler is found |
+| `test_cpp_compile.py` | compiles the generated C++ (MSVC `/W4 /WX`, or g++/clang++) against stand-in engine headers (`tests/cpp_stub`) and compares states **and the host effects** (CMC writes, montage calls ...) with the Python backend, for the v0 examples, both actor examples, every host command, traces / targets, an anim instance with events and **every built-in signature** (`everything_source`); skipped when no compiler is found. `run_case(..., params=...)` feeds settings data to both sides |
 | `test_cli.py` | `python -m dal` |
 | `test_cpp_bag.py` | the property bag (`--bag`): same UPROPERTYs as the main class, no logic, off by default (other output byte-identical) |
+| `test_use.py` (21) | libraries: loading, merging, cycles, root escape, diagnostics that point into the library, one shared C++ header, a library compiling alone |
+| `test_struct.py` (22), `test_tags.py` (13) | structs (defaults, construction by name, value semantics, dotted-path snapshots, library sharing) and tag sets: checker, interpreter vs Python, C++ compile-and-run |
+| `test_methods.py` (18), `test_peers.py` (23), `test_cpp_system.py` (13) | methods, views, call statements, `begin_play`, peers (sampled reads, direct and queued calls), tick slots; the three-logic ALS-shaped system in all three implementations (several logics wired to one stand-in actor) |
+| `test_settings.py` (60) | settings / curves / tables / lists / asset values: diagnostics, the loader (every spelling, error paths, resolvers), FRichCurve evaluation by hand, random settings data through interpreter, Python and C++, the real ALS pack (`G:\DCC\AlsPack`, skipped when absent), `als_lib.dal` in all three |
+| `test_entries.py` (22) | entry parameters and defaults, `linked` instances and their forwarders (system run in Python and C++) |
+| `test_host_reads.py` (17), `test_host_mesh.py` (10) | the v3 host reads: capsule, curves, consume-on-read, bones, mesh transform, reference skeleton, root motion mode |
+| `test_math3.py` (43) | component assignment, quaternion / vector / spring / easing built-ins by hand, `transform` (also against the animation runtime of the Blender host when it is on the machine) |
+| `test_queries.py` (23) | scene queries with channels, the extended hit, primitives, the thread-safe set; mock host vs stand-in engine scene |
 | `test_live_session.py` | DalLive's pure-Python half with the mock hosts: which state survives a swap, compile errors keep the last good program, debounce, runtime faults, anim commands one update late, param overrides, compiler lookup |
 
 Regenerate golden files with `UPDATE_GOLDEN=1 python -I -m unittest discover -s tests -p test_cpp.py` (and
@@ -262,8 +296,18 @@ Regenerate golden files with `UPDATE_GOLDEN=1 python -I -m unittest discover -s 
   `OnPlayMontageNotifyBegin/End`, the `BindAction` overload, `SCENE_QUERY_STAT` in a component and the `FVector3f` / `FQuat4f`
   conversions all compile and behave. Not covered by those runs: several logics with same-named enums in one module, the custom
   `AnimNotify_<Name>()` functions of anim logic, a cooked / packaged build.
+* Nothing of v3 has been compiled in the real engine yet (the C++ of 0.3.0 only compiles against `tests/cpp_stub`, MSVC `/W4 /WX`).
+  The stand-in headers are written from the engine's documented behaviour and signatures; known places where UHT or the engine may
+  disagree: C++ default arguments of `UFUNCTION`s (entries with parameters: a struct or tag default is a C++ expression UHT cannot
+  parse -- give such a parameter no default or set it in the body), `FTransform3f` / `FCollisionResponseParams` details, the
+  `ALS` module name of generated `UDataAsset`s (use `--module ALS_API` to keep `/Script/ALS.AlsCharacterSettings`), and the
+  `DalRuntime` module that `pre_penetration_velocity` needs (`UDalCharacterMovementComponent`, not written yet).
+* Settings in C++ are filled by the engine's property system (`.uasset`); the JSON loader is Python only. A response container
+  (`FCollisionResponseContainer`) in exported data is read as the list of channels that block; curves are `UCurveFloat` /
+  `UCurveVector` objects.
 * Float precision: the Python backend computes in double, the C++ backend in `float`. Programs with hard
-  thresholds can differ by a frame at the boundary.
+  thresholds can differ by a frame at the boundary. (A float32 mode for the Python backend is not implemented: it would have to
+  round after every operation; the tests compare with tolerances instead.)
 * `to_rotator()` uses an exact `asin`; UE's float `FQuat::Rotator()` uses `FMath::FastAsin` (error up to
   about 7e-5 rad). `atan2()` likewise uses the C library; UE's float version is a minimax approximation
   with relative error below 1e-6.
