@@ -4,3 +4,5 @@
 *.py text eol=lf
 *.dal text eol=lf
 *.md text eol=lf
+*.cmd text eol=crlf
+*.ps1 text eol=lf

@@ -170,6 +170,11 @@ class CppCompileTests(unittest.TestCase):
         frames = harness.random_frames(module, 20, 5)
         self.run_case(module, frames, options=CppOptions(module_api="DAL_TEST_API"), defines=["DAL_TEST_API="])
 
+    def test_property_bag_class_compiles_next_to_the_logic(self):
+        module = dal.check_file(os.path.join(EXAMPLES, "hero_gait.dal")).module
+        frames = harness.random_frames(module, 30, 7)
+        self.run_case(module, frames, options=CppOptions(module_api="DAL_TEST_API", property_bag=True), defines=["DAL_TEST_API="])
+
     def test_every_builtin_matches_python(self):
         src, count = everything_source()
         module = dal.check_source(src, "everything.dal").module

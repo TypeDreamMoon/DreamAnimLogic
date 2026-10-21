@@ -9,3 +9,5 @@ __pycache__/
 .vscode/
 .idea/
 /scratch/
+/Unreal/**/Binaries/
+/Unreal/**/Intermediate/

@@ -59,6 +59,7 @@ class CppOptions:
     module_api: str = ""                           # e.g. "MYGAME_API"
     parent_class: str = ""                         # "" = UAnimInstance for anim logic, UActorComponent for actor logic
     parent_include: str = ""                       # "" = Animation/AnimInstance.h resp. Components/ActorComponent.h
+    property_bag: bool = False                     # anim logic: also emit U<Logic>Bag, the same UPROPERTYs without the logic (DalLive)
 
 
 KIND_PARENT = {
@@ -1059,6 +1060,58 @@ class CppGen:
         return files
 
     # ---- header text ---------------------------------------------------------------------------------------------
+    def property_lines(self) -> list[str]:
+        """The UPROPERTY declarations of params, inputs and states (indented for a class body), as in the generated class."""
+        m = self.m
+        L: list[str] = []
+        if m.params:
+            L.append(f"{T}// ---- params: tunable in the editor, read-only for the logic ----")
+            for p in m.params:
+                L.append(f'{T}UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "DAL|Param")')
+                L.append(f"{T}{cpp_prop_type(p.ty)} {p.name} = {cpp_value(p.ty, p.default)};")
+                L.append("")
+        if m.inputs:
+            L.append(f"{T}// ---- inputs: filled from the host each frame (or set by game code when free) ----")
+            for i in m.inputs:
+                if i.host is not None:
+                    h = i.host
+                    src = f"host.{h.item}" + (f'("{h.arg}")' if h.arg is not None else "")
+                    L.append(f"{T}// <- {src}")
+                    L.append(f'{T}UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "DAL|Input", Transient)')
+                else:
+                    L.append(f'{T}UPROPERTY(VisibleAnywhere, BlueprintReadWrite, Category = "DAL|Input", Transient)')
+                L.append(f"{T}{cpp_prop_type(i.ty)} {i.name} = {cpp_value(i.ty, i.default)};")
+                L.append("")
+        if m.states:
+            L.append(f"{T}// ---- state: written by the logic, readable from the animation graph ----")
+            for s in m.states:
+                L.append(f'{T}UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "DAL|State", Transient)')
+                L.append(f"{T}{cpp_prop_type(s.ty)} {s.name} = {cpp_value(s.ty, s.default)};")
+                L.append("")
+        return L
+
+    def bag_class(self) -> list[str]:
+        """``U<Logic>Bag``: a UAnimInstance with the same params, inputs and states and none of the logic.
+
+        The interpreted twin of an anim logic (DalLive, ``Unreal/DalLive``) writes its values into the properties of an
+        AnimInstance by name; this class gives an Animation Blueprint those properties without the generated update code,
+        so the same ``.dab`` / AnimBP reads ``Main.Speed`` whether the parent is ``U<Logic>`` (compiled) or ``U<Logic>Bag``
+        (interpreted).  Only emitted for ``logic X;`` (anim) programs and only on request (``CppOptions.property_bag``)."""
+        L: list[str] = []
+        L.append(f"/** Property bag of {self.cls}: the same params, inputs and state, without the update logic (for DalLive's interpreter). */")
+        L.append("UCLASS()")
+        L.append(f"class {self.api}{self.cls}Bag : public {self.parent}")
+        L.append("{")
+        L.append(f"{T}GENERATED_BODY()")
+        L.append("")
+        L.append("public:")
+        body = self.property_lines()
+        while body and body[-1] == "":
+            body.pop()
+        L.extend(body)
+        L.append("};")
+        return L
+
     def header(self) -> str:
         m, o = self.m, self.o
         L = self.banner()
@@ -1126,30 +1179,7 @@ class CppGen:
         if self.actor:
             L.append(f"{T}{self.cls}();")
             L.append("")
-        if m.params:
-            L.append(f"{T}// ---- params: tunable in the editor, read-only for the logic ----")
-            for p in m.params:
-                L.append(f'{T}UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "DAL|Param")')
-                L.append(f"{T}{cpp_prop_type(p.ty)} {p.name} = {cpp_value(p.ty, p.default)};")
-                L.append("")
-        if m.inputs:
-            L.append(f"{T}// ---- inputs: filled from the host each frame (or set by game code when free) ----")
-            for i in m.inputs:
-                if i.host is not None:
-                    h = i.host
-                    src = f"host.{h.item}" + (f'("{h.arg}")' if h.arg is not None else "")
-                    L.append(f"{T}// <- {src}")
-                    L.append(f'{T}UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "DAL|Input", Transient)')
-                else:
-                    L.append(f'{T}UPROPERTY(VisibleAnywhere, BlueprintReadWrite, Category = "DAL|Input", Transient)')
-                L.append(f"{T}{cpp_prop_type(i.ty)} {i.name} = {cpp_value(i.ty, i.default)};")
-                L.append("")
-        if m.states:
-            L.append(f"{T}// ---- state: written by the logic, readable from the animation graph ----")
-            for s in m.states:
-                L.append(f'{T}UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "DAL|State", Transient)')
-                L.append(f"{T}{cpp_prop_type(s.ty)} {s.name} = {cpp_value(s.ty, s.default)};")
-                L.append("")
+        L.extend(self.property_lines())
         slots = self.action_slots()
         if slots:
             if self.bind_input:
@@ -1243,6 +1273,9 @@ class CppGen:
             while L[-1] == "":
                 L.pop()
         L.append("};")
+        if o.property_bag and not self.actor:
+            L.append("")
+            L.extend(self.bag_class())
         return "\n".join(L) + "\n"
 
     # ---- source -------------------------------------------------------------------------------------------------
