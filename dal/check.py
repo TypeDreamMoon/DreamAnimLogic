@@ -29,7 +29,7 @@ from . import peers as peermod
 from . import values
 from .lexer import RESERVED_WORDS
 from .libs import LIBRARY_DECLS
-from .names import CPP_KEYWORDS, PY_RESERVED, reserved_reason
+from .names import ANIM_NOTIFY_MEMBERS, CPP_KEYWORDS, PY_RESERVED, reserved_reason
 from .types import (
     VOID,
     ASSET_TYPES,
@@ -170,6 +170,7 @@ class Checker:
         self.entry_sigs: dict[int, list[ir.EntryParam]] = {}      # id(EntryDecl) -> its typed parameters
         self.method_calls: dict[str, list[str]] = {}      # call graph of methods and views (recursion check)
         self.peer_ifaces: dict[str, peermod.PeerIface] = {}
+        self.notifies: dict[str, ir.NotifyDef] = {}       # the animation notify classes the program declares (and its libraries)
         self.value_calls: set[int] = set()                # ids of calls that may produce a value (the whole right-hand side of let / = / return)
         self.stmt_calls: set[int] = set()                 # ids of calls used as statements
         self.kind = "anim"
@@ -351,6 +352,10 @@ class Checker:
             self.focus(d)
             if isinstance(d, S.ActionDecl):
                 self.declare_action(d)
+        for d in decls:
+            self.focus(d)
+            if isinstance(d, S.NotifyDecl):
+                self.declare_notify(d)
 
         for d in decls:
             if isinstance(d, S.ParamDecl):
@@ -374,6 +379,8 @@ class Checker:
                 st = self.structs.get(d.name)
                 if st is not None and self.struct_decls.get(d.name) is d:
                     self.ensure_defaults(st)
+            elif isinstance(d, S.NotifyDecl):
+                self.fold_notify_defaults(d)
 
         # 3. signatures of functions and externs, then the variable declarations
         for d in decls:
@@ -632,6 +639,59 @@ class Checker:
             self.ctx.types[(origin, d.name)] = tt
         self.tagsets[d.name] = tt
         self.globals[d.name].obj = tt
+
+    # ---- animation notifies ---------------------------------------------------------------------------------------
+    def declare_notify(self, d: S.NotifyDecl) -> None:
+        """`notify Name { ... }`: a class of animation notify.  Its members are the properties of the generated notify and the
+        members of the `payload` its handlers receive; the name is not a type (the payload is only read through its members)."""
+        what = "a notify state name" if d.state else "a notify name"
+        if not self.declare_global(d.name, "notify", d.name_pos or d.pos, what=what):
+            return
+        origin = self.origin_of(d)
+        cpp = d.cpp or ("DalNotifyState_" if d.state else "DalNotify_") + d.name
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", cpp) or cpp in CPP_KEYWORDS:
+            self.err("DAL3066", f"'{cpp}' is not a C++ class name (letters, digits and '_'; the generated class is U{cpp})", d.cpp_pos or d.name_pos or d.pos)
+            cpp = ("DalNotifyState_" if d.state else "DalNotify_") + d.name
+        st = StructType(d.name, "notify")
+        st.origin = origin
+        st.cpp_type = "U" + cpp
+        seen: dict[str, Pos] = {}
+        for fd in d.fields:
+            ty = self.resolve_type(fd.type_name, fd.type_pos)
+            if fd.derived:
+                self.err("DAL4052", "'derived' members belong in a settings type; a notify member is plain data", fd.pos)
+            if fd.name in seen:
+                self.err("DAL3001", f"member '{fd.name}' is declared twice in notify {d.name} (first on line {seen[fd.name].line})", fd.pos)
+                continue
+            seen[fd.name] = fd.pos
+            if not self.valid_ident(fd.name, fd.pos, "a member name") or fd.name in STRUCT_API:
+                if fd.name in STRUCT_API:
+                    self.err("DAL3004", f"'{fd.name}' cannot be a member name: it is an attribute of the generated struct classes", fd.pos)
+                continue
+            if fd.name in ANIM_NOTIFY_MEMBERS:
+                self.err("DAL3004", f"'{fd.name}' cannot be a member of a notify: it is a member of UAnimNotify / UAnimNotifyState", fd.pos)
+                continue
+            if ty is not ERROR and not self.struct_member_ok(st, ty):
+                what_ = "hit results cannot be stored" if ty is HIT else f"a {ty} cannot be a member of a notify"
+                self.err("DAL4050", f"member '{fd.name}' of notify {d.name}: {what_}", fd.type_pos)
+                ty = ERROR
+            st.fields.append(FieldDef(fd.name, ty))
+        st.defaults_ready = True
+        nd = ir.NotifyDef(d.name, d.state, st, cpp, d.branching, origin)
+        self.notifies[d.name] = nd
+        self.globals[d.name].obj = nd
+        self.module.notifies.append(nd)
+
+    def fold_notify_defaults(self, d: S.NotifyDecl) -> None:
+        nd = self.notifies.get(d.name)
+        if nd is None:
+            return
+        by_name = {fd.name: fd for fd in d.fields}
+        for f in nd.struct.fields:
+            fd = by_name.get(f.name)
+            if fd is None or f.ty is ERROR:
+                continue
+            f.default = self.const_value(fd.init, f.ty, fd.pos, f"member '{f.name}' of notify {d.name}")
 
     # ---- structs ----------------------------------------------------------------------------------------------
     def declare_struct(self, d: S.StructDecl) -> None:
@@ -1478,6 +1538,8 @@ class Checker:
         name = e.name
         loc = sc.lookup(name)
         if loc is not None:
+            if isinstance(loc.ty, StructType) and loc.ty.is_notify and not self.allow_settings_param:
+                return self.bad("DAL4060", f"'{name}' is the animation notify that raised the event: read its members ({name}.Member), it cannot be copied or passed on", e.pos)
             return ir.LocalRef(loc.ty, name)
         if name in self.invalid_names:
             return ir.Lit(ERROR, 0)
@@ -1532,6 +1594,8 @@ class Checker:
         if k == "action":
             return self.bad("DAL3030", f"action '{name}' is not a value: bind it to an input (input X: type <- host.action({name});) "
                                        f"or handle it with 'on input {name} started'", e.pos)
+        if k == "notify":
+            return self.bad("DAL3030", f"notify '{name}' is not a value: handle it with 'on notify {name} {{ ... payload.Member ... }}'", e.pos)
         if k in ("method", "view"):
             return self.bad("DAL3031", f"'{name}' is a {k}; call it as {name}(...)", e.pos)
         if k == "peer":
@@ -1690,6 +1754,21 @@ class Checker:
             return ir.HandlerDef(d.event, "", None, [], self.block(d.body, sc))
         if d.event in HOOK_EVENTS:
             return self.check_hook_handler(d)
+        if d.event in ("notify", "notify_begin", "notify_end", "notify_tick"):
+            nd = self.notifies.get(d.name)
+            if nd is not None:
+                if nd.state != (d.event != "notify"):
+                    if nd.state:
+                        self.err("DAL3064", f"'{d.name}' is a notify state (a notify with a duration): handle it with on notify_begin / notify_tick / notify_end, not on {d.event}", pos)
+                    else:
+                        self.err("DAL3064", f"'{d.name}' is a notify (it has no duration): handle it with on notify, not on {d.event}", pos)
+                    return None
+                params = [("payload", nd.struct)]
+            elif d.event == "notify_tick":
+                sym = self.globals.get(d.name)
+                what = f"'{d.name}' is a {sym.kind}" if sym is not None else f"there is no notify state '{d.name}'"
+                self.err("DAL3065", f"{what}: on notify_tick needs a declared notify state (notify_state {d.name} {{ ... }})", pos)
+                return None
         if d.event in ("montage_ended", "montage_blending_out"):
             sym = self.globals.get(d.name)
             if sym is None or sym.kind != "montage":
@@ -1709,7 +1788,8 @@ class Checker:
         sc = Scope("handler")
         for n, t in params:
             if n in self.globals:
-                self.err("DAL3005", f"'{n}' is the implicit parameter of this handler ({'interrupted flag' if n == 'interrupted' else 'action value'}) "
+                what = {"interrupted": "interrupted flag", "payload": "animation notify"}.get(n, "action value")
+                self.err("DAL3005", f"'{n}' is the implicit parameter of this handler ({what}) "
                                     f"and also the name of the {self.globals[n].kind}; rename the {self.globals[n].kind}", pos)
                 continue
             sc.declare(n, Local(t, False))

@@ -132,6 +132,22 @@ namespace DalHost
 			}
 		}
 
+		/** What a generated notify class posts: the notify object (its properties are the payload) under its declared name, and the
+		 *  montage instance that raised it when a montage did (INDEX_NONE otherwise). */
+		static void PostNotify(const AActor* Owner, const EEventKind Kind, const FName& Name, const UObject* Source, const int32 MontageInstance)
+		{
+			if (Owner == nullptr)
+			{
+				return;
+			}
+			FEvent Event;
+			Event.Kind = Kind;
+			Event.Name = Name;
+			Event.Source = Source;
+			Event.MontageInstance = MontageInstance;
+			Post(Owner, Event);
+		}
+
 	private:
 		static TArray<IEventSink*>& Sinks()
 		{

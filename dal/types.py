@@ -204,6 +204,11 @@ class StructType(Type):
     def is_settings(self) -> bool:
         return self.kind == "settings"
 
+    @property
+    def is_notify(self) -> bool:
+        """The payload of a declared animation notify (`notify Name { ... }`): a value in Python, the notify object in C++."""
+        return self.kind == "notify"
+
     def field(self, name: str) -> "FieldDef | None":
         return next((f for f in self.fields if f.name == name), None)
 

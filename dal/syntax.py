@@ -450,6 +450,20 @@ class PeerDecl(Decl):
 
 
 @dataclass
+class NotifyDecl(Decl):
+    """notify Name { Member: type = default; ... }  /  notify_state Name branching cpp "ClassName" { ... }
+
+    An animation notify class of the program: the generated Unreal class carries the members as properties, and the
+    handlers `on notify Name { ... payload.Member ... }` receive them."""
+    name: str
+    state: bool                                   # `notify_state`: a notify with a duration (begin / tick / end)
+    fields: list[FieldDecl]
+    cpp: str | None = None                        # the C++ class name without the U prefix (default: DalNotify_<Name>)
+    cpp_pos: Pos | None = None
+    branching: bool = False                       # bIsNativeBranchingPoint: fired from the montage tick (and the event carries the montage instance)
+
+
+@dataclass
 class UseDecl(Decl):
     """use "als_lib.dal"; -- merge the declarations of a library file (no logic) into this one."""
     path: str

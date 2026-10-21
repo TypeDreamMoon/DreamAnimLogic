@@ -663,16 +663,40 @@ public:
 };
 
 // ---- animation: montages, notifies, delegates ------------------------------------------------------------------------------------
+class USkeletalMeshComponent;
+class UAnimSequenceBase;
+struct FBranchingPointNotifyPayload;
+struct FAnimNotifyEventReference
+{
+};
+
+// the base classes of the notify classes a program declares: only the entry points the generated classes override
+class UAnimNotify : public UObject
+{
+public:
+	bool bIsNativeBranchingPoint = false;
+	virtual FString GetNotifyName_Implementation() const { return FString(); }
+	virtual void Notify(USkeletalMeshComponent*, UAnimSequenceBase*, const FAnimNotifyEventReference&) {}
+	virtual void BranchingPointNotify(FBranchingPointNotifyPayload&) {}
+};
+
 class UAnimNotifyState : public UObject
 {
+public:
+	bool bIsNativeBranchingPoint = false;
+	virtual FString GetNotifyName_Implementation() const { return FString(); }
+	virtual void NotifyBegin(USkeletalMeshComponent*, UAnimSequenceBase*, float, const FAnimNotifyEventReference&) {}
+	virtual void NotifyTick(USkeletalMeshComponent*, UAnimSequenceBase*, float, const FAnimNotifyEventReference&) {}
+	virtual void NotifyEnd(USkeletalMeshComponent*, UAnimSequenceBase*, const FAnimNotifyEventReference&) {}
+	virtual void BranchingPointNotifyBegin(FBranchingPointNotifyPayload&) {}
+	virtual void BranchingPointNotifyTick(FBranchingPointNotifyPayload&, float) {}
+	virtual void BranchingPointNotifyEnd(FBranchingPointNotifyPayload&) {}
 };
 
 struct FAnimNotifyEvent
 {
 	TObjectPtr<UAnimNotifyState> NotifyStateClass;
 };
-
-class USkeletalMeshComponent;
 
 class UAnimSequenceBase : public UObject
 {
@@ -868,6 +892,8 @@ class USkeletalMeshComponent : public UObject
 {
 public:
 	FActorComponentTickFunction PrimaryComponentTick;
+	AActor* StubOwner = nullptr;
+	AActor* GetOwner() const { return StubOwner; }
 	UAnimInstance* StubAnim = nullptr;
 	FTransform StubTransform;
 	std::map<std::string, std::pair<FTransform, FTransform>> StubBones;       // bone -> (component space, world space)

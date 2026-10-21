@@ -234,23 +234,28 @@ _install_recorders()
 
 @dataclass
 class SimMontage:
+    """A montage of the simulation.  ``notifies`` are ``(time, name)`` or ``(time, name, payload)``, ``windows`` ``(start, end, name)`` or
+    ``(start, end, name, payload)``: with a payload (a dict of the properties of a declared notify class) the events carry it and the
+    montage instance (``("notify_begin", name, payload, instance)``) and a window also ticks (``notify_tick``) while it is open."""
+
     name: str
     length: float
     sections: dict = field(default_factory=dict)              # section name -> start time (insertion order = time order)
-    notifies: list = field(default_factory=list)              # (time, notify name)
-    windows: list = field(default_factory=list)               # (start, end, notify state name)
+    notifies: list = field(default_factory=list)              # (time, notify name[, payload])
+    windows: list = field(default_factory=list)               # (start, end, notify state name[, payload])
     blend_out: float = 0.2
 
 
 class _Instance:
-    def __init__(self, montage: SimMontage, rate: float, position: float):
+    def __init__(self, montage: SimMontage, rate: float, position: float, ident: int = 0):
         self.m = montage
+        self.id = ident                         # the montage instance id a notify event carries
         self.rate = rate
         self.position = position
         self.state = "playing"                  # playing | blending_out | done
         self.blend_left = 0.0
         self.interrupted = False
-        self.open_windows: set[str] = set()
+        self.open_windows: dict[str, object] = {}       # notify state name -> its payload (None: a plain window without one)
 
     def section(self) -> str | None:
         name = None
@@ -266,6 +271,7 @@ class SimHost(MockHost):
         self.catalog = {m.name: m for m in montages}
         self.instances: list[_Instance] = []
         self.time = 0.0
+        self._next_id = 1
 
     # ---- commands that change the simulation ---------------------------------------------------------------------------------
     def montage_play(self, name, rate, section):
@@ -275,7 +281,8 @@ class SimHost(MockHost):
                 self._blend_out(inst, inst.m.blend_out, interrupted=True)
         m = self.catalog[name]
         pos = m.sections.get(section, 0.0) if section else 0.0
-        inst = _Instance(m, float(rate), pos)
+        inst = _Instance(m, float(rate), pos, self._next_id)
+        self._next_id += 1
         self.instances.append(inst)
         self._notify_range(inst, -1.0, pos)       # things at the start position are not 'passed'
 
@@ -331,22 +338,29 @@ class SimHost(MockHost):
         inst.interrupted = inst.interrupted or interrupted
         self.events.append(("montage_blending_out", inst.m.name, interrupted))
 
+    @staticmethod
+    def _event(kind, name, payload, inst):
+        """The event of a notify: with a payload (a declared notify class) it carries the properties and the montage instance."""
+        return (kind, name) if payload is None else (kind, name, payload, inst.id)
+
     def _notify_range(self, inst, prev, cur):
         m = inst.m
-        timed = [(t, 1, ("notify", n)) for t, n in m.notifies if prev < t <= cur]
-        for start, end, n in m.windows:
+        timed = [(n[0], 1, self._event("notify", n[1], n[2] if len(n) > 2 else None, inst)) for n in m.notifies if prev < n[0] <= cur]
+        for w in m.windows:
+            start, end, n = w[0], w[1], w[2]
+            payload = w[3] if len(w) > 3 else None
             if prev < start <= cur:
-                timed.append((start, 0, ("notify_begin", n)))
-                inst.open_windows.add(n)
+                timed.append((start, 0, self._event("notify_begin", n, payload, inst)))
+                inst.open_windows[n] = payload
             if prev < end <= cur and n in inst.open_windows:
-                timed.append((end, 2, ("notify_end", n)))
-                inst.open_windows.discard(n)
+                timed.append((end, 2, self._event("notify_end", n, inst.open_windows[n], inst)))
+                del inst.open_windows[n]
         for _t, _o, ev in sorted(timed, key=lambda x: (x[0], x[1])):
             self.events.append(ev)
 
     def _finish(self, inst):
         for n in sorted(inst.open_windows):
-            self.events.append(("notify_end", n))
+            self.events.append(self._event("notify_end", n, inst.open_windows[n], inst))
         inst.open_windows.clear()
         inst.state = "done"
         self.events.append(("montage_ended", inst.m.name, inst.interrupted))
@@ -359,6 +373,9 @@ class SimHost(MockHost):
                 prev = inst.position
                 inst.position = min(prev + dt * inst.rate, inst.m.length)
                 self._notify_range(inst, prev, inst.position)
+                for n, payload in inst.open_windows.items():            # the notify states of declared classes tick while the montage plays them
+                    if payload is not None:
+                        self.events.append(("notify_tick", n, payload, inst.id))
                 if inst.position >= inst.m.length:
                     self._blend_out(inst, 0.0, interrupted=False)
                     self._finish(inst)

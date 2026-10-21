@@ -450,6 +450,13 @@ class HostV1(HostV0):
         (``rt.Hit(h.blocking_hit, h.impact_point, h.impact_normal, h.distance, h.time, ...)``), ``("crouch_started",)`` /
         ``("crouch_ended",)`` and ``("teleported",)``.  A handler that names parameters gets those values; a host may leave trailing
         payload values out (they read as zero).
+
+        The notifies of the classes a program declares (``notify`` / ``notify_state``) are events with the properties of the notify
+        and the montage instance that raised it: ``("notify", Name, {"Member": value, ...}, instance)``, likewise ``notify_begin``,
+        ``notify_end`` and, once per update of the montage while the state is active, ``notify_tick``.  The properties are plain data
+        (floats, bools, ints, tuples; enum members by name or index, tags by full name, assets by name) and missing members keep the
+        declared defaults; ``instance`` (any value, ``None`` when no montage raised it) is what ``host.montage_stop_source`` hands back
+        to the host.  Blender: the notify queue of ``runtime/montage.py`` fills the payload from the ``properties`` of the exported notify.
         """
         return []
 

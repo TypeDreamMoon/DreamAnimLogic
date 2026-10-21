@@ -401,6 +401,18 @@ class PeerDef:
 
 
 @dataclass
+class NotifyDef:
+    """`notify Name { ... }` / `notify_state Name { ... }`: an animation notify class of the program.  ``struct`` is the type of the
+    ``payload`` of its handlers (a StructType of kind 'notify', its members the properties of the notify)."""
+    name: str
+    state: bool
+    struct: object                                  # StructType
+    cpp_class: str                                  # the class name without the U prefix
+    branching: bool = False
+    origin: str | None = None                       # key of the library file that declares it (None = the file being compiled)
+
+
+@dataclass
 class LibRef:
     """A library file the module uses (``use "x.dal";``)."""
     key: str                  # normalised path, what ``origin`` fields hold
@@ -434,6 +446,7 @@ class Module:
     source_sha256: str = ""
     standin_source: str = ""                                    # Python stand-in file text (bundled by the Python backend)
     standin_filename: str = ""
+    notifies: list[NotifyDef] = field(default_factory=list)     # the animation notify classes (library ones included), source order
     structs: list = field(default_factory=list)                 # StructType, dependencies first (library structs included)
     tagsets: list = field(default_factory=list)                 # TagType (library tag sets included)
     libs: list[LibRef] = field(default_factory=list)            # libraries used, dependencies first
@@ -457,6 +470,9 @@ class Module:
 
     def find_peer(self, name: str) -> "PeerDef | None":
         return next((p for p in self.peers if p.name == name), None)
+
+    def find_notify(self, name: str) -> "NotifyDef | None":
+        return next((n for n in self.notifies if n.name == name), None)
 
     # lookup helpers -----------------------------------------------------------
     def find_input(self, name: str) -> InputDef | None:
@@ -665,6 +681,9 @@ def dump(m: Module) -> str:
         out.append(f"tags {ts.name} = {ts.prefix!r} {{{', '.join(ts.members)}}}")
     for st in m.structs:
         out.append(f"{st.kind} {st.name} {{" + "; ".join(("derived " if f.derived else "") + f"{f.name}: {f.ty}" for f in st.fields) + "}")
+    for nd in m.notifies:
+        out.append(("notify_state " if nd.state else "notify ") + nd.name + (" branching" if nd.branching else "") + f" cpp {nd.cpp_class!r} {{"
+                   + "; ".join(f"{f.name}: {f.ty}" for f in nd.struct.fields) + "}")
     for mt in m.montages:
         out.append(f"montage {mt.name} {{{', '.join(mt.sections)}}}")
     for a in m.actions:

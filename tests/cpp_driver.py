@@ -349,6 +349,27 @@ def hook_event(ev, owner: str = "Pawn") -> str:
     return "{ " + " ".join(parts) + " }"
 
 
+def notify_event(module, ev, k: int):
+    """(declaration, statement) for an event of a notify class the program declares: the notify object with its properties set, and the call
+    the engine makes on it.  An event with a montage instance (4th element) comes through the branching-point entry points."""
+    kind, name = ev[0], ev[1]
+    nd = module.find_notify(name)
+    payload = ev[2] if len(ev) > 2 and ev[2] else {}
+    source = ev[3] if len(ev) > 3 else None
+    var = f"Notify_{k}"
+    sets = "".join(f" {var}.{f.name} = {_arg_lit(f.ty, payload[f.name])};" for f in nd.struct.fields if f.name in payload)
+    decl = f"U{nd.cpp_class} {var};{sets}"
+    ref = "FAnimNotifyEventReference()"
+    if source is not None and nd.branching:
+        pre = f"FBranchingPointNotifyPayload P; P.SkelMeshComponent = &Mesh; P.MontageInstanceID = {int(source)};"
+        call = {"notify": f"{var}.BranchingPointNotify(P);", "notify_begin": f"{var}.BranchingPointNotifyBegin(P);",
+                "notify_tick": f"{var}.BranchingPointNotifyTick(P, 0.0625f);", "notify_end": f"{var}.BranchingPointNotifyEnd(P);"}[kind]
+        return decl, f"{{ {pre} {call} }}"
+    call = {"notify": f"{var}.Notify(&Mesh, nullptr, {ref});", "notify_begin": f"{var}.NotifyBegin(&Mesh, nullptr, 1.0f, {ref});",
+            "notify_tick": f"{var}.NotifyTick(&Mesh, nullptr, 0.0625f, {ref});", "notify_end": f"{var}.NotifyEnd(&Mesh, nullptr, {ref});"}[kind]
+    return decl, call
+
+
 def _dtransform(t) -> str:
     """A double-precision FTransform for a harness transform ((location), (rotation x y z w), (scale))."""
     return (f"FTransform(FQuat({_num(t[1][0])}, {_num(t[1][1])}, {_num(t[1][2])}, {_num(t[1][3])}), "
@@ -437,7 +458,7 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
             "\tObj.StubWorld = &World;",
             "\tObj.StubSkelMesh = &Mesh;",
         ]
-    L.append("\tMesh.StubPhysics = &Phys; Mesh.StubAsset = &MeshAsset;")
+    L.append("\tMesh.StubPhysics = &Phys; Mesh.StubAsset = &MeshAsset; Mesh.StubOwner = &Pawn;")
     for k in range(8):
         L.append(f'\tTargets[{k}].Tags.push_back(FName(TEXT("DalTarget")));')
     for a in slots:
@@ -541,8 +562,13 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
             else:
                 L.append(f"\t\tObj.AnimNotify_{name}();")
         # events, oldest first
-        for ev in f.get("events", []):
+        for k, ev in enumerate(f.get("events", [])):
             kind, name = ev[0], (ev[1] if len(ev) > 1 else "")
+            if kind in ("notify", "notify_begin", "notify_end", "notify_tick") and module.find_notify(name) is not None:
+                decl, call = notify_event(module, ev, k)
+                L.append("\t\t" + decl)
+                L.append("\t\t" + call)
+                continue
             if kind == "notify":
                 if not actor and name in anim_notifies:
                     L.append(f"\t\tObj.AnimNotify_{name}();")

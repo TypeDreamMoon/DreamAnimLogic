@@ -44,6 +44,13 @@ ANIM_INSTANCE_MEMBERS = frozenset(
     Montage_Play Montage_Stop Montage_Pause Montage_Resume""".split()
 )
 
+# Members of UAnimNotify / UAnimNotifyState that a member of a declared notify could shadow (the members become properties of the class).
+ANIM_NOTIFY_MEMBERS = frozenset(
+    """Notify NotifyBegin NotifyTick NotifyEnd BranchingPointNotify BranchingPointNotifyBegin BranchingPointNotifyTick
+    BranchingPointNotifyEnd GetNotifyName GetNotifyName_Implementation NotifyColor TriggerWeightThreshold MontageTickType
+    NotifyFilterType NotifyFilterLOD bIsNativeBranchingPoint bShouldFireInEditor bNotifyEvent""".split()
+)
+
 # Members of UActorComponent (and UObject) that a state/input/param of actor logic could shadow.
 ACTOR_COMPONENT_MEMBERS = frozenset(
     """Activate Deactivate ToggleActive IsActive SetActive GetOwner GetWorld Owner bAutoActivate bIsActive ComponentTags

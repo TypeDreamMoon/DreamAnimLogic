@@ -1445,6 +1445,7 @@ class LogicBase:
         self._peer_queue: list = []
         self._begun = False
         self._dt = 0.0
+        self._source = None           # the montage instance that raised the notify being handled (montage_stop_source)
         self._pending: list = []      # events posted by the caller
         self._cmds: list = []         # commands queued during the update
         known = {p[0] for p in self.DAL_PARAMS}
@@ -1549,6 +1550,12 @@ class LogicBase:
                 elif kind == "input":
                     if h_phase == ev[2]:
                         getattr(self, method)(coerce_by_name(value_type, ev[3] if len(ev) > 3 else 0.0))
+                elif value_type:                                  # a declared notify: the payload (its properties) and the montage instance
+                    self._source = ev[3] if len(ev) > 3 else None
+                    try:
+                        getattr(self, method)(self._coerce(value_type, ev[2] if len(ev) > 2 else None))
+                    finally:
+                        self._source = None
                 else:
                     getattr(self, method)()
 

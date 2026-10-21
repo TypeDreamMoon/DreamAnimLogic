@@ -294,6 +294,7 @@ class Interpreter:
         self._cmds: list[tuple] = []
         self._peer_queue: list[tuple] = []
         self._begun = False
+        self._source = None                                                # the montage instance that raised the notify being handled
         self._params = {}
         for p in module.params:
             self._params[p.name] = p.default
@@ -457,10 +458,15 @@ class Interpreter:
                     if h.phase != ev[2]:
                         continue
                     env["value"] = coerce(h.params[0][1], ev[3] if len(ev) > 3 else 0.0)
+                elif h.params:                                    # a declared notify: the payload (its properties) and the montage instance
+                    env[h.params[0][0]] = coerce(h.params[0][1], ev[2] if len(ev) > 2 else None)
+                    self._source = ev[3] if len(ev) > 3 else None
                 try:
                     self.ev.run_block(h.body, env)
                 except _ReturnValue:
                     pass
+                finally:
+                    self._source = None
 
     # ---- running ---------------------------------------------------------------------------------------
     def update(self, dt: float) -> None:

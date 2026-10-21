@@ -230,6 +230,8 @@ def is_by_ref(ty: Type) -> bool:
 def cpp_param(ty: Type, name: str, unused: bool = False) -> str:
     """One parameter of a function or method."""
     mark = "[[maybe_unused]] " if unused else ""
+    if isinstance(ty, StructType) and ty.is_notify:
+        return f"{mark}const {ty.cpp_type}*{' const' if unused else ''} {name}"       # the notify object: its properties are the payload
     if is_by_ref(ty):
         return f"{mark}const {cpp_type(ty)}& {name}"
     return f"{mark}{'const ' if unused else ''}{cpp_type(ty)} {name}"
@@ -428,7 +430,7 @@ class CppExprGen:
     def member(self, e: ir.Member) -> str:
         base = self.x(e.x)
         if isinstance(e.x.ty, StructType):
-            text = f"{base}.{e.comps}"
+            text = f"{base}->{e.comps}" if e.x.ty.is_notify else f"{base}.{e.comps}"
             return f"static_cast<{enum_cast(e.ty)}>({text})" if enum_cast(e.ty) else text
         if e.x.ty is HIT:
             return f"{base}.{HIT_MEMBER_CPP[e.comps]}"
@@ -597,6 +599,7 @@ class CppGen:
                 if isinstance(e, ir.HostQuery):
                     used_queries.add(e.name)
         self.cmds = [n for n in COMMANDS if n in used_cmds]
+        self.uses_source = "montage_stop_source" in used_cmds        # a command that names the montage instance of the notify being handled
         self.queries = [n for n in QUERIES if n in used_queries]
         self.world_queries = [n for n in self.queries if n.startswith("trace_") or n in _SCENE_QUERIES]
         # the new members of a hit are filled by every trace of the program, the old trace queries included, but only when the
@@ -607,15 +610,17 @@ class CppGen:
         self.event_handlers = [h for h in module.handlers if h.event not in LIFECYCLE]
         self.has_events = bool(self.event_handlers)
         self.hook_handlers = [h for h in module.handlers if h.event in HOOK_EVENTS]
-        self.sink = bool(self.hook_handlers)             # the class receives events through DalHost::FEventRouter (the hooks of the character)
+        self.notify_handlers = [h for h in module.handlers if h.params and isinstance(h.params[0][1], StructType) and h.params[0][1].is_notify]
+        self.sink = bool(self.hook_handlers or self.notify_handlers)     # the class receives events through DalHost::FEventRouter (hooks, declared notifies)
+        self.declared_notifies = {n.name for n in module.notifies}
         self.begin_handlers = [k for k, h in enumerate(module.handlers) if h.event == "begin_play"]
         self.end_handlers = [k for k, h in enumerate(module.handlers) if h.event == "end_play"]
         self.phased = module.phases_explicit or len(module.updates) > 1
         self.slots = [u.phase for u in module.updates] or [module.default_phase]
         self.queue_target = module.kind == "anim" and any(x.pub and not x.is_view for x in module.methods)
         self.has_cmds = bool(self.cmds)
-        self.hosth = self.actor or self.has_events or self.has_cmds or bool(self.world_queries)       # DalHost.h is part of the output
-        kinds = {h.event for h in module.handlers}
+        self.hosth = self.actor or self.has_events or self.has_cmds or bool(self.world_queries) or bool(module.notifies)       # DalHost.h is part of the output
+        kinds = {h.event for h in module.handlers if h not in self.notify_handlers}      # (a declared notify arrives through the router, not a delegate)
         self.bind_begin = bool(kinds & {"notify", "notify_begin"}) or (self.actor and bool(self.notify_names()))
         self.bind_end = "notify_end" in kinds
         self.bind_ended = "montage_ended" in kinds
@@ -739,7 +744,7 @@ class CppGen:
         """Notify names that travel as events: the handled ones, and (actor logic) the read ones."""
         seen: list[str] = []
         for h in self.m.handlers:
-            if h.event in ("notify", "notify_begin", "notify_end") and h.name not in seen:
+            if h.event in ("notify", "notify_begin", "notify_end", "notify_tick") and h.name not in seen:
                 seen.append(h.name)
         if self.actor:
             for n in self.notify_names():
@@ -751,7 +756,7 @@ class CppGen:
         """AnimNotify_<N> functions of an anim instance: the read notifies, then those with an `on notify` handler."""
         seen = self.notify_names()
         for h in self.m.handlers:
-            if h.event == "notify" and h.name not in seen:
+            if h.event == "notify" and h.name not in seen and h.name not in self.declared_notifies:
                 seen.append(h.name)
         return seen
 
@@ -1178,8 +1183,20 @@ class CppGen:
         return out
 
     def receive_body(self) -> list[str]:
-        """DalReceiveEvent: queue an event the router posted."""
-        return ["DalPostEvent(DalEvent);"]
+        """DalReceiveEvent: queue an event the router posted.  The events of a notify class carry its declared name: they are queued
+        under the id this logic gave it (and dropped when the logic does not handle that notify)."""
+        if not self.notify_handlers:
+            return ["DalPostEvent(DalEvent);"]
+        return ["DalHost::FEvent DalQueued = DalEvent;",
+                "if (DalQueued.Source != nullptr)",
+                "{",
+                "	DalQueued.Id = DalFindNotifyId(DalQueued.Name);",
+                "	if (DalQueued.Id == INDEX_NONE)",
+                "	{",
+                "		return;",
+                "	}",
+                "}",
+                "DalPostEvent(DalQueued);"]
 
     def dispatch_body(self) -> list[str]:
         m = self.m
@@ -1198,7 +1215,15 @@ class CppGen:
                 continue
             what = f"on {h.event} {h.name}" + (f" {h.phase}" if h.phase else "")
             kind = kinds[h.event]
-            if h.event in ("notify", "notify_begin", "notify_end"):
+            if h in self.notify_handlers:
+                nstruct = h.params[0][1]
+                out += [f"	// {what}", f"	if (DalEvent.Kind == DalHost::EEventKind::{kind} && DalEvent.Id == Dal_NotifyId_{h.name})", "	{",
+                        f"		if (const {nstruct.cpp_type}* DalPayload = Cast<{nstruct.cpp_type}>(DalEvent.Source))", "		{"]
+                if self.uses_source:
+                    out.append("			DalCurrentInstance = DalEvent.MontageInstance;")
+                out += [f"			DalHandler_{k}(DalPayload);", "		}", "	}"]
+                continue
+            if h.event in ("notify", "notify_begin", "notify_end", "notify_tick"):
                 ident = f"Dal_NotifyId_{h.name}"
             elif h.event == "input":
                 ident = f"Dal_ActionId_{h.name}"
@@ -1419,6 +1444,77 @@ class CppGen:
         ]
         return out
 
+    # ---- animation notify classes ---------------------------------------------------------------------------------
+    def notify_decl(self, nd: ir.NotifyDef) -> list[str]:
+        """The UCLASS of a declared notify: the members are properties, the notify events go to the logics of the actor (DalHost::FEventRouter)."""
+        cls = "U" + nd.cpp_class
+        base = "UAnimNotifyState" if nd.state else "UAnimNotify"
+        out = [f"/** {'Notify state' if nd.state else 'Notify'} `{nd.name}` of the program: its properties are the payload the `on notify` handlers read. */",
+               "UCLASS()", f"class {self.api}{cls} : public {base}", "{", f"{T}GENERATED_BODY()", "", "public:"]
+        if nd.branching:
+            out += [f"{T}{cls}();", ""]
+        for f in nd.struct.fields:
+            out.append(f'{T}UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "DAL|Notify")')
+            init = "" if isinstance(f.ty, (MapType, ArrayType, AssetType)) else f" = {cpp_value(f.ty, f.default)}"
+            out.append(f"{T}{cpp_prop_type(f.ty)} {f.name}{init};")
+            out.append("")
+        out.append(f"{T}virtual FString GetNotifyName_Implementation() const override;")
+        mesh = "USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation"
+        if nd.state:
+            out += [f"{T}virtual void NotifyBegin({mesh}, float TotalDuration, const FAnimNotifyEventReference& EventReference) override;",
+                    f"{T}virtual void NotifyTick({mesh}, float FrameDeltaTime, const FAnimNotifyEventReference& EventReference) override;",
+                    f"{T}virtual void NotifyEnd({mesh}, const FAnimNotifyEventReference& EventReference) override;"]
+            if nd.branching:
+                out += [f"{T}virtual void BranchingPointNotifyBegin(FBranchingPointNotifyPayload& BranchingPointPayload) override;",
+                        f"{T}virtual void BranchingPointNotifyTick(FBranchingPointNotifyPayload& BranchingPointPayload, float FrameDeltaTime) override;",
+                        f"{T}virtual void BranchingPointNotifyEnd(FBranchingPointNotifyPayload& BranchingPointPayload) override;"]
+        else:
+            out.append(f"{T}virtual void Notify({mesh}, const FAnimNotifyEventReference& EventReference) override;")
+            if nd.branching:
+                out.append(f"{T}virtual void BranchingPointNotify(FBranchingPointNotifyPayload& BranchingPointPayload) override;")
+        out.append("};")
+        return out
+
+    def notify_def(self, nd: ir.NotifyDef) -> list[list[str]]:
+        """The member functions of a declared notify class (one block per function)."""
+        cls = "U" + nd.cpp_class
+        base = "UAnimNotifyState" if nd.state else "UAnimNotify"
+        name = f'FName(TEXT("{nd.name}"))'
+        mesh = "USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation"
+
+        def post(kind: str, mesh_expr: str, instance: str) -> str:
+            return (f"{T}DalHost::FEventRouter::PostNotify({mesh_expr} != nullptr ? {mesh_expr}->GetOwner() : nullptr, "
+                    f"DalHost::EEventKind::{kind}, {name}, this, {instance});")
+
+        blocks: list[list[str]] = []
+        if nd.branching:
+            blocks.append([f"{cls}::{cls}()", "{", f"{T}bIsNativeBranchingPoint = true;", "}"])
+        blocks.append([f"FString {cls}::GetNotifyName_Implementation() const", "{", f"{T}return FString(TEXT(\"{nd.name}\"));", "}"])
+        if nd.state:
+            blocks.append([f"void {cls}::NotifyBegin({mesh}, const float TotalDuration, const FAnimNotifyEventReference& EventReference)", "{",
+                           f"{T}{base}::NotifyBegin(MeshComp, Animation, TotalDuration, EventReference);", "", post("NotifyBegin", "MeshComp", "INDEX_NONE"), "}"])
+            blocks.append([f"void {cls}::NotifyTick({mesh}, const float FrameDeltaTime, const FAnimNotifyEventReference& EventReference)", "{",
+                           f"{T}{base}::NotifyTick(MeshComp, Animation, FrameDeltaTime, EventReference);", "", post("NotifyTick", "MeshComp", "INDEX_NONE"), "}"])
+            blocks.append([f"void {cls}::NotifyEnd({mesh}, const FAnimNotifyEventReference& EventReference)", "{",
+                           f"{T}{base}::NotifyEnd(MeshComp, Animation, EventReference);", "", post("NotifyEnd", "MeshComp", "INDEX_NONE"), "}"])
+            if nd.branching:
+                # a montage raises the branching point itself: the event names the montage instance (montage_stop_source)
+                for fn, kind, extra, unused in (("Begin", "NotifyBegin", "", ""), ("Tick", "NotifyTick", ", const float FrameDeltaTime", "[[maybe_unused]] "),
+                                                ("End", "NotifyEnd", "", "")):
+                    blocks.append([f"void {cls}::BranchingPointNotify{fn}(FBranchingPointNotifyPayload& BranchingPointPayload{extra.replace('const float', unused + 'const float')})", "{",
+                                   post(kind, "BranchingPointPayload.SkelMeshComponent", "BranchingPointPayload.MontageInstanceID"), "}"])
+        else:
+            blocks.append([f"void {cls}::Notify({mesh}, const FAnimNotifyEventReference& EventReference)", "{",
+                           f"{T}{base}::Notify(MeshComp, Animation, EventReference);", "", post("Notify", "MeshComp", "INDEX_NONE"), "}"])
+            if nd.branching:
+                blocks.append([f"void {cls}::BranchingPointNotify(FBranchingPointNotifyPayload& BranchingPointPayload)", "{",
+                               post("Notify", "BranchingPointPayload.SkelMeshComponent", "BranchingPointPayload.MontageInstanceID"), "}"])
+        return blocks
+
+    def notify_structs(self, origin: str | None) -> list:
+        """The payload types of the notify classes declared in one file (their members are what the class declaration needs headers for)."""
+        return [n.struct for n in self.m.notifies if n.origin == origin]
+
     # ---- declarations shared by the logic header and the library headers -----------------------------------------
     def tags_decl(self, ts: TagType) -> list[str]:
         out = [f"namespace {ts.cpp_namespace}", "{"]
@@ -1439,6 +1535,8 @@ class CppGen:
         m = self.m
         if any(t.origin == origin or any_origin for t in m.tagsets):
             return True
+        if any(holds_tags(f.ty) for n in m.notifies if n.origin == origin or any_origin for f in n.struct.fields):
+            return True
         return any(holds_tags(f.ty) for s in m.structs if s.origin == origin or any_origin for f in s.fields)
 
     @property
@@ -1455,7 +1553,7 @@ class CppGen:
             inc += ["DalMath.h", "DalData.h"]
             if any(st.asset_root for st in settings):
                 inc.append("Engine/DataAsset.h")
-        for st in own:
+        for st in own + self.notify_structs(origin):
             for f in st.fields:
                 asset_headers(f.ty, inc)
         if origin is None:
@@ -1561,6 +1659,7 @@ class CppGen:
         m = self.m
         has_tags = self.uses_tags(origin)
         own_tags = [t for t in m.tagsets if t.origin == origin]
+        own_notifies = [n for n in m.notifies if n.origin == origin]
         L = [f"// Generated by dal {__version__} from {filename} (sha256 {sha256[:16]}...).",
              "// Do not edit: change the .dal source and recompile.",
              f"// Module dependencies: Core, CoreUObject, Engine" + (", GameplayTags" if has_tags else ""),
@@ -1572,6 +1671,11 @@ class CppGen:
             L.append('#include "GameplayTagContainer.h"')
         if own_tags:
             L.append('#include "NativeGameplayTags.h"')
+        if own_notifies:
+            L.append('#include "DalHost.h"')
+            L.append('#include "Animation/AnimNotifies/AnimNotify.h"')
+            if any(n.state for n in own_notifies):
+                L.append('#include "Animation/AnimNotifies/AnimNotifyState.h"')
         for inc in self.data_includes(origin, skip=("DalMath.h",)):
             L.append(f'#include "{inc}"')
         for inc in self.lib_includes(origin):
@@ -1593,6 +1697,9 @@ class CppGen:
             if st.origin == origin:
                 L.extend(self.struct_decl(st))
                 L.append("")
+        for nd in own_notifies:
+            L.extend(self.notify_decl(nd))
+            L.append("")
         consts = [c for c in m.consts if c.origin == origin]
         funcs = [f for f in m.funcs if f.origin == origin]
         if consts or funcs:
@@ -1610,14 +1717,24 @@ class CppGen:
         while L[-1] == "":
             L.pop()
         files = {f"{stem}.h": "\n".join(L) + "\n"}
-        if own_tags:
+        if own_tags or own_notifies:
             S = [f"// Generated by dal {__version__} from {filename} (sha256 {sha256[:16]}...).",
                  "// Do not edit: change the .dal source and recompile.",
-                 f'#include "{stem}.h"', "", '#include "NativeGameplayTags.h"', "", f"#include UE_INLINE_GENERATED_CPP_BY_NAME({stem})", ""]
-            for k, ts in enumerate(own_tags):
+                 f'#include "{stem}.h"', ""]
+            if own_tags:
+                S += ['#include "NativeGameplayTags.h"']
+            if own_notifies:
+                S += ['#include "GameFramework/Actor.h"', '#include "Components/SkeletalMeshComponent.h"']
+            S += ["", f"#include UE_INLINE_GENERATED_CPP_BY_NAME({stem})", ""]
+            blocks_: list[list[str]] = []
+            for ts in own_tags:
+                blocks_.append(self.tags_define(ts))
+            for nd in own_notifies:
+                blocks_.extend(self.notify_def(nd))
+            for k, blk in enumerate(blocks_):
                 if k:
                     S.append("")
-                S.extend(self.tags_define(ts))
+                S.extend(blk)
             files[f"{stem}.cpp"] = "\n".join(S) + "\n"
         return files
 
@@ -1698,11 +1815,13 @@ class CppGen:
         for inc in self.data_includes(None):
             L.append(f'#include "{inc}"')
         if (any(enum_cast(d.ty) or (isinstance(d.ty, (MapType, ArrayType)) and enum_cast(getattr(d.ty, "elem", None))) for d in [*m.params, *m.inputs, *m.states])
-                or any(enum_cast(f.ty) or enum_cast(getattr(f.ty, "elem", None)) for s in m.structs if s.origin is None for f in s.fields)
+                or any(enum_cast(f.ty) or enum_cast(getattr(f.ty, "elem", None)) for s in [*m.structs, *self.notify_structs(None)] if s.origin is None for f in s.fields)
                 or self.uses("movement_mode") or self.world_queries):
             L.append('#include "Engine/EngineTypes.h"')
-        if self.bind_begin or self.bind_end:
+        if self.bind_begin or self.bind_end or any(n.origin is None for n in m.notifies):
             L.append('#include "Animation/AnimNotifies/AnimNotify.h"')
+        if any(n.origin is None and n.state for n in m.notifies):
+            L.append('#include "Animation/AnimNotifies/AnimNotifyState.h"')
         if self.queue_target:
             L.append('#include "Templates/Function.h"')
         L.append(f'#include "{m.name}.generated.h"')
@@ -1742,6 +1861,10 @@ class CppGen:
         for st in m.structs:
             if st.origin is None:
                 L.extend(self.struct_decl(st))
+                L.append("")
+        for nd in m.notifies:
+            if nd.origin is None:
+                L.extend(self.notify_decl(nd))
                 L.append("")
         if self.phased:
             L.append(f"class {self.cls};")
@@ -1962,6 +2085,9 @@ class CppGen:
                 add("Components/SkeletalMeshComponent.h")
         if self.bind_begin:
             add("Animation/AnimTypes.h")
+        if any(n.origin is None for n in m.notifies):
+            add("GameFramework/Actor.h")
+            add("Components/SkeletalMeshComponent.h")
         if self.controller:
             add("GameFramework/Controller.h")
         if self.arm:
@@ -2141,6 +2267,9 @@ class CppGen:
 
         blocks: list[list[str]] = []
         traffic = self.has_events or self.has_cmds
+        for nd in m.notifies:                                           # the notify classes of this file come first
+            if nd.origin is None:
+                blocks.extend(self.notify_def(nd))
 
         # ---- lifecycle
         if self.actor:

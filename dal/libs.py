@@ -22,7 +22,7 @@ from .errors import DalError, SourceFile
 from .parser import parse_source
 
 # declarations a library file may contain
-LIBRARY_DECLS = ("UseDecl", "EnumDecl", "ConstDecl", "FnDecl", "ExternDecl", "StructDecl", "TagsDecl", "SettingsDecl")
+LIBRARY_DECLS = ("UseDecl", "EnumDecl", "ConstDecl", "FnDecl", "ExternDecl", "StructDecl", "TagsDecl", "SettingsDecl", "NotifyDecl")
 
 
 def read_text(path: str) -> str:
@@ -172,7 +172,7 @@ class CompileContext:
             d = bad[0]
             what = {"LogicDecl": "a 'logic' line", "ParamDecl": "a param", "InputDecl": "an input", "StateDecl": "a state",
                     "UpdateDecl": "an update", "EntryDecl": "an entry", "HandlerDecl": "an 'on' handler"}.get(type(d).__name__, type(d).__name__.replace("Decl", "").lower())
-            raise DalError([source.diag("DAL3071", f"a library file declares shared types and helpers (enum, struct, tags, settings, const, fn, extern fn); "
+            raise DalError([source.diag("DAL3071", f"a library file declares shared types and helpers (enum, struct, tags, settings, notify, const, fn, extern fn); "
                                                    f"it cannot contain {what}", d.name_pos or d.pos)])
 
 

@@ -93,6 +93,8 @@ def _rand_value(rng: random.Random, ty: Type, scale: float = 10.0):
         return ty.full_name(rng.choice(ty.members + ["None"]))
     if isinstance(ty, StructType):
         return {f.name: _rand_value(rng, f.ty, scale) for f in ty.fields if not f.derived and not f.ty.is_asset and f.ty.name not in ("curve", "curve3")}
+    if isinstance(ty, AssetType):
+        return None if rng.random() < 0.3 else f"A_{ty.name}_{rng.randint(1, 4)}"
     raise ValueError(ty)
 
 
@@ -270,6 +272,12 @@ def _random_events(module: ir.Module, rng: random.Random) -> list[tuple]:
         h = rng.choice(handlers)
         if h.event in HOOK_EVENTS:
             out.append(_random_hook(rng, h.event))
+        elif h.event in ("notify", "notify_begin", "notify_end", "notify_tick") and h.params:
+            # a declared notify: the properties (some left at their defaults) and, for a branching one, the montage instance that raised it
+            nd = module.find_notify(h.name)
+            payload = {f.name: _rand_value(rng, f.ty, 5.0) for f in nd.struct.fields if rng.random() < 0.8}
+            source = (rng.randrange(1, 6),) if nd.branching and rng.random() < 0.7 else ()
+            out.append((h.event, h.name, payload, *source))
         elif h.event in ("notify", "notify_begin", "notify_end"):
             out.append((h.event, h.name))
         elif h.event in ("montage_ended", "montage_blending_out"):

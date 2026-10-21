@@ -138,11 +138,37 @@ class Parser:
             return self.parse_struct()
         if t.kind == "IDENT" and t.text == "tags" and self.peek().kind == "IDENT":
             return self.parse_tags()
+        if t.kind == "IDENT" and t.text in ("notify", "notify_state") and self.peek().kind == "IDENT":
+            return self.parse_notify()
         raise self.error(
             "DAL2001",
-            "expected a declaration (use, logic, enum, struct, settings, tags, const, param, input, state, fn, method, view, peer, extern, update, entry, "
+            "expected a declaration (use, logic, enum, struct, settings, tags, notify, notify_state, const, param, input, state, fn, method, view, peer, extern, update, entry, "
             f"on, timer, window, buffer, combo, montage, action), found {self.describe(t)}",
         )
+
+    def parse_notify(self) -> S.NotifyDecl:
+        """`notify Name [branching] [cpp "ClassName"] { Member: type [= default]; ... }` (also `notify_state`)."""
+        kw = self.advance()
+        name = self.ident("a notify name")
+        cpp = cpp_pos = None
+        branching = False
+        while True:
+            if self.tok.is_kw("cpp"):
+                self.advance()
+                s = self.tok
+                if s.kind != "STRING":
+                    raise self.error("DAL2001", f"expected the C++ class name in quotes after 'cpp', found {self.describe(s)}")
+                self.advance()
+                if cpp is not None:
+                    raise self.error("DAL2006", "'cpp' given twice", s.pos)
+                cpp, cpp_pos = str(s.value), s.pos
+            elif self.is_word("branching"):
+                self.advance()
+                branching = True
+            else:
+                break
+        fields = self.parse_fields(kw.text)
+        return S.NotifyDecl(kw.pos, name.text, kw.text == "notify_state", fields, cpp, cpp_pos, branching, name_pos=name.pos)
 
     def parse_use(self) -> S.UseDecl:
         kw = self.advance()      # use (a reserved word, so it is never a name)

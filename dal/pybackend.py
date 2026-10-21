@@ -306,6 +306,10 @@ class PyGen:
         for d in [*self.m.params, *self.m.inputs, *self.m.states]:
             if isinstance(d.ty, (StructType, TagType)) and d.ty not in seen:
                 seen.append(d.ty)
+        for h in self.m.handlers:                                # the payload of a declared notify is converted from the event's dict
+            for _n, ty in h.params:
+                if isinstance(ty, StructType) and ty.is_notify and ty not in seen:
+                    seen.append(ty)
         return seen
 
     # ---- struct classes ---------------------------------------------------------------------
@@ -321,7 +325,8 @@ class PyGen:
             L.append(f"{INDENT}_IMMUTABLE = True")
         plain = [f for f in st.fields if not f.derived]
         if plain:
-            conv = "".join(f"({f.name!r}, {py_coercer(f.ty)}), " for f in plain)
+            # the properties of an animation notify come from the host as plain data: an enum member may be named
+            conv = "".join(f"({f.name!r}, " + (f"lambda v: _rt.as_enum({py_enum_class(f.ty)}, v)" if st.is_notify and isinstance(f.ty, EnumType) else py_coercer(f.ty)) + "), " for f in plain)
             L.append(f"{INDENT}_SPEC = ({conv})")
         factories = [f for f in plain if isinstance(f.ty, StructType)]
         if factories:
@@ -400,6 +405,8 @@ class PyGen:
             L.extend(self.tag_class(ts))
         for st in m.structs:
             L.extend(self.struct_class(st))
+        for nd in m.notifies:                                   # the payload of an animation notify: its properties
+            L.extend(self.struct_class(nd.struct))
         if any(st.is_settings for st in m.structs):
             from .settings import schema_of
 
@@ -482,6 +489,8 @@ class PyGen:
             L.append(f"{INDENT}DAL_HANDLERS = (")
             for k, h in event_handlers:
                 vt = h.params[0][1].name if h.event == "input" else (str(len(h.params)) if h.event in HOOK_EVENTS else "")
+                if h.params and isinstance(h.params[0][1], StructType) and h.params[0][1].is_notify:
+                    vt = h.params[0][1].name
                 L.append(f"{INDENT*2}({h.event!r}, {h.name!r}, {h.phase!r}, '_h{k}', {vt!r}),")
             L.append(f"{INDENT})")
         if m.peers:
