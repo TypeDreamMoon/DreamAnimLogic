@@ -238,7 +238,10 @@ generated one), swaps a changed file in while keeping the state whose name and t
 (log, Message Log, toast) and keeps running the last good version. `logic X : actor;` is interpreted on the component;
 `logic X;` writes the AnimInstance's properties by name (use `--bag`). Verified in PIE (UE 5.8.2) frame by frame against the
 generated C++; cost 86 us per tick for the three-hit combo (3.7 us compiled). `Unreal/DalLive/README.md` has the use, the
-rules and the numbers, `Unreal/TestHost/README.md` the test project.
+rules and the numbers, `Unreal/TestHost/README.md` the test project. Since 0.4.0 the session also runs an animation logic's `post_update`
+block (right after the update; its commands wait for the next one like the others). The live host (`UeHost`) implements the commands the editor's
+Python API reaches; hook events, declared-notify payloads, `snapshot_pose`, `stop_montages_with_slot`, root motion override, the ragdoll
+commands and the montage asset queries are not available in the editor session (`dal-syntax-v3.md` section 25 lists them).
 
 ## Vendoring (DreamVEd and DreamAnim)
 
