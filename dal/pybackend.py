@@ -136,6 +136,8 @@ class PyGen:
             if isinstance(e.ty, StructType):
                 return f"({self.val(e.a)} if {self.x(e.c)} else {self.val(e.b)})"
             return f"({self.x(e.a)} if {self.x(e.c)} else {self.x(e.b)})"
+        if k is ir.Valid:
+            return f"bool({self.x(e.x)})"
         if k is ir.MakeStruct:
             return f"{e.ty.name}(" + ", ".join(f"{n}={self.val(v)}" for n, v in e.fields) + ")"
         if k is ir.Member:
@@ -237,6 +239,15 @@ class PyGen:
                 out.extend(self.stmts(s.body, depth + 1) or [f"{pad}{INDENT}pass"])
         return out
 
+    # ---- tag sets ---------------------------------------------------------------------------
+    def tag_class(self, ts: TagType) -> list[str]:
+        L = ["", f"class {ts.name}:", f'{INDENT}"""Gameplay tag set \'{ts.prefix}\': a tag value is its full name, the empty string is no tag."""',
+             f"{INDENT}PREFIX = {ts.prefix!r}", f"{INDENT}None_ = ''"]
+        for mem in ts.members:
+            L.append(f"{INDENT}{py_member_name(mem)} = {ts.full_name(mem)!r}")
+        L.append("")
+        return L
+
     def value_types(self) -> list[Type]:
         """Struct and tag types the class stores or accepts (params, inputs, states), in declaration order."""
         seen: list[Type] = []
@@ -306,6 +317,8 @@ class PyGen:
                 L.append(f"{INDENT}{py_member_name(mem)} = {i}")
             L.append("")
 
+        for ts in m.tagsets:
+            L.extend(self.tag_class(ts))
         for st in m.structs:
             L.extend(self.struct_class(st))
 

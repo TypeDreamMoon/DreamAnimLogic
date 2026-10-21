@@ -130,6 +130,8 @@ class Evaluator:
             if self.owner is None:
                 raise InterpError("host queries need a running logic")
             return self.owner.host_query(e, [self.ev(a, env) for a in e.args])
+        if k is ir.Valid:
+            return bool(self.ev(e.x, env))
         if k is ir.MakeStruct:
             return vals.new_struct(e.ty, {n: vals.copy_value(self.ev(v, env)) for n, v in e.fields})
         if k is ir.MontageRef:

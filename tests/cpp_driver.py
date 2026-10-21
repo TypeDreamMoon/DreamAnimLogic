@@ -194,7 +194,7 @@ def make_driver(module: ir.Module, frames: list[dict]) -> str:
         "",
         "#include <initializer_list>",
         "",
-        "static void Pv(const char* Name, std::initializer_list<double> Values)",
+        "[[maybe_unused]] static void Pv(const char* Name, std::initializer_list<double> Values)",
         "{",
         '	std::printf("%s", Name);',
         "	for (double V : Values)",
@@ -454,15 +454,15 @@ def build_and_run(module: ir.Module, frames: list[dict], extra_include: str | No
             f.write(make_driver(module, frames))
         exe = os.path.join(work, "run.exe" if kind == "msvc" else "run")
         includes = [inc, gen] + ([os.path.abspath(extra_include)] if extra_include else [])
-        src = os.path.join(gen, f"{module.name}.cpp")
+        srcs = [os.path.join(gen, n) for n in sorted(files) if n.endswith(".cpp")]
         parent = CppGen(module, options or CppOptions()).parent
         if kind == "msvc":
             cmd = [path, "/nologo", "/std:c++20", "/EHsc", "/W4", f"/DDAL_STUB_SUPER={parent}", *[f"/D{d}" for d in (defines or [])], *[f"/I{d}" for d in includes],
-                   driver, src, f"/Fe:{exe}", f"/Fo:{work}\\"]
+                   driver, *srcs, f"/Fe:{exe}", f"/Fo:{work}\\"]
             if warnings_as_errors:
                 cmd.insert(5, "/WX")
         else:
-            cmd = [path, "-std=c++20", "-Wall", "-Wextra", f"-DDAL_STUB_SUPER={parent}", *[f"-D{d}" for d in (defines or [])], *[f"-I{d}" for d in includes], driver, src, "-o", exe]
+            cmd = [path, "-std=c++20", "-Wall", "-Wextra", f"-DDAL_STUB_SUPER={parent}", *[f"-D{d}" for d in (defines or [])], *[f"-I{d}" for d in includes], driver, *srcs, "-o", exe]
             if warnings_as_errors:
                 cmd.append("-Werror")
         build = subprocess.run(cmd, cwd=work, env=env, capture_output=True, text=True, errors="replace")

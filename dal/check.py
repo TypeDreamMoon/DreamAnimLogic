@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast as pyast
 import difflib
 import hashlib
+import re
 from dataclasses import dataclass
 
 from . import ir
@@ -46,6 +47,7 @@ from .types import (
     EnumType,
     FieldDef,
     StructType,
+    TagType,
     Type,
     zero_value,
 )
@@ -129,6 +131,7 @@ class Checker:
         self.later: dict[str, str] = {}   # declared variables, for better messages in constant expressions
         self.later_fns: set[str] = set()  # functions declared later in the file
         self.invalid_names: set[str] = set()  # declared with an unusable name; uses are not reported again
+        self.tagsets: dict[str, TagType] = {}
         self.structs: dict[str, StructType] = {}          # struct and settings types by name
         self.struct_decls: dict[str, S.StructDecl] = {}
         self.folding: set[str] = set()
@@ -192,7 +195,9 @@ class Checker:
             return self.enums[name]
         if name in self.structs:
             return self.structs[name]
-        cands = list(BASIC_TYPES) + list(self.enums) + list(self.structs)
+        if name in self.tagsets:
+            return self.tagsets[name]
+        cands = list(BASIC_TYPES) + list(self.enums) + list(self.structs) + list(self.tagsets)
         self.err("DAL3041", f"unknown type '{name}'" + self.suggest(name, cands), pos)
         return ERROR
 
@@ -248,6 +253,11 @@ class Checker:
                 self.declare_enum(d)
             elif isinstance(d, S.MontageDecl):
                 self.declare_montage(d)
+        for d in decls:
+            self.focus(d)
+            if isinstance(d, S.TagsDecl):
+                self.declare_tags(d)
+        self.module.tagsets = list(self.tagsets.values())
         for d in decls:
             self.focus(d)
             if isinstance(d, S.StructDecl):
@@ -339,6 +349,36 @@ class Checker:
             raise DalError(self.diags)
         m.enums = self.user_enums
         return m
+
+    # ---- tags -------------------------------------------------------------------------------------------------
+    def declare_tags(self, d: S.TagsDecl) -> None:
+        if not self.declare_global(d.name, "tags", d.name_pos or d.pos, what="a tag set name"):
+            return
+        origin = self.origin_of(d)
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)*", d.prefix):
+            self.err("DAL4057", f"'{d.prefix}' is not a gameplay tag prefix: dotted names such as \"Als.Gait\" (letters, digits, '_')", d.prefix_pos)
+        for other in self.tagsets.values():
+            if other.prefix == d.prefix:
+                self.err("DAL4051", f"tag set {other.name} already uses the prefix \"{d.prefix}\"", d.prefix_pos)
+        members: list[str] = []
+        seen: set[str] = set()
+        for mname, mpos in d.members:
+            if mname == "None":
+                self.err("DAL3059", "'None' is the implicit empty tag of every tag set", mpos)
+            elif mname in seen:
+                self.err("DAL3001", f"tag '{mname}' is declared twice in {d.name}", mpos)
+            elif mname in CPP_KEYWORDS:
+                self.err("DAL3004", f"'{mname}' cannot be a tag name: it is a C++ keyword", mpos)
+            else:
+                members.append(mname)
+            seen.add(mname)
+        cached = self.ctx.types.get((origin, d.name)) if (self.ctx is not None and origin is not None) else None
+        tt = cached if cached is not None else TagType(d.name, d.prefix, members)
+        tt.origin = origin
+        if cached is None and self.ctx is not None and origin is not None:
+            self.ctx.types[(origin, d.name)] = tt
+        self.tagsets[d.name] = tt
+        self.globals[d.name].obj = tt
 
     # ---- structs ----------------------------------------------------------------------------------------------
     def declare_struct(self, d: S.StructDecl) -> None:
@@ -937,6 +977,8 @@ class Checker:
             return self.bad("DAL3030", f"enum '{name}' is a type; write {name}.<Member> to name a value", e.pos)
         if k == "struct":
             return self.bad("DAL3030", f"{self.structs[name].kind} '{name}' is a type; write {name}(...) to build a value", e.pos)
+        if k == "tags":
+            return self.bad("DAL3030", f"tag set '{name}' is a type; write {name}.<Tag> to name a tag", e.pos)
         if k == "montage":
             return self.bad("DAL3030", f"montage '{name}' is not a value: write {name}.playing, {name}.position, {name}.section or "
                                        f"{name}.<Section>, or pass it to a host.montage_* command", e.pos)
@@ -976,6 +1018,16 @@ class Checker:
             sym = self.globals.get(base.name)
             if sym is not None and sym.kind == "montage":
                 return self.montage_member(sym.obj, e, sc)    # type: ignore[arg-type]
+            tt = self.tagsets.get(base.name)
+            if tt is not None and sym is not None and sym.kind == "tags":
+                if e.field == "None" or e.field in tt.members:
+                    return ir.Lit(tt, tt.full_name(e.field))
+                return self.bad(
+                    "DAL3032",
+                    f"tag set {tt.name} has no tag '{e.field}'" + self.suggest(e.field, tt.members)
+                    + f" (tags: {', '.join(tt.members)}, None)",
+                    e.field_pos,
+                )
             et = self.enums.get(base.name)
             if et is not None and base.name not in BUILTIN_CONSTS:
                 if e.field in et.members:
@@ -1265,6 +1317,8 @@ class Checker:
                 return ir.Binary(BOOL, op, a, b)
             if ta.is_enum and ta is tb:
                 return ir.Binary(BOOL, op, a, b)
+            if ta.is_tags and ta is tb:
+                return ir.Binary(BOOL, op, a, b)
             if ta is tb and ta in (VEC2, VEC3, ROTATOR, QUAT):
                 return self.bad("DAL4001", f"{ta} values cannot be compared with '{op}'; compare lengths or components, e.g. is_nearly_zero(length(a - b))", op_pos)
             if ta is tb and isinstance(ta, StructType):
@@ -1319,6 +1373,11 @@ class Checker:
         sym = self.globals.get(name)
         if sym is not None and sym.kind == "struct":
             return self.make_struct(e, self.structs[name], args, sc)
+        if name == "valid" and sym is None:
+            if len(args) != 1 or not (args[0].ty.is_tags or args[0].ty.is_asset):
+                given = ", ".join(a.ty.name for a in args)
+                return self.bad("DAL4040", f"no version of valid() accepts ({given}); available: valid(tag) -> bool, valid(asset) -> bool", e.pos)
+            return ir.Valid(BOOL, args[0])
         if sym is None and sc.ctx == "const" and name in self.later_fns:
             return self.bad("DAL5002", f"a constant expression cannot call '{name}'; only built-in functions are allowed", e.pos)
         if sym is None:
@@ -1439,6 +1498,7 @@ class Checker:
         taken = {self.module.name, "_rt"}
         taken |= {e.name for e in self.user_enums}
         taken |= {s.name for s in self.module.structs}
+        taken |= {t.name for t in self.module.tagsets}
         taken |= {f"_fn_{f.name}" for f in self.module.funcs}
         taken |= {f"_K_{c.name}" for c in self.module.consts}
         for node in tree.body:

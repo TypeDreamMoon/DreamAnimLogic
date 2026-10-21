@@ -151,6 +151,26 @@ struct TWeakObjectPtr
 	void Reset() { Ptr = nullptr; }
 };
 
+// ---- gameplay tags -----------------------------------------------------------------------------------------------
+// FGameplayTag compares by exact name (operator== is an exact match in UE); UE_DECLARE/DEFINE_GAMEPLAY_TAG declare and
+// define a global FGameplayTag as NativeGameplayTags.h does.
+struct FGameplayTag
+{
+	FName TagName;
+	FGameplayTag() = default;
+	explicit FGameplayTag(const char* InName) : TagName(InName) {}
+	bool IsValid() const { return !TagName.Text.empty(); }
+	bool operator==(const FGameplayTag& O) const { return TagName == O.TagName; }
+	bool operator!=(const FGameplayTag& O) const { return TagName != O.TagName; }
+	bool operator<(const FGameplayTag& O) const { return TagName.Text < O.TagName.Text; }
+	std::string ToString() const { return TagName.Text; }
+	static FGameplayTag RequestGameplayTag(const FName& InName) { return FGameplayTag(InName.Text.c_str()); }
+	static const FGameplayTag EmptyTag;
+};
+inline const FGameplayTag FGameplayTag::EmptyTag;
+#define UE_DECLARE_GAMEPLAY_TAG_EXTERN(TagName) extern FGameplayTag TagName;
+#define UE_DEFINE_GAMEPLAY_TAG(TagName, Tag) FGameplayTag TagName(Tag);
+
 // ---- the world and traces --------------------------------------------------------------------------------------
 class AActor;
 

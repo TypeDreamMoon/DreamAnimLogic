@@ -36,7 +36,7 @@ def f32(x):
 def close(a, b, rel):
     if isinstance(a, tuple):
         return len(a) == len(b) and all(close(x, y, rel) for x, y in zip(a, b))
-    if isinstance(a, bool) or isinstance(a, int):
+    if isinstance(a, (bool, int, str)):
         return a == b
     if math.isnan(a) or math.isnan(b):
         return math.isnan(a) and math.isnan(b)

@@ -375,6 +375,15 @@ class StructDecl(Decl):
 
 
 @dataclass
+class TagsDecl(Decl):
+    """tags AlsGait = "Als.Gait" { Walking, Running }  -- a set of gameplay tags with a common prefix."""
+    name: str
+    prefix: str
+    prefix_pos: Pos
+    members: list[tuple[str, Pos]]
+
+
+@dataclass
 class UseDecl(Decl):
     """use "als_lib.dal"; -- merge the declarations of a library file (no logic) into this one."""
     path: str

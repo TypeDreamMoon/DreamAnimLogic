@@ -124,9 +124,11 @@ class Parser:
             return self.parse_use()
         if t.kind == "IDENT" and t.text == "struct":
             return self.parse_struct()
+        if t.kind == "IDENT" and t.text == "tags" and self.peek().kind == "IDENT":
+            return self.parse_tags()
         raise self.error(
             "DAL2001",
-            "expected a declaration (use, logic, enum, struct, const, param, input, state, fn, extern, update, entry, "
+            "expected a declaration (use, logic, enum, struct, tags, const, param, input, state, fn, extern, update, entry, "
             f"on, timer, window, buffer, combo, montage, action), found {self.describe(t)}",
         )
 
@@ -161,6 +163,28 @@ class Parser:
             fields.append(S.FieldDecl(f.text, type_name, f.pos, type_pos, init, derived))
         self.advance()
         return fields
+
+    def parse_tags(self) -> S.TagsDecl:
+        kw = self.advance()      # tags
+        name = self.ident("a tag set name")
+        self.expect_op("=", "after the tag set name (tags Name = \"Prefix\" { Member, ... })")
+        s = self.tok
+        if s.kind != "STRING":
+            raise self.error("DAL2001", f"expected the tag prefix in quotes, found {self.describe(s)}")
+        self.advance()
+        self.expect_op("{", "after the tag prefix")
+        members: list[tuple[str, Pos]] = []
+        while True:
+            m = self.ident("a tag name")
+            members.append((m.text, m.pos))
+            if self.tok.is_op(","):
+                self.advance()
+                if self.tok.is_op("}"):
+                    break
+                continue
+            break
+        self.expect_op("}", "to close the tag set")
+        return S.TagsDecl(kw.pos, name.text, str(s.value), s.pos, members, name_pos=name.pos)
 
     def parse_struct(self) -> S.StructDecl:
         kw = self.advance()      # struct (a reserved word, so it is never a name)

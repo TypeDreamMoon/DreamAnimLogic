@@ -114,6 +114,12 @@ class CallExtern(Expr):
 
 
 @dataclass
+class Valid(Expr):
+    """valid(x): a tag is not empty / an asset reference is not null."""
+    x: Expr
+
+
+@dataclass
 class MakeStruct(Expr):
     """Name(member: value, ...): a struct value; members that are not listed keep their declared defaults."""
     fields: list[tuple[str, Expr]]
@@ -317,6 +323,7 @@ class Module:
     standin_source: str = ""                                    # Python stand-in file text (bundled by the Python backend)
     standin_filename: str = ""
     structs: list = field(default_factory=list)                 # StructType, dependencies first (library structs included)
+    tagsets: list = field(default_factory=list)                 # TagType (library tag sets included)
     libs: list[LibRef] = field(default_factory=list)            # libraries used, dependencies first
     is_library: bool = False                                    # a file without `logic`: only shared declarations
 
@@ -362,7 +369,7 @@ class Module:
 # ---- traversal ---------------------------------------------------------------------------------
 
 def children(e: Expr) -> list[Expr]:
-    if isinstance(e, (Unary, ToFloat, Member)):
+    if isinstance(e, (Unary, ToFloat, Member, Valid)):
         return [e.x]
     if isinstance(e, Binary):
         return [e.a, e.b]
@@ -451,6 +458,8 @@ def dump_expr(e: Expr) -> str:
         return f"{e.name}[{e.sig_index}]({', '.join(dump_expr(a) for a in e.args)})"
     if isinstance(e, CallExtern):
         return f"extern:{e.name}({', '.join(dump_expr(a) for a in e.args)})"
+    if isinstance(e, Valid):
+        return f"valid({dump_expr(e.x)})"
     if isinstance(e, MakeStruct):
         return f"{e.ty.name}({', '.join(f'{n}: {dump_expr(v)}' for n, v in e.fields)})"
     if isinstance(e, MontageRef):
@@ -493,6 +502,8 @@ def dump(m: Module) -> str:
         out.append(f"use {lib.filename!r}")
     for en in m.enums:
         out.append(f"enum {en.name} {{{', '.join(en.members)}}}")
+    for ts in m.tagsets:
+        out.append(f"tags {ts.name} = {ts.prefix!r} {{{', '.join(ts.members)}}}")
     for st in m.structs:
         out.append(f"{st.kind} {st.name} {{" + "; ".join(f"{f.name}: {f.ty}" for f in st.fields) + "}")
     for mt in m.montages:
