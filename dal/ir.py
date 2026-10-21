@@ -184,6 +184,7 @@ class ConstDef:
     ty: Type
     value: object
     source: str = ""
+    origin: str | None = None        # key of the library file that declares it (None = the file being compiled)
 
 
 @dataclass
@@ -220,6 +221,7 @@ class FnDef:
     params: list[tuple[str, Type]]
     ret: Type
     body: list[Stmt]
+    origin: str | None = None
 
 
 @dataclass
@@ -230,6 +232,7 @@ class ExternDef:
     cpp: str
     include: str | None
     py: str
+    origin: str | None = None
 
 
 @dataclass
@@ -269,6 +272,16 @@ class EntryDef:
 
 
 @dataclass
+class LibRef:
+    """A library file the module uses (``use "x.dal";``)."""
+    key: str                  # normalised path, what ``origin`` fields hold
+    filename: str             # relative to the project root, as in diagnostics
+    stem: str                 # name of the generated C++ files (als_lib.dal -> AlsLib)
+    sha256: str
+    deps: list[str] = field(default_factory=list)     # keys of the libraries it uses directly
+
+
+@dataclass
 class Module:
     name: str
     enums: list[EnumType] = field(default_factory=list)       # user enums only
@@ -288,6 +301,8 @@ class Module:
     source_sha256: str = ""
     standin_source: str = ""                                    # Python stand-in file text (bundled by the Python backend)
     standin_filename: str = ""
+    libs: list[LibRef] = field(default_factory=list)            # libraries used, dependencies first
+    is_library: bool = False                                    # a file without `logic`: only shared declarations
 
     # lookup helpers -----------------------------------------------------------
     def find_input(self, name: str) -> InputDef | None:
@@ -451,7 +466,9 @@ def dump_stmts(stmts: list[Stmt], indent: int = 1) -> list[str]:
 
 
 def dump(m: Module) -> str:
-    out = [f"logic {m.name}" + (f" : {m.kind}" if m.kind != "anim" else "")]
+    out = [f"library {m.name}" if m.is_library else f"logic {m.name}" + (f" : {m.kind}" if m.kind != "anim" else "")]
+    for lib in m.libs:
+        out.append(f"use {lib.filename!r}")
     for en in m.enums:
         out.append(f"enum {en.name} {{{', '.join(en.members)}}}")
     for mt in m.montages:

@@ -120,11 +120,22 @@ class Parser:
                 return handler()
         if t.kind == "IDENT" and t.text == "action" and self.peek().kind == "IDENT":
             return self.parse_action()
+        if t.kind == "IDENT" and t.text == "use":
+            return self.parse_use()
         raise self.error(
             "DAL2001",
-            "expected a declaration (logic, enum, const, param, input, state, fn, extern, update, entry, "
+            "expected a declaration (use, logic, enum, const, param, input, state, fn, extern, update, entry, "
             f"on, timer, window, buffer, combo, montage, action), found {self.describe(t)}",
         )
+
+    def parse_use(self) -> S.UseDecl:
+        kw = self.advance()      # use (a reserved word, so it is never a name)
+        s = self.tok
+        if s.kind != "STRING":
+            raise self.error("DAL2001", f"expected the path of a library file in quotes after 'use', found {self.describe(s)}")
+        self.advance()
+        self.expect_op(";", "after the use path")
+        return S.UseDecl(kw.pos, str(s.value), s.pos)
 
     def parse_type_name(self) -> tuple[str, Pos]:
         t = self.tok

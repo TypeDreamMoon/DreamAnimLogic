@@ -78,6 +78,7 @@ class EnumType(Type):
         self.cpp_members = dict(cpp_members) if cpp_members else {
             m: f"{self.cpp_type}::{m}" for m in members
         }
+        self.origin: str | None = None         # key of the library file that declares it
 
     @property
     def is_enum(self) -> bool:

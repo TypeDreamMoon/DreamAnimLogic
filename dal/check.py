@@ -25,6 +25,7 @@ from .errors import DalError, Diagnostic, Pos, SourceFile
 from .hostapi import COMMANDS, HOST_ITEMS, QUERIES
 from .interp import eval_const
 from .lexer import RESERVED_WORDS
+from .libs import LIBRARY_DECLS
 from .names import CPP_KEYWORDS, PY_RESERVED, reserved_reason
 from .types import (
     BASIC_TYPES,
@@ -52,6 +53,7 @@ class Sym:
     kind: str       # enum const param input state fn extern entry logic
     pos: Pos
     obj: object = None
+    file: str = ""  # file of the declaration (set for declarations from libraries)
 
 
 @dataclass
@@ -98,9 +100,13 @@ _ACTION_TYPES = (BOOL, FLOAT, VEC2, VEC3)
 
 
 class Checker:
-    def __init__(self, unit: S.SourceUnit, source: SourceFile, standin: tuple[str, str] | None = None):
+    def __init__(self, unit: S.SourceUnit, source: SourceFile, standin: tuple[str, str] | None = None,
+                 ctx=None, libs=()):
         self.unit = unit
         self.source = source
+        self.main_source = source
+        self.ctx = ctx
+        self.libs = list(libs)
         self.standin = standin
         self.diags: list[Diagnostic] = []
         self.globals: dict[str, Sym] = {}
@@ -118,6 +124,14 @@ class Checker:
         self.later_fns: set[str] = set()  # functions declared later in the file
         self.invalid_names: set[str] = set()  # declared with an unusable name; uses are not reported again
         self.kind = "anim"
+
+    def focus(self, d) -> None:
+        """Report diagnostics against the file ``d`` was written in (a library, or the main file)."""
+        self.source = getattr(d, "src", None) or self.main_source
+
+    @staticmethod
+    def origin_of(d) -> str | None:
+        return getattr(d, "origin", None)
 
     # ---- diagnostics ---------------------------------------------------------------
     def err(self, code: str, message: str, pos: Pos) -> None:
@@ -154,9 +168,10 @@ class Checker:
             return False
         prev = self.globals.get(name)
         if prev is not None:
-            self.err("DAL3001", f"'{name}' is already declared as a {prev.kind} on line {prev.pos.line}", pos)
+            where = f" of {prev.file}" if prev.file and prev.file != self.source.filename else ""
+            self.err("DAL3001", f"'{name}' is already declared as a {prev.kind} on line {prev.pos.line}{where}", pos)
             return False
-        self.globals[name] = Sym(kind, pos, obj)
+        self.globals[name] = Sym(kind, pos, obj, self.source.filename if self.source is not self.main_source else "")
         return True
 
     # ---- types ----------------------------------------------------------------------------------
@@ -187,26 +202,42 @@ class Checker:
     def run(self) -> ir.Module:
         m = self.module
         m.filename = self.source.filename
-        m.source_sha256 = hashlib.sha256(self.source.text.encode("utf-8")).hexdigest()
+        text_hash = hashlib.sha256(self.source.text.encode("utf-8"))
+        if self.libs:
+            # the output depends on the libraries too: hash them in, in use order (programs without libraries keep their hash)
+            for lib in self.libs:
+                text_hash.update(lib.sha256.encode("ascii"))
+            m.libs = [ir.LibRef(lib.key, lib.filename, lib.stem, lib.sha256, list(lib.deps)) for lib in self.libs]
+        m.source_sha256 = text_hash.hexdigest()
         decls = self.unit.decls
 
         logics = [d for d in decls if isinstance(d, S.LogicDecl)]
+        own = [d for d in decls if self.origin_of(d) is None]
         if not logics:
-            self.err("DAL3010", "missing 'logic <Name>;' declaration (every .dal file declares exactly one logic)", Pos(1, 1, 2))
+            if own and all(type(d).__name__ in LIBRARY_DECLS for d in own):
+                # a library compiled on its own: only shared declarations, no logic class
+                from .libs import camel_stem
+                m.is_library = True
+                m.name = camel_stem(self.source.filename)
+            else:
+                self.err("DAL3010", "missing 'logic <Name>;' declaration (every .dal file declares exactly one logic)", Pos(1, 1, 2))
         else:
             if len(logics) > 1:
                 self.err("DAL3011", "only one 'logic' declaration is allowed per file", logics[1].pos)
+            self.focus(logics[0])
             self.declare_global(logics[0].name, "logic", logics[0].name_pos or logics[0].pos, what="a logic name")
             m.name = logics[0].name
             self.kind = m.kind = logics[0].kind
 
         # 1. enums, montages and actions (types are needed by everything else)
         for d in decls:
+            self.focus(d)
             if isinstance(d, S.EnumDecl):
                 self.declare_enum(d)
             elif isinstance(d, S.MontageDecl):
                 self.declare_montage(d)
         for d in decls:
+            self.focus(d)
             if isinstance(d, S.ActionDecl):
                 self.declare_action(d)
 
@@ -225,16 +256,19 @@ class Checker:
             if isinstance(d, S.ConstDecl):
                 self.pending_consts.add(d.name)
         for d in decls:
+            self.focus(d)
             if isinstance(d, S.ConstDecl):
                 self.declare_const(d)
 
         # 3. signatures of functions and externs, then the variable declarations
         for d in decls:
+            self.focus(d)
             if isinstance(d, S.FnDecl):
                 self.declare_fn_sig(d)
             elif isinstance(d, S.ExternDecl):
                 self.declare_extern(d)
         for d in decls:
+            self.focus(d)
             if isinstance(d, S.ParamDecl):
                 self.declare_param(d)
             elif isinstance(d, S.InputDecl):
@@ -242,27 +276,34 @@ class Checker:
             elif isinstance(d, S.StateDecl):
                 self.declare_state(d)
         for d in decls:
+            self.focus(d)
             if isinstance(d, S.EntryDecl):
                 self.declare_global(d.name, "entry", d.name_pos or d.pos, what="an entry name")
 
         # 4. bodies
         for d in decls:
+            self.focus(d)
             if isinstance(d, S.FnDecl):
                 self.check_fn(d)
         updates = [d for d in decls if isinstance(d, S.UpdateDecl)]
         if len(updates) > 1:
+            self.focus(updates[1])
             self.err("DAL3012", "only one 'update' is allowed", updates[1].pos)
         for d in updates[:1]:
+            self.focus(d)
             m.update = self.check_update(d)
         for d in decls:
+            self.focus(d)
             if isinstance(d, S.EntryDecl):
                 m.entries.append(self.check_entry(d))
         for d in decls:
+            self.focus(d)
             if isinstance(d, S.HandlerDecl):
                 h = self.check_handler(d)
                 if h is not None:
                     m.handlers.append(h)
-        if m.update is None and not m.entries and not m.handlers:
+        self.source = self.main_source
+        if not m.is_library and m.update is None and not m.entries and not m.handlers:
             self.warn("DAL5091", "the logic has no 'update', no 'entry' and no 'on' handler; it never changes anything", Pos(1, 1, 2))
 
         self.order_functions()
@@ -290,6 +331,7 @@ class Checker:
             seen[mname] = mpos
             members.append(mname)
         et = EnumType(d.name, members)
+        et.origin = self.origin_of(d)
         self.enums[d.name] = et
         self.user_enums.append(et)
         self.globals[d.name].obj = et
@@ -313,7 +355,7 @@ class Checker:
         value = self.fold(e, d.init.pos)
         if value is None:
             return
-        cd = ir.ConstDef(d.name, ty, value, self.expr_text(d.init))
+        cd = ir.ConstDef(d.name, ty, value, self.expr_text(d.init), self.origin_of(d))
         self.const_defs[d.name] = cd
         self.module.consts.append(cd)
         self.globals[d.name].obj = cd
@@ -459,7 +501,7 @@ class Checker:
         if params is None:
             return
         self.extern_sigs[d.name] = (params, ret)
-        self.module.externs.append(ir.ExternDef(d.name, params, ret, d.cpp or d.name, d.include, d.py or d.name))
+        self.module.externs.append(ir.ExternDef(d.name, params, ret, d.cpp or d.name, d.include, d.py or d.name, self.origin_of(d)))
 
     # ---- bodies ---------------------------------------------------------------------------------------------------
     def check_fn(self, d: S.FnDecl) -> None:
@@ -474,7 +516,7 @@ class Checker:
         body = self.block(d.body, sc)
         if ret is not ERROR and not self.always_returns(body):
             self.err("DAL5021", f"fn '{d.name}' may finish without returning a {ret}; every path must end in 'return'", d.pos)
-        self.module.funcs.append(ir.FnDef(d.name, params, ret, body))
+        self.module.funcs.append(ir.FnDef(d.name, params, ret, body, self.origin_of(d)))
 
     def check_update(self, d: S.UpdateDecl) -> ir.UpdateDef:
         sc = Scope("update")
@@ -1122,19 +1164,24 @@ class Checker:
         if not externs:
             return
         decl_pos = {d.name: d.pos for d in self.unit.decls if isinstance(d, S.ExternDecl)}
+        decl_of = {d.name: d for d in self.unit.decls if isinstance(d, S.ExternDecl)}
         if self.standin is None:
             for x in externs:
+                self.focus(decl_of[x.name])
                 self.err(
                     "DAL6001",
                     f"extern fn '{x.name}' needs a Python stand-in: provide a file defining def {x.py}(...) "
                     f"(pass --standins FILE, or name it <source>_standins.py next to the .dal file)",
                     decl_pos.get(x.name, Pos(1, 1, 2)),
                 )
+            self.source = self.main_source
             return
         fname, text = self.standin
+        self.focus(decl_of[externs[0].name])
         try:
             tree = pyast.parse(text, filename=fname)
         except SyntaxError as ex:
+            self.source = self.main_source
             self.err("DAL6005", f"stand-in file {fname} has a syntax error: {ex.msg} (line {ex.lineno})", decl_pos.get(externs[0].name, Pos(1, 1, 2)))
             return
         first_pos = decl_pos.get(externs[0].name, Pos(1, 1, 2))
@@ -1158,6 +1205,7 @@ class Checker:
         defs = {n.name: n for n in tree.body if isinstance(n, (pyast.FunctionDef,))}
         for x in externs:
             pos = decl_pos.get(x.name, Pos(1, 1, 2))
+            self.focus(decl_of[x.name])
             fn = defs.get(x.py)
             if fn is None:
                 self.err("DAL6002", f"stand-in file {fname} does not define def {x.py}(...) for extern fn '{x.name}'", pos)
@@ -1182,11 +1230,13 @@ class Checker:
                     f"'{x.name}'({', '.join(declared)})",
                     pos,
                 )
+        self.source = self.main_source
         self.module.standin_source = text
         self.module.standin_filename = fname
 
 
-def check(unit: S.SourceUnit, source: SourceFile, standin: tuple[str, str] | None = None) -> tuple[ir.Module, list[Diagnostic]]:
-    c = Checker(unit, source, standin)
+def check(unit: S.SourceUnit, source: SourceFile, standin: tuple[str, str] | None = None,
+          ctx=None, libs=()) -> tuple[ir.Module, list[Diagnostic]]:
+    c = Checker(unit, source, standin, ctx, libs)
     module = c.run()
     return module, [d for d in c.diags if d.severity == "warning"]

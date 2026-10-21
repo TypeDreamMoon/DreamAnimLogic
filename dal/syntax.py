@@ -143,6 +143,9 @@ class ForStmt(Stmt):
 class Decl:
     pos: Pos
     name_pos: Pos | None = field(default=None, kw_only=True)
+    # set when libraries are merged (``use``): the file the declaration was written in (None = the main file)
+    src: object = field(default=None, kw_only=True, repr=False, compare=False)
+    origin: str | None = field(default=None, kw_only=True, repr=False, compare=False)    # library key, None = main file
 
 
 @dataclass
@@ -336,6 +339,15 @@ class ComboDecl(Decl):
     reset_when: Expr | None = None
     starts: list[ComboRule] = field(default_factory=list)
     steps: list[ComboStep] = field(default_factory=list)
+
+
+# ---- v3 declarations ----------------------------------------------------------------------------------------
+
+@dataclass
+class UseDecl(Decl):
+    """use "als_lib.dal"; -- merge the declarations of a library file (no logic) into this one."""
+    path: str
+    path_pos: Pos
 
 
 @dataclass

@@ -81,6 +81,9 @@ def cmd_verify(args) -> int:
     if loaded is None:
         return 1
     module, _ = loaded
+    if module.is_library:
+        print(f"{module.name}: a library has no logic to run; it checks and compiles")
+        return 0
     diffs = verify(module, args.frames, args.seed, args.tol)
     if not diffs:
         print(f"{module.name}: interpreter and generated Python agree over {args.frames} frames (seed {args.seed})")
