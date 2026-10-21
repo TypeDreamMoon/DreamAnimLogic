@@ -1,15 +1,25 @@
 // als_lib.dal -- the shared declarations of ALS-Refactored rewritten in DAL: tag sets, enums, state structs, settings types
-// and a few math helpers.  A library: no logic, `use`d by AlsCharacter.dal / AlsAnimationInstance.dal (next round).
+// and the pure math helpers.  A library: no logic.  `use`d by AlsCharacter.dal, AlsInput.dal and the animation instance.
 //
-// ALS-Refactored (c) Sixze, MIT.  Source files: Source/ALS/Public/Utility/{AlsGameplayTags,AlsMath,AlsRotation,AlsVector}.h,
-// State/*.h, Settings/*.h.  Names, members and defaults follow the C++ ones so that a .dab reads Main.GroundedState.VelocityBlend...
-// and the data assets exported from the project (CS_Als_Default, AIS_Als_Default, MS_Als_*) load into the settings types below.
+// ALS-Refactored (c) Sixze, MIT.  Source files (Plugins/ALS-Refactored/Source/ALS):
+//   Public/Utility/{AlsGameplayTags,AlsMath,AlsRotation,AlsVector}.h, Private/Utility/{AlsMath,AlsVector}.cpp,
+//   Public/State/*.h, Public/Settings/*.h.
+// Names, members, order and defaults follow the C++ ones, so that a .dab reads Main.GroundedState.VelocityBlend... and the data
+// assets exported from the project (CS_Als_Default, AIS_Als_Default, MS_Als_*) load into the settings types below.
 //
-// Not in this sketch: the response containers (MantlingTraceResponses, GroundPredictionSweepResponses -- the loader reports them as
-// ignored members; the channel lists they are computed from are declared) and the camera settings.  The easing option of the mantling settings is the built-in
-// BlendOption (EAlphaBlendOption).
+// Differences from the C++ that cannot be written in DAL (each is a language gap recorded in als-dal-rewrite.md section 7):
+//   * a `settings` member cannot have an initializer, so FAlsGeneralMantlingSettings::InAirTrace has the defaults of GroundedTrace
+//     here (C++: LedgeHeight {50, 150}, ReachDistance 70); the data assets always carry the values.
+//   * the collision response containers (MantlingTraceResponses, GroundPredictionSweepResponses, FCollisionResponseContainer in C++)
+//     are channel lists here: the channels that block, which is what the exported container data says.  The data loads without a
+//     warning; the two lists next to them (...ResponseChannels) hold the same channels.
+//   * UAlsTurnInPlaceSettings is an Instanced UObject in C++ (null = not set); here it is a nested settings value.
+//   * FAlsTurnInPlaceState::QueuedSettings / QueuedSlotName and FAlsRagdollingAnimationState::FinalRagdollPose have no DAL type
+//     (a settings reference, a name, a pose snapshot); the animation instance decides how to carry them.
+//   * the view network smoothing members of FAlsViewState and the movement base state of the character are not declared (no
+//     networking, no moving bases).
 
-// ---- gameplay tags (AlsGameplayTags.h) ------------------------------------------------------------------------------
+// ---- gameplay tags (AlsGameplayTags.h:5-65, AlsGameplayTags.cpp) ----------------------------------------------------------
 tags AlsViewMode          = "Als.ViewMode"          { FirstPerson, ThirdPerson }
 tags AlsLocomotionMode    = "Als.LocomotionMode"    { Grounded, InAir }
 tags AlsRotationMode      = "Als.RotationMode"      { VelocityDirection, ViewDirection, Aiming }
@@ -21,16 +31,16 @@ tags AlsLocomotionAction  = "Als.LocomotionAction"  { Rolling, Mantling, Ragdoll
 tags AlsGroundedEntryMode = "Als.GroundedEntryMode" { FromRoll }
 
 // ---- enums ------------------------------------------------------------------------------------------------------------
-enum AlsHipsDirection { Forward, Backward, LeftForward, LeftBackward, RightForward, RightBackward }   // GroundedState.h
-enum AlsMovementDirection { Forward, Backward, Left, Right }                                           // AlsMath.h
-enum AlsInAirRotationMode { KeepWorldRotation, KeepViewSpaceRotation, RotateToVelocity }              // AlsCharacterSettings.h
-enum AlsMantlingType { High, Low, InAir }                                                              // AlsMantlingSettings.h
+enum AlsHipsDirection { Forward, Backward, LeftForward, LeftBackward, RightForward, RightBackward }   // AlsGroundedState.h:7
+enum AlsMovementDirection { Forward, Backward, Left, Right }                                           // AlsMovementDirection.h:6
+enum AlsInAirRotationMode { KeepWorldRotation, KeepViewSpaceRotation, RotateToVelocity }              // AlsInAirRotationMode.h:6
+enum AlsMantlingType { High, Low, InAir }                                                              // AlsMantlingSettings.h:13
 
 // ---- shared small structs ------------------------------------------------------------------------------------------
-struct AlsFloatInterval { Min: float; Max: float; }                                                    // FFloatInterval
+struct AlsFloatInterval { Min: float; Max: float; }                                                    // FFloatInterval (Min, Max)
 
-// ---- character state (State/*.h) ------------------------------------------------------------------------------------
-struct AlsLocomotionState {
+// ---- character state: AAlsCharacter's members (State/*.h) -------------------------------------------------------------
+struct AlsLocomotionState {                                                                             // AlsLocomotionState.h:6
     bHasInput: bool;
     InputYawAngle: float;
     bHasVelocity: bool;
@@ -38,111 +48,98 @@ struct AlsLocomotionState {
     Velocity: vec3;
     VelocityYawAngle: float;
     bMoving: bool;
-    TargetYawAngle: float;
-    SmoothTargetYawAngle: float;
-    ViewRelativeTargetYawAngle: float;
     bRotationTowardsLastInputDirectionBlocked: bool = true;
+    TargetYawAngle: float;
+    SmoothTargetYawAngle: float;                                // used for extra-smooth actor rotation, else equal to TargetYawAngle
+    TargetYawAngleViewSpace: float;
     AimingYawAngleLimit: float = 180.0;
-    bResetAimingLimit: bool = true;
     bAimingLimitAppliedThisFrame: bool;
+    bResetAimingLimit: bool = true;
 }
-struct AlsViewState {
+struct AlsViewState {                                                                                   // AlsViewState.h:36 (without NetworkSmoothing)
     Rotation: rotator;
     YawSpeed: float;
     PreviousYawAngle: float;
 }
+struct AlsMantlingState { RootMotionSourceId: int; }                                                    // AlsMantlingState.h:6
+struct AlsRagdollingState {                                                                             // AlsRagdollingState.h:6
+    Velocity: vec3;
+    PullForce: float;
+    SpeedLimitFrameTimeRemaining: int;
+    SpeedLimit: float;
+}
+struct AlsRollingState { TargetYawAngle: float; }                                                       // AlsRollingState.h:6
+struct AlsMantlingParameters {                                                                          // AlsMantlingSettings.h:21
+    TargetPrimitive: primitive;
+    TargetLocation: vec3;
+    TargetRotation: rotator;
+    MantlingHeight: float;
+    MantlingType: AlsMantlingType;
+}
 
 // ---- animation state: the paths a .dab reads (State/*.h) ------------------------------------------------------------
-struct AlsVelocityBlendState {
+struct AlsLocomotionAnimationState {                                                                    // AlsLocomotionAnimationState.h:6
+    bHasInput: bool;
+    InputYawAngleWorldSpace: float;
+    Speed: float;
+    VelocityWorldSpace: vec3;
+    VelocityYawAngleWorldSpace: float;
+    AccelerationWorldSpace: vec3;
+    MaxAcceleration: float;
+    MaxBrakingDeceleration: float;
+    WalkableFloorAngleCos: float;
+    bMoving: bool;
+    bMovingSmooth: bool;
+    TargetYawAngleWorldSpace: float;
+    LocationWorldSpace: vec3;
+    RotationWorldSpace: rotator;
+    RotationQuaternionWorldSpace: quat;
+    YawVelocityWorldSpace: float;
+    ScaleWorldSpace: float = 1.0;
+    CapsuleRadius: float;
+    CapsuleHalfHeight: float;
+}
+struct AlsViewAnimationState {                                                                          // AlsViewAnimationState.h:6
+    RotationWorldSpace: rotator;
+    YawAngle: float;
+    YawSpeed: float;
+    PitchAngle: float;
+    PitchAmount: float = 0.5;
+    HeadBlendAmount: float = 1.0;
+}
+struct AlsSpineState {                                                                                  // AlsSpineState.h:6
+    bSpineRotationAllowed: bool;
+    SpineAmount: float;
+    SpineAmountScale: float = 1.0;
+    SpineAmountBias: float;
+    LastYawAngle: float;
+    LastYawAngleWorldSpace: float;
+    YawAngle: float;
+    FinalYawAngle: float;
+}
+struct AlsHeadState {                                                                                   // AlsHeadState.h:6
     bInitializationRequired: bool = true;
-    ForwardAmount: float;
-    BackwardAmount: float;
-    LeftAmount: float;
-    RightAmount: float;
+    bSwitchingLookSides: bool;
+    PitchAngle: float;
+    YawAngle: float;
+    YawVelocity: float;
+    YawAmount: float = 0.5;
 }
-struct AlsMovementDirectionCache {
-    bForward: bool = true;
-    bBackward: bool;
-    bLeft: bool;
-    bRight: bool;
-}
-struct AlsRotationYawOffsetsState {
-    ForwardAngle: float;
-    BackwardAngle: float;
-    LeftAngle: float;
-    RightAngle: float;
-}
-struct AlsGroundedState {
-    HipsDirection: AlsHipsDirection;
-    HipsDirectionLockAmount: float;
-    VelocityBlend: AlsVelocityBlendState;
-    MovementDirection: AlsMovementDirectionCache;
-    RotationYawOffsets: AlsRotationYawOffsetsState;
-}
-struct AlsStandingState {
-    StrideBlendAmount: float;
-    WalkRunBlendAmount: float;
-    PlayRate: float = 1.0;
-    SprintTime: float;
-    SprintBlockAmount: float;
-    SprintAccelerationAmount: float;
-    bPivotActive: bool;
-}
-struct AlsCrouchingState { PlayRate: float = 1.0; StrideBlendAmount: float; }
-struct AlsInAirState {
-    bJumped: bool;
-    JumpPlayRate: float = 1.0;
-    VerticalVelocityWorldSpace: float;
-    GroundPredictionAmount: float = 1.0;
-}
-struct AlsPoseState {
-    GroundedAmount: float = 1.0;
-    InAirAmount: float;
-    StandingAmount: float = 1.0;
-    CrouchingAmount: float;
-    GaitAmount: float;
-    GaitWalkingAmount: float;
-    GaitRunningAmount: float;
-    GaitSprintingAmount: float;
-    UnweightedGaitRunningAmount: float;
-    UnweightedGaitSprintingAmount: float;
-}
-struct AlsLeanState { RightAmount: float; ForwardAmount: float; }
-struct AlsFootState {
-    ThighAxisPelvisSpace: vec3;
-    bLockingActive: bool;
-    LockAmount: float;
-    FinalLocation: vec3;
-    FinalRotation: quat;
-}
-struct AlsFeetState {
-    bValid: bool;
-    FootPlantedAmount: float;
-    FeetCrossingAmount: float;
-    Left: AlsFootState = AlsFootState(ThighAxisPelvisSpace: vec3(0.0, 0.0, -1.0));
-    Right: AlsFootState = AlsFootState(ThighAxisPelvisSpace: vec3(0.0, 0.0, 1.0));
-}
-struct AlsRotateInPlaceState { bRotatingLeft: bool; bRotatingRight: bool; PlayRate: float = 1.0; }
-struct AlsTurnInPlaceState { bTurnRequested: bool; ActivationDelayTime: float; }
-struct AlsTransitionsState {
-    bTransitionsAllowed: bool;
-    QueuedTransitionSequence: sequence = none;
-    QueuedTransitionBlendInDuration: float;
-    QueuedTransitionBlendOutDuration: float;
-    QueuedTransitionPlayRate: float = 1.0;
-    QueuedTransitionStartTime: float;
-    bStopTransitionsQueued: bool;
-}
-struct AlsLayeringState {
+struct AlsLeanState { RightAmount: float; ForwardAmount: float; }                                       // AlsLeanState.h:6
+struct AlsLayeringState {                                                                               // AlsLayeringState.h:6
     HeadBlendAmount: float;
     HeadAdditiveBlendAmount: float;
     HeadSlotBlendAmount: float = 1.0;
     ArmLeftBlendAmount: float;
     ArmLeftAdditiveBlendAmount: float;
     ArmLeftSlotBlendAmount: float = 1.0;
+    ArmLeftLocalSpaceBlendAmount: float;
+    ArmLeftMeshSpaceBlendAmount: float;
     ArmRightBlendAmount: float;
     ArmRightAdditiveBlendAmount: float;
     ArmRightSlotBlendAmount: float = 1.0;
+    ArmRightLocalSpaceBlendAmount: float;
+    ArmRightMeshSpaceBlendAmount: float;
     HandLeftBlendAmount: float;
     HandRightBlendAmount: float;
     SpineBlendAmount: float;
@@ -153,7 +150,120 @@ struct AlsLayeringState {
     LegsBlendAmount: float;
     LegsSlotBlendAmount: float = 1.0;
 }
-struct AlsControlRigInput {
+struct AlsPoseState {                                                                                   // AlsPoseState.h:6
+    GroundedAmount: float = 1.0;
+    InAirAmount: float;
+    StandingAmount: float = 1.0;
+    CrouchingAmount: float;
+    MovingAmount: float;
+    GaitAmount: float;
+    GaitWalkingAmount: float;
+    GaitRunningAmount: float;
+    GaitSprintingAmount: float;
+    UnweightedGaitAmount: float;
+    UnweightedGaitWalkingAmount: float;
+    UnweightedGaitRunningAmount: float;
+    UnweightedGaitSprintingAmount: float;
+}
+struct AlsVelocityBlendState {                                                                          // AlsGroundedState.h:18
+    bInitializationRequired: bool = true;
+    ForwardAmount: float;
+    BackwardAmount: float;
+    LeftAmount: float;
+    RightAmount: float;
+}
+struct AlsMovementDirectionCache {                                                                      // AlsMovementDirection.h:15
+    bForward: bool = true;
+    bBackward: bool;
+    bLeft: bool;
+    bRight: bool;
+}
+struct AlsRotationYawOffsetsState {                                                                     // AlsGroundedState.h:39
+    ForwardAngle: float;
+    BackwardAngle: float;
+    LeftAngle: float;
+    RightAngle: float;
+}
+struct AlsGroundedState {                                                                               // AlsGroundedState.h:57
+    HipsDirectionLockAmount: float;
+    HipsDirection: AlsHipsDirection;
+    VelocityBlend: AlsVelocityBlendState;
+    MovementDirection: AlsMovementDirectionCache;
+    RotationYawOffsets: AlsRotationYawOffsetsState;
+}
+struct AlsStandingState {                                                                               // AlsStandingState.h:6
+    StrideBlendAmount: float;
+    WalkRunBlendAmount: float;
+    PlayRate: float = 1.0;
+    SprintBlockAmount: float;
+    SprintTime: float;
+    SprintAccelerationAmount: float;
+    bPivotActive: bool;
+}
+struct AlsCrouchingState { StrideBlendAmount: float; PlayRate: float = 1.0; }                           // AlsCrouchingState.h:6
+struct AlsInAirState {                                                                                  // AlsInAirState.h:6
+    VerticalVelocityWorldSpace: float;
+    bJumpRequested: bool;
+    bJumped: bool;
+    JumpPlayRate: float = 1.0;
+    GroundPredictionAmount: float = 1.0;
+}
+struct AlsFootState {                                                                                   // AlsFeetState.h:6
+    LockAmount: float;
+    ThighAxisPelvisSpace: vec3;
+    TargetLocationWorldSpace: vec3;
+    TargetRotationWorldSpace: quat;
+    LockLocationWorldSpace: vec3;
+    LockRotationWorldSpace: quat;
+    LockLocationMovementBaseSpace: vec3;
+    LockRotationMovementBaseSpace: quat;
+    LockLocation: vec3;
+    LockRotation: quat;
+    FinalLocation: vec3;
+    FinalRotation: quat;
+}
+struct AlsFeetState {                                                                                   // AlsFeetState.h:48
+    PelvisRotation: quat;
+    FootPlantedAmount: float;      // < 0.5 planted; the sign says which foot: positive right, negative left
+    FeetCrossingAmount: float;
+    bValid: bool;
+    bBecameValid: bool;
+    Left: AlsFootState = AlsFootState(ThighAxisPelvisSpace: vec3(0.0, 0.0, -1.0));
+    Right: AlsFootState = AlsFootState(ThighAxisPelvisSpace: vec3(0.0, 0.0, 1.0));
+}
+struct AlsTransitionsState {                                                                            // AlsTransitionsState.h:8
+    bTransitionsAllowed: bool;
+    QueuedTransitionSequence: sequence = none;
+    QueuedTransitionBlendInDuration: float;
+    QueuedTransitionBlendOutDuration: float;
+    QueuedTransitionPlayRate: float = 1.0;
+    QueuedTransitionStartTime: float;
+    bStopTransitionsQueued: bool;
+    QueuedStopTransitionsBlendOutDuration: float = -1.0;
+}
+struct AlsDynamicTransitionsState { bUpdatedThisFrame: bool; FrameDelay: int; }                         // AlsDynamicTransitionsState.h:6
+struct AlsRotateInPlaceState {                                                                          // AlsRotateInPlaceState.h:6
+    bUpdatedThisFrame: bool;
+    bRotatingLeft: bool;
+    bRotatingRight: bool;
+    PlayRate: float = 1.0;
+}
+struct AlsTurnInPlaceState {                                                                            // AlsTurnInPlaceState.h:8 (QueuedSettings / QueuedSlotName: see the header)
+    bUpdatedThisFrame: bool;
+    ActivationDelay: float;
+    QueuedTurnYawAngle: float;
+    PlayRate: float = 1.0;
+}
+struct AlsRagdollingAnimationState { FlailPlayRate: float = 1.0; }                                      // AlsRagdollingAnimationState.h:7 (FinalRagdollPose: see the header)
+struct AlsMovementBaseState {                                                                           // AlsMovementBaseState.h:7: the .dab only reads bHasRelativeLocation; no moving bases
+    bBaseChanged: bool;
+    bHasRelativeLocation: bool;
+    bHasRelativeRotation: bool;
+    Location: vec3;
+    Rotation: quat;
+    DeltaRotation: rotator;
+}
+struct AlsControlRigInput {                                                                             // AlsControlRigInput.h:6
     bUseHandIkBones: bool;
     bUseFootIkBones: bool;
     bFootTransformsValid: bool;
@@ -168,18 +278,18 @@ struct AlsControlRigInput {
 }
 
 // ---- settings (Settings/*.h) ---------------------------------------------------------------------------------------
-settings AlsViewSettings {
+settings AlsViewSettings {                                                                              // AlsViewSettings.h:6
     bEnableNetworkSmoothing: bool = true;
     bEnableListenServerNetworkSmoothing: bool = true;
 }
-settings AlsMantlingTraceSettings {
+settings AlsMantlingTraceSettings {                                                                     // AlsMantlingSettings.h:80
     LedgeHeight: vec2 = vec2(50.0, 225.0);
     ReachDistance: float = 75.0;
     TargetLocationOffset: float = 15.0;
     StartLocationOffset: float = 55.0;
     bDrawFailedTraces: bool;
 }
-settings AlsGeneralMantlingSettings {
+settings AlsGeneralMantlingSettings {                                                                   // AlsMantlingSettings.h:101
     bAllowMantling: bool = true;
     bAutoStartMantlingInAir: bool = true;
     TraceAngleThreshold: float = 110.0;
@@ -188,21 +298,22 @@ settings AlsGeneralMantlingSettings {
     derived SlopeAngleThresholdCos: float = cos(deg_to_rad(SlopeAngleThreshold));       // recomputed after loading (AlsMantlingSettings.cpp:9)
     TargetPrimitiveSpeedThreshold: float = 10.0;
     MantlingHighHeightThreshold: float = 125.0;
-    MantlingTraceChannel: Channel = Channel.Visibility;                                  // the pack also has the response container (ignored: it is derived from this list)
-    MantlingTraceResponseChannels: channel_set;
     GroundedTrace: AlsMantlingTraceSettings;
-    InAirTrace: AlsMantlingTraceSettings;
+    InAirTrace: AlsMantlingTraceSettings;                                                // C++ default: LedgeHeight {50, 150}, ReachDistance 70 (see the header)
+    MantlingTraceChannel: Channel = Channel.Visibility;
+    MantlingTraceResponseChannels: channel_set;
+    MantlingTraceResponses: channel_set;                                                 // FCollisionResponseContainer in C++: here the channels that block (same data as ...ResponseChannels)
     BlendOutDuration: float = 0.3;
     bStartRagdollingOnTargetPrimitiveDestruction: bool = true;
 }
-settings AlsRagdollingSettings {
+settings AlsRagdollingSettings {                                                                        // AlsRagdollingSettings.h:8
     bStartRagdollingOnLand: bool = true;
     RagdollingOnLandSpeedThreshold: float = 1000.0;
     bLimitInitialRagdollSpeed: bool = true;
     GetUpFrontMontage: montage;
     GetUpBackMontage: montage;
 }
-settings AlsRollingSettings {
+settings AlsRollingSettings {                                                                           // AlsRollingSettings.h:8
     Montage: montage;
     bCrouchOnStart: bool = true;
     bRotateToInputOnStart: bool = true;
@@ -211,13 +322,13 @@ settings AlsRollingSettings {
     RollingOnLandSpeedThreshold: float = 700.0;
     bInterruptRollingWhenInAir: bool = true;
 }
-settings AlsCharacterSettings {
+settings AlsCharacterSettings {                                                                         // AlsCharacterSettings.h:11
     TeleportDistanceThreshold: float = 50.0;
     MovingSpeedThreshold: float = 50.0;
-    InAirRotationMode: AlsInAirRotationMode;
+    InAirRotationMode: AlsInAirRotationMode = AlsInAirRotationMode.RotateToVelocity;
     bAllowAimingWhenInAir: bool = true;
-    bSprintHasPriorityOverAiming: bool = true;
-    bRotateToVelocityWhenSprinting: bool = true;
+    bSprintHasPriorityOverAiming: bool;
+    bRotateToVelocityWhenSprinting: bool;
     bInheritMovementBaseRotationInVelocityDirectionRotationMode: bool;
     bRotateTowardsDesiredVelocityInVelocityDirectionRotationMode: bool = true;
     bAutoRotateOnAnyInputWhileNotMovingInViewDirectionRotationMode: bool = true;
@@ -227,53 +338,53 @@ settings AlsCharacterSettings {
     Ragdolling: AlsRagdollingSettings;
     Rolling: AlsRollingSettings;
 }
-settings AlsMantlingSettings {                                    // MS_Als_High, MS_Als_Low, ...: one mantling kind
+settings AlsMantlingSettings {                                                                          // AlsMantlingSettings.h:42: MS_Als_High, MS_Als_Low, ...: one mantling kind
     Montage: montage;
     bAutoCalculateStartTime: bool;
-    StartTimeReferenceHeight: vec2 = vec2(125.0, 200.0);
-    StartTime: vec2 = vec2(0.6, 0.0);
-    MotionWarpingTimeRange: AlsFloatInterval;
-    MotionWarpingLocationBlendOption: BlendOption;
+    StartTimeReferenceHeight: vec2 = vec2(50.0, 100.0);
+    StartTime: vec2 = vec2(0.5, 0.0);
+    MotionWarpingTimeRange: AlsFloatInterval = AlsFloatInterval(Min: 0.0, Max: 0.3);
+    MotionWarpingLocationBlendOption: BlendOption = BlendOption.Linear;
     MotionWarpingLocationCustomBlendCurve: curve;
     MotionWarpingRotationBlendOption: BlendOption = BlendOption.HermiteCubic;
     MotionWarpingRotationCustomBlendCurve: curve;
 }
-settings AlsMovementGaitSettings {
+settings AlsMovementGaitSettings {                                                                      // AlsMovementSettings.h:11
     bAllowDirectionDependentMovementSpeed: bool;
     WalkForwardSpeed: float = 175.0;
     WalkBackwardSpeed: float = 175.0;
     RunForwardSpeed: float = 375.0;
     RunBackwardSpeed: float = 375.0;
     SprintSpeed: float = 650.0;
-    AccelerationAndDecelerationAndGroundFrictionCurve: curve3;
-    RotationInterpolationSpeedCurve: curve;
+    AccelerationAndDecelerationAndGroundFrictionCurve: curve3;                           // gait amount (0..3) -> (MaxAccelerationWalking, BrakingDecelerationWalking, GroundFriction)
+    RotationInterpolationSpeedCurve: curve;                                              // gait amount (0..3) -> rotation interpolation half life
 }
-settings AlsMovementStanceSettings { Stances: map<AlsStance, AlsMovementGaitSettings>; }
-settings AlsMovementSettings {
-    VelocityAngleToSpeedInterpolationRange: AlsFloatInterval;
+settings AlsMovementStanceSettings { Stances: map<AlsStance, AlsMovementGaitSettings>; }                // AlsMovementSettings.h:54
+settings AlsMovementSettings {                                                                          // AlsMovementSettings.h:67
+    VelocityAngleToSpeedInterpolationRange: AlsFloatInterval = AlsFloatInterval(Min: 100.0, Max: 125.0);
     RotationModes: map<AlsRotationMode, AlsMovementStanceSettings>;
 }
-settings AlsGeneralAnimationSettings {
+settings AlsGeneralAnimationSettings {                                                                  // AlsGeneralAnimationSettings.h:6
     bUseHandIkBones: bool = true;
     bUseFootIkBones: bool = true;
     MovingSmoothSpeedThreshold: float = 150.0;
     LeanInterpolationHalfLife: float = 0.2;
 }
-settings AlsHeadSettings {
+settings AlsHeadSettings {                                                                              // AlsHeadSettings.h:6
     PitchAngleInterpolationHalfLife: float = 0.1;
     YawAngleInterpolationHalfLife: float = 0.1;
     SwitchLookSidesYawAngleInterpolationHalfLife: float = 0.2;
     FirstPersonPitchAngleInterpolationHalfLife: float = 0.01;
     FirstPersonYawAngleInterpolationHalfLife: float = 0.01;
 }
-settings AlsGroundedAnimationSettings {
+settings AlsGroundedSettings {                                                                          // AlsGroundedSettings.h:8
     RotationYawOffsetForwardCurve: curve;
     RotationYawOffsetBackwardCurve: curve;
     RotationYawOffsetLeftCurve: curve;
     RotationYawOffsetRightCurve: curve;
     VelocityBlendInterpolationHalfLife: float = 0.1;
 }
-settings AlsStandingAnimationSettings {
+settings AlsStandingSettings {                                                                          // AlsStandingSettings.h:8
     AnimatedWalkSpeed: float = 150.0;
     AnimatedRunSpeed: float = 350.0;
     AnimatedSprintSpeed: float = 600.0;
@@ -281,15 +392,20 @@ settings AlsStandingAnimationSettings {
     StrideBlendAmountRunCurve: curve;
     PivotActivationSpeedThreshold: float = 200.0;
 }
-settings AlsCrouchingAnimationSettings { AnimatedCrouchSpeed: float = 150.0; StrideBlendAmountCurve: curve; }
-settings AlsInAirAnimationSettings {
+settings AlsCrouchingSettings { AnimatedCrouchSpeed: float = 150.0; StrideBlendAmountCurve: curve; }    // AlsCrouchingSettings.h:8
+settings AlsInAirSettings {                                                                             // AlsInAirSettings.h:9
     LeanAmountCurve: curve;
     GroundPredictionAmountCurve: curve;
     GroundPredictionSweepChannel: Channel = Channel.Visibility;
     GroundPredictionResponseChannels: channel_set;
+    GroundPredictionSweepResponses: channel_set;                                         // FCollisionResponseContainer in C++: here the channels that block
 }
-settings AlsFootLockAnimationSettings { bAllowFootLock: bool = true; ThighAngleLimit: float = 110.0; FootAngleLimit: float = 110.0; }
-settings AlsTransitionsAnimationSettings {
+settings AlsFootLockSettings {                                                                          // AlsFootLockSettings.h:6
+    bAllowFootLock: bool = true;
+    ThighAngleLimit: float = 90.0;
+    FootAngleLimit: float = 40.0;
+}
+settings AlsTransitionsSettings {                                                                       // AlsTransitionsSettings.h:8
     QuickStopBlendInDuration: float = 0.1;
     QuickStopBlendOutDuration: float = 0.2;
     QuickStopPlayRate: vec2 = vec2(1.75, 3.0);
@@ -299,7 +415,7 @@ settings AlsTransitionsAnimationSettings {
     CrouchingLeftSequence: sequence;
     CrouchingRightSequence: sequence;
 }
-settings AlsDynamicTransitionsAnimationSettings {
+settings AlsDynamicTransitionsSettings {                                                                // AlsDynamicTransitionsSettings.h:8
     FootLockDistanceThreshold: float = 8.0;
     BlendDuration: float = 0.2;
     PlayRate: float = 1.5;
@@ -308,22 +424,22 @@ settings AlsDynamicTransitionsAnimationSettings {
     CrouchingLeftSequence: sequence;
     CrouchingRightSequence: sequence;
 }
-settings AlsRotateInPlaceAnimationSettings {
+settings AlsRotateInPlaceSettings {                                                                     // AlsRotateInPlaceSettings.h:6
     ViewYawAngleThreshold: float = 50.0;
-    FirstPersonViewYawAngleThreshold: float = 25.0;
-    ReferenceViewYawSpeed: vec2 = vec2(130.0, 300.0);
+    FirstPersonViewYawAngleThreshold: float = 65.0;
+    ReferenceViewYawSpeed: vec2 = vec2(180.0, 460.0);
     PlayRate: vec2 = vec2(1.15, 3.0);
 }
-settings AlsTurnInPlaceSettings {
+settings AlsTurnInPlaceSettings {                                                                       // AlsTurnInPlaceSettings.h:8 (UAlsTurnInPlaceSettings)
     Sequence: sequence;
-    PlayRate: float = 1.0;
+    PlayRate: float = 1.2;
     bScalePlayRateByAnimatedTurnAngle: bool = true;
-    AnimatedTurnAngle: float = 90.0;
+    AnimatedTurnAngle: float;
 }
-settings AlsTurnInPlaceAnimationSettings {
+settings AlsGeneralTurnInPlaceSettings {                                                                // AlsTurnInPlaceSettings.h:27
     ViewYawAngleThreshold: float = 45.0;
     ViewYawSpeedThreshold: float = 50.0;
-    ViewYawAngleToActivationDelay: vec2 = vec2(45.0, 0.5);
+    ViewYawAngleToActivationDelay: vec2 = vec2(0.0, 0.75);
     Turn180AngleThreshold: float = 130.0;
     BlendDuration: float = 0.2;
     StandingTurn90Left: AlsTurnInPlaceSettings;
@@ -335,37 +451,58 @@ settings AlsTurnInPlaceAnimationSettings {
     CrouchingTurn180Left: AlsTurnInPlaceSettings;
     CrouchingTurn180Right: AlsTurnInPlaceSettings;
 }
-settings AlsAnimationInstanceSettings {
+settings AlsAnimationInstanceSettings {                                                                 // AlsAnimationInstanceSettings.h:18
     General: AlsGeneralAnimationSettings;
     Head: AlsHeadSettings;
-    Grounded: AlsGroundedAnimationSettings;
-    Standing: AlsStandingAnimationSettings;
-    Crouching: AlsCrouchingAnimationSettings;
-    InAir: AlsInAirAnimationSettings;
-    FootLock: AlsFootLockAnimationSettings;
-    Transitions: AlsTransitionsAnimationSettings;
-    DynamicTransitions: AlsDynamicTransitionsAnimationSettings;
-    RotateInPlace: AlsRotateInPlaceAnimationSettings;
-    TurnInPlace: AlsTurnInPlaceAnimationSettings;
+    Grounded: AlsGroundedSettings;
+    Standing: AlsStandingSettings;
+    Crouching: AlsCrouchingSettings;
+    InAir: AlsInAirSettings;
+    FootLock: AlsFootLockSettings;
+    Transitions: AlsTransitionsSettings;
+    DynamicTransitions: AlsDynamicTransitionsSettings;
+    RotateInPlace: AlsRotateInPlaceSettings;
+    TurnInPlace: AlsGeneralTurnInPlaceSettings;
 }
 
-// ---- math (Utility/AlsMath.h, AlsVector.h, AlsRotation.h): the pure helpers that need no transform / quaternion functions -----
-fn clamp01(x: float) -> float { return clamp(x, 0.0, 1.0); }                                   // AlsMath.h:70
+// ---- math: Utility/AlsMath.h, AlsMath.cpp, AlsVector.h, AlsVector.cpp, AlsRotation.h ------------------------------------------
+// The pure helpers.  The ones that are plain UE built-ins in the C++ (FMath::GetRangePct, UAlsRotation::GetTwist = get_twist,
+// FQuat::FastLerp, UnwindDegrees ...) are the DAL built-ins of the same name.  Not here: UAlsMath::TryCalculatePoleVector and the
+// spring-damper states (used by the Control Rig units only, which stay on the graph side).
 
-fn lerp_clamped(a: float, b: float, alpha: float) -> float {                                     // AlsMath.h:79
-    return a + clamp01(alpha) * (b - a);
-}
+const CounterClockwiseRotationAngleThreshold: float = 5.0;                                       // AlsRotation.h:12
+
+fn clamp01(x: float) -> float { return x > 0.0 ? (x < 1.0 ? x : 1.0) : 0.0; }                    // AlsMath.h:70
+
+fn lerp_clamped(a: float, b: float, ratio: float) -> float { return a + (b - a) * clamp01(ratio); }   // AlsMath.h:79
 
 fn damper_exact_alpha(dt: float, half_life: float) -> float {                                    // AlsMath.h:84
     return 1.0 - inv_exp_approx(LN2 / (half_life + SMALL_NUMBER) * dt);
 }
 
-fn damper_exact(current: float, target: float, dt: float, half_life: float) -> float {          // AlsMath.h:91
+fn damper_exact(current: float, target: float, dt: float, half_life: float) -> float {          // AlsMath.h:91 (float)
     return lerp(current, target, damper_exact_alpha(dt, half_life));
 }
 
-fn damper_exact_vec3(current: vec3, target: vec3, dt: float, half_life: float) -> vec3 {
+fn damper_exact_vec2(current: vec2, target: vec2, dt: float, half_life: float) -> vec2 {         // AlsMath.h:91 (FVector2D)
     return lerp(current, target, damper_exact_alpha(dt, half_life));
+}
+
+fn damper_exact_vec3(current: vec3, target: vec3, dt: float, half_life: float) -> vec3 {         // AlsMath.h:91 (FVector)
+    return lerp(current, target, damper_exact_alpha(dt, half_life));
+}
+
+fn calculate_movement_direction(angle: float, forward_half_angle: float, angle_threshold: float) -> AlsMovementDirection {   // AlsMath.cpp:11
+    if (angle >= -forward_half_angle - angle_threshold && angle <= forward_half_angle + angle_threshold) {
+        return AlsMovementDirection.Forward;
+    }
+    if (angle >= forward_half_angle - angle_threshold && angle <= 180.0 - forward_half_angle + angle_threshold) {
+        return AlsMovementDirection.Right;
+    }
+    if (angle <= -(forward_half_angle - angle_threshold) && angle >= -(180.0 - forward_half_angle + angle_threshold)) {
+        return AlsMovementDirection.Left;
+    }
+    return AlsMovementDirection.Backward;
 }
 
 fn clamp_magnitude01(v: vec3) -> vec3 {                                                          // AlsVector.h:86
@@ -374,42 +511,105 @@ fn clamp_magnitude01(v: vec3) -> vec3 {                                         
     return v * inv_sqrt(magnitude_sq);
 }
 
-fn direction_to_angle_xy(d: vec3) -> float { return rad_to_deg(atan2(d.y, d.x)); }               // AlsVector.h:159
-
-fn angle_to_direction_xy(angle: float) -> vec3 {                                                 // AlsVector.h:149
-    let rad = deg_to_rad(angle);
-    return vec3(cos(rad), sin(rad), 0.0);
+fn clamp_magnitude01_2d(v: vec2) -> vec2 {                                                       // AlsVector.h:114
+    let magnitude_sq = length_sq(v);
+    if (magnitude_sq <= 1.0) { return v; }
+    return v * inv_sqrt(magnitude_sq);
 }
 
-fn lerp_angle(a: float, b: float, alpha: float) -> float {                                   // AlsRotation.h:83
-    return a + unwind_degrees(b - a) * alpha;
+fn radian_to_direction(radian: float) -> vec2 { return vec2(cos(radian), sin(radian)); }         // AlsVector.h:128
+
+fn radian_to_direction_xy(radian: float) -> vec3 { return vec3(cos(radian), sin(radian), 0.0); } // AlsVector.h:136
+
+fn angle_to_direction(angle: float) -> vec2 { return radian_to_direction(deg_to_rad(angle)); }  // AlsVector.h:144
+
+fn angle_to_direction_xy(angle: float) -> vec3 { return radian_to_direction_xy(deg_to_rad(angle)); }   // AlsVector.h:149
+
+fn direction_to_angle(d: vec2) -> float { return rad_to_deg(atan2(d.y, d.x)); }                  // AlsVector.h:154
+
+fn direction_to_angle_xy(d: vec3) -> float { return rad_to_deg(atan2(d.y, d.x)); }               // AlsVector.h:159
+
+fn perpendicular_clockwise_xy(v: vec3) -> vec3 { return vec3(v.y, -v.x, v.z); }                  // AlsVector.h:164
+
+fn perpendicular_counter_clockwise_xy(v: vec3) -> vec3 { return vec3(-v.y, v.x, v.z); }          // AlsVector.h:169
+
+fn angle_between_skip_normalization(a: vec3, b: vec3) -> float { return rad_to_deg(acos(dot(a, b))); }   // AlsVector.h:174
+
+fn angle_between_signed_xy(a: vec3, b: vec3) -> float {                                          // AlsVector.h:179
+    let from_xy = normalize(a.xy);
+    let to_xy = normalize(b.xy);
+    let cross_z = from_xy.x * to_xy.y - from_xy.y * to_xy.x;                                     // FVector2f operator^
+    return rad_to_deg(acos(dot(from_xy, to_xy))) * sign(cross_z);
+}
+
+fn slerp_skip_normalization(a: vec3, b: vec3, ratio: float) -> vec3 {                            // AlsVector.cpp:7
+    let d = dot(a, b);
+    if (d > 0.9995) { return normalize(lerp(a, b, ratio)); }
+    let clamped = max(-1.0, d);
+    let theta = acos(clamped) * ratio;
+    let perpendicular = normalize(b - a * clamped);                                              // FromPerpendicular.Normalize(), zero when it cannot be normalized
+    return a * cos(theta) + perpendicular * sin(theta);
 }
 
 fn remap_angle_for_counter_clockwise_rotation(angle: float) -> float {                           // AlsRotation.h:51
-    if (angle > 175.0) { return angle - 360.0; }                                     // 180 - CounterClockwiseRotationAngleThreshold (5)
+    if (angle > 180.0 - CounterClockwiseRotationAngleThreshold) { return angle - 360.0; }
     return angle;
 }
 
+fn lerp_angle(a: float, b: float, ratio: float) -> float {                                       // AlsRotation.h:83
+    let delta = remap_angle_for_counter_clockwise_rotation(unwind_degrees(b - a));
+    return unwind_degrees(a + delta * ratio);
+}
+
+fn lerp_rotation(a: rotator, b: rotator, ratio: float) -> rotator {                              // AlsRotation.h:91 (the vector-intrinsics path, which every desktop build takes)
+    let d = delta_rotator(b, a);                                                                 // (b - a).GetNormalized()
+    if (abs(d.pitch) <= KINDA_SMALL_NUMBER && abs(d.yaw) <= KINDA_SMALL_NUMBER && abs(d.roll) <= KINDA_SMALL_NUMBER) { return b; }
+    let pitch = d.pitch >= 180.0 - CounterClockwiseRotationAngleThreshold ? d.pitch - 360.0 : d.pitch;   // RemapRotationForCounterClockwiseRotation :62 (>=)
+    let yaw = d.yaw >= 180.0 - CounterClockwiseRotationAngleThreshold ? d.yaw - 360.0 : d.yaw;
+    let roll = d.roll >= 180.0 - CounterClockwiseRotationAngleThreshold ? d.roll - 360.0 : d.roll;
+    return normalize_rotator(rotator(a.pitch + pitch * ratio, a.yaw + yaw * ratio, a.roll + roll * ratio));
+}
+
 fn interpolate_angle_constant(current: float, target: float, dt: float, speed: float) -> float { // AlsRotation.h:130
-    if (speed <= 0.0 || current == target) { return target; }
-    return unwind_degrees(current + clamp(unwind_degrees(target - current), -speed * dt, speed * dt));
+    var delta = unwind_degrees(target - current);
+    let max_delta = speed * dt;
+    if (speed <= 0.0 || abs(delta) <= max_delta) { return target; }
+    delta = remap_angle_for_counter_clockwise_rotation(delta);
+    return unwind_degrees(current + sign(delta) * max_delta);
 }
 
 fn damper_exact_angle(current: float, target: float, dt: float, half_life: float) -> float {    // AlsRotation.h:144
-    return lerp_angle(current, target, damper_exact_alpha(dt, half_life));
+    var delta = unwind_degrees(target - current);
+    if (is_nearly_zero(delta, KINDA_SMALL_NUMBER)) { return target; }
+    delta = remap_angle_for_counter_clockwise_rotation(delta);
+    return unwind_degrees(current + delta * damper_exact_alpha(dt, half_life));
 }
 
-fn lerp_rotation(a: rotator, b: rotator, alpha: float) -> rotator {                              // AlsRotation.h: angle by angle, the short way
-    return rotator(lerp_angle(a.pitch, b.pitch, alpha), lerp_angle(a.yaw, b.yaw, alpha), lerp_angle(a.roll, b.roll, alpha));
+fn damper_exact_rotation(current: rotator, target: rotator, dt: float, half_life: float) -> rotator {   // AlsRotation.h:159 (vector-intrinsics path)
+    let d = delta_rotator(target, current);
+    if (abs(d.pitch) <= KINDA_SMALL_NUMBER && abs(d.yaw) <= KINDA_SMALL_NUMBER && abs(d.roll) <= KINDA_SMALL_NUMBER) { return target; }
+    let pitch = d.pitch >= 180.0 - CounterClockwiseRotationAngleThreshold ? d.pitch - 360.0 : d.pitch;
+    let yaw = d.yaw >= 180.0 - CounterClockwiseRotationAngleThreshold ? d.yaw - 360.0 : d.yaw;
+    let roll = d.roll >= 180.0 - CounterClockwiseRotationAngleThreshold ? d.roll - 360.0 : d.roll;
+    let alpha = damper_exact_alpha(dt, half_life);
+    return normalize_rotator(rotator(current.pitch + pitch * alpha, current.yaw + yaw * alpha, current.roll + roll * alpha));
 }
 
-fn damper_exact_rotation(current: quat, target: quat, dt: float, half_life: float) -> quat {     // AlsRotation.h
-    return slerp(current, target, damper_exact_alpha(dt, half_life));
+fn interpolate_quaternion_fast(current: quat, target: quat, dt: float, speed: float) -> quat {  // AlsRotation.h:210
+    let equal = abs(current.x - target.x) <= KINDA_SMALL_NUMBER && abs(current.y - target.y) <= KINDA_SMALL_NUMBER
+             && abs(current.z - target.z) <= KINDA_SMALL_NUMBER && abs(current.w - target.w) <= KINDA_SMALL_NUMBER;   // FQuat::Equals
+    if (speed <= 0.0 || equal) { return target; }
+    return normalize(fast_lerp(current, target, clamp01(speed * dt)));
 }
 
-fn calculate_movement_direction(angle: float, forward_half_angle: float, backward_half_angle: float) -> AlsMovementDirection {   // AlsMath.cpp:11
-    if (angle >= -forward_half_angle && angle <= forward_half_angle) { return AlsMovementDirection.Forward; }
-    if (angle >= forward_half_angle && angle <= 180.0 - backward_half_angle) { return AlsMovementDirection.Right; }
-    if (angle <= -forward_half_angle && angle >= -(180.0 - backward_half_angle)) { return AlsMovementDirection.Left; }
-    return AlsMovementDirection.Backward;
+fn get_max_walk_speed(gait: AlsMovementGaitSettings) -> float {                                  // AlsMovementSettings.h:85 FAlsMovementGaitSettings::GetMaxWalkSpeed
+    return gait.bAllowDirectionDependentMovementSpeed ? max(gait.WalkForwardSpeed, gait.WalkBackwardSpeed) : gait.WalkForwardSpeed;
 }
+
+fn get_max_run_speed(gait: AlsMovementGaitSettings) -> float {                                   // AlsMovementSettings.h:92 FAlsMovementGaitSettings::GetMaxRunSpeed
+    return gait.bAllowDirectionDependentMovementSpeed ? max(gait.RunForwardSpeed, gait.RunBackwardSpeed) : gait.RunForwardSpeed;
+}
+
+// ================================================================================================================================
+// Helpers of the animation instance (AlsAnimationInstance*.dal) go below this line, each with the ALS file:line it ports.
+// ================================================================================================================================

@@ -692,13 +692,16 @@ def probe_module():
 
 # ---- the ALS settings of the exported pack --------------------------------------------------------------------------------
 
+CONTAINERS = ("MantlingTraceResponses", "GroundPredictionSweepResponses")
+
+
 def same(test, js, value, path="", derived=("SlopeAngleThresholdCos",)):
     """Check loaded data against the JSON it came from, for what can be compared directly."""
     if isinstance(value, rt.Struct):
         test.assertIsInstance(js, dict, path)
         for k, x in js.items():
-            if k.startswith("$") or k not in value._FIELDS:
-                continue
+            if k.startswith("$") or k not in value._FIELDS or k in CONTAINERS:
+                continue                                               # the response containers are read as lists of blocking channels
             same(test, x, getattr(value, k), f"{path}.{k}")
     elif isinstance(value, bool):
         test.assertEqual(js, value, path)
@@ -746,7 +749,8 @@ class AlsPackTests(unittest.TestCase):
         inst, rep = self.load("AlsCharacterSettings", "CS_Als_Default")
         same(self, self.data("CS_Als_Default")["props"], inst)
         self.assertEqual(rep.unresolved, [])
-        self.assertEqual(sorted(w.rsplit(".", 1)[-1].split(":")[0] for w in rep.warnings), ["MantlingTraceResponses"])     # the response container: derived from the channel list
+        self.assertEqual(rep.warnings, [])                                                                              # the response containers are channel lists in the library
+        self.assertEqual(inst.Mantling.MantlingTraceResponses, inst.Mantling.MantlingTraceResponseChannels)
         self.assertEqual(inst.Mantling.MantlingTraceChannel, 3)                                                          # Channel.Visibility
         self.assertEqual(inst.Mantling.MantlingTraceResponseChannels, (0, 1, 7))                                          # WorldStatic, WorldDynamic, Destructible
         self.assertAlmostEqual(inst.Mantling.SlopeAngleThresholdCos, math.cos(math.radians(35.0)), places=6)
@@ -832,6 +836,10 @@ input B: float;
 input C: float;
 input Dt: float;
 input V: vec3;
+input R1: rotator;
+input R2: rotator;
+input Q1: quat;
+input Q2: quat;
 state Clamp01: float;
 state LerpClamped: float;
 state Damper: float;
@@ -848,6 +856,13 @@ state Stance: AlsStance = AlsStance.Standing;
 state Hips: AlsHipsDirection;
 state Foot: AlsFootState;
 state Locomotion: AlsLocomotionState;
+state Rot: rotator;
+state RotDamped: rotator;
+state QuatFast: quat;
+state Signed: float;
+state Slerped: vec3;
+state Clamp2: vec2;
+state Between: float;
 update(dt) {
     Clamp01 = clamp01(A);
     LerpClamped = lerp_clamped(A, B, C);
@@ -860,10 +875,17 @@ update(dt) {
     Remap = remap_angle_for_counter_clockwise_rotation(A * 20.0);
     Constant = interpolate_angle_constant(A * 40.0, B * 40.0, abs(Dt), abs(C) * 50.0);
     DamperAngle = damper_exact_angle(A * 40.0, B * 40.0, abs(Dt), abs(C) + 0.01);
-    Direction = calculate_movement_direction(A * 20.0, 70.0, 50.0);
+    Direction = calculate_movement_direction(A * 20.0, 70.0, 5.0);
     Stance = (A > 0.0) ? AlsStance.Crouching : AlsStance.Standing;
     Hips = AlsHipsDirection.LeftBackward;
-    Foot.bLockingActive = A > 0.0;
+    Foot.LockLocation = V * 0.5;
+    Rot = lerp_rotation(R1, R2, C);
+    RotDamped = damper_exact_rotation(R1, R2, abs(Dt), abs(C) + 0.01);
+    QuatFast = interpolate_quaternion_fast(Q1, Q2, abs(Dt), abs(C) * 20.0);
+    Signed = angle_between_signed_xy(V, vec3(B, C, A));
+    Slerped = slerp_skip_normalization(normalize(V), normalize(vec3(B, C, A)), C);
+    Clamp2 = clamp_magnitude01_2d(V.xy);
+    Between = angle_between_skip_normalization(normalize(V), normalize(vec3(B, C, A)));
     Foot.LockAmount = Clamp01;
     Foot.FinalLocation = V;
     Locomotion.Speed = length(V);
@@ -904,7 +926,7 @@ class AlsLibTests(unittest.TestCase):
             self.assertEqual(harness.run_python(m, [frame(A=a, B=0.0, C=0.0, Dt=0.0, V=(0.0, 0.0, 0.0))])[0]["Direction"], expected, a)
         self.assertEqual(out["Locomotion.AimingYawAngleLimit"], 179.0)
         self.assertEqual(out["Locomotion.bRotationTowardsLastInputDirectionBlocked"], True)
-        self.assertEqual(out["Foot.bLockingActive"], True)
+        self.assertEqual(out["Foot.LockLocation"], (1.5, 2.0, 0.0))
 
     @unittest.skipIf(tcc.COMPILER is None, "no C++ compiler found")
     def test_its_helpers_in_cpp(self):
