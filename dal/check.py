@@ -25,11 +25,13 @@ from .builtins import (
 from .errors import DalError, Diagnostic, Pos, SourceFile
 from .hostapi import COMMANDS, HOST_ITEMS, QUERIES
 from .interp import eval_const
+from . import peers as peermod
 from . import values
 from .lexer import RESERVED_WORDS
 from .libs import LIBRARY_DECLS
 from .names import CPP_KEYWORDS, PY_RESERVED, reserved_reason
 from .types import (
+    VOID,
     BASIC_TYPES,
     BOOL,
     BUILTIN_ENUMS,
@@ -67,8 +69,18 @@ class Local:
     mutable: bool
 
 
+@dataclass
+class MethodSig:
+    params: list[tuple[str, Type]]
+    ret: Type | None
+    pub: bool
+    is_view: bool
+    pos: Pos
+    decl: object = None
+
+
 class Scope:
-    """Body scope: ``ctx`` is 'const' | 'fn' | 'update' | 'entry'."""
+    """Body scope: ``ctx`` is 'const' | 'fn' | 'update' | 'entry' | 'handler' | 'method' | 'view'."""
 
     def __init__(self, ctx: str, ret: Type | None = None, fn_name: str = ""):
         self.ctx = ctx
@@ -136,6 +148,12 @@ class Checker:
         self.struct_decls: dict[str, S.StructDecl] = {}
         self.folding: set[str] = set()
         self.struct_cached: set[str] = set()              # struct types reused from another compilation unit (already complete)
+        self.interface_only = False                       # stop after the declarations (the checker run for a peer's interface)
+        self.method_sigs: dict[str, MethodSig] = {}
+        self.method_calls: dict[str, list[str]] = {}      # call graph of methods and views (recursion check)
+        self.peer_ifaces: dict[str, peermod.PeerIface] = {}
+        self.value_calls: set[int] = set()                # ids of calls that may produce a value (the whole right-hand side of let / = / return)
+        self.stmt_calls: set[int] = set()                 # ids of calls used as statements
         self.kind = "anim"
 
     def focus(self, d) -> None:
@@ -169,7 +187,7 @@ class Checker:
         if name in self.reserved:
             self.err("DAL3002", f"'{name}' is a built-in name and cannot be used as {what}", pos)
             return False
-        reason = reserved_reason(name, allow_py_keyword=allow_py_keyword)
+        reason = reserved_reason(name, allow_py_keyword=allow_py_keyword, allow_sample_locals=(what == "a peer name"))
         if reason:
             self.err("DAL3004", f"'{name}' cannot be used as {what}: {reason}", pos)
             return False
@@ -279,7 +297,7 @@ class Checker:
                 self.later[d.name] = "input"
             elif isinstance(d, S.StateDecl):
                 self.later[d.name] = "state"
-            elif isinstance(d, (S.FnDecl, S.ExternDecl)):
+            elif isinstance(d, (S.FnDecl, S.ExternDecl, S.MethodDecl)):
                 self.later_fns.add(d.name)
 
         # 2. consts, in source order
@@ -304,6 +322,10 @@ class Checker:
                 self.declare_extern(d)
         for d in decls:
             self.focus(d)
+            if isinstance(d, S.PeerDecl):
+                self.declare_peer(d)
+        for d in decls:
+            self.focus(d)
             if isinstance(d, S.ParamDecl):
                 self.declare_param(d)
             elif isinstance(d, S.InputDecl):
@@ -312,21 +334,35 @@ class Checker:
                 self.declare_state(d)
         for d in decls:
             self.focus(d)
+            if isinstance(d, S.MethodDecl):
+                self.declare_method_sig(d)
+        for d in decls:
+            self.focus(d)
             if isinstance(d, S.EntryDecl):
                 self.declare_global(d.name, "entry", d.name_pos or d.pos, what="an entry name")
+
+        if self.interface_only:
+            self.source = self.main_source
+            if any(x.severity == "error" for x in self.diags):
+                raise DalError(self.diags)
+            m.enums = self.user_enums
+            for d in decls:
+                if isinstance(d, S.EntryDecl):
+                    m.entries.append(ir.EntryDef(d.name, d.dt_name, []))
+            for name, sig in self.method_sigs.items():
+                m.methods.append(ir.MethodDef(name, sig.params, sig.ret, [], sig.pub, sig.is_view))
+            return m
 
         # 4. bodies
         for d in decls:
             self.focus(d)
             if isinstance(d, S.FnDecl):
                 self.check_fn(d)
-        updates = [d for d in decls if isinstance(d, S.UpdateDecl)]
-        if len(updates) > 1:
-            self.focus(updates[1])
-            self.err("DAL3012", "only one 'update' is allowed", updates[1].pos)
-        for d in updates[:1]:
+        for d in decls:
             self.focus(d)
-            m.update = self.check_update(d)
+            if isinstance(d, S.MethodDecl):
+                self.check_method(d)
+        self.check_updates([d for d in decls if isinstance(d, S.UpdateDecl)], logics[0] if logics else None)
         for d in decls:
             self.focus(d)
             if isinstance(d, S.EntryDecl):
@@ -342,6 +378,7 @@ class Checker:
             self.warn("DAL5091", "the logic has no 'update', no 'entry' and no 'on' handler; it never changes anything", Pos(1, 1, 2))
 
         self.order_functions()
+        self.order_methods()
         self.check_standins()
 
         errors = [d for d in self.diags if d.severity == "error"]
@@ -349,6 +386,151 @@ class Checker:
             raise DalError(self.diags)
         m.enums = self.user_enums
         return m
+
+    # ---- methods, views, peers, tick slots ------------------------------------------------------------------------
+    def declare_method_sig(self, d: S.MethodDecl) -> None:
+        what = "a view name" if d.is_view else "a method name"
+        ok = self.declare_global(d.name, "view" if d.is_view else "method", d.name_pos or d.pos, what=what)
+        params = self.declare_params(d.params)
+        ret: Type | None = None
+        if d.ret_name is not None:
+            ret = self.resolve_type(d.ret_name, d.ret_pos or d.pos)
+            if ret is not ERROR:
+                ret = self.storable(ret, d.ret_pos or d.pos, "a result")
+        if ok and params is not None:
+            self.method_sigs[d.name] = MethodSig(params, ret, d.pub, d.is_view, d.pos, d)
+
+    def check_method(self, d: S.MethodDecl) -> None:
+        sig = self.method_sigs.get(d.name)
+        if sig is None or sig.decl is not d:
+            return
+        sc = Scope("view" if sig.is_view else "method", sig.ret, d.name)
+        for n, t in sig.params:
+            sc.declare(n, Local(t, False))
+        self.method_calls[d.name] = []
+        body = self.block(d.body, sc)
+        if sig.ret is not None and sig.ret is not ERROR and not self.always_returns(body):
+            self.err("DAL5021", f"{'view' if sig.is_view else 'method'} '{d.name}' may finish without returning a {sig.ret}; every path must end in 'return'", d.pos)
+        self.module.methods.append(ir.MethodDef(d.name, sig.params, sig.ret, body, sig.pub, sig.is_view))
+
+    def order_methods(self) -> None:
+        """Methods and views may not call themselves, directly or through each other (DAL5046)."""
+        state: dict[str, int] = {}
+        reported = False
+
+        def visit(n: str, path: list[str]) -> None:
+            nonlocal reported
+            if n not in self.method_calls:
+                return
+            st = state.get(n, 0)
+            if st == 2:
+                return
+            if st == 1:
+                if not reported:
+                    cycle = path[path.index(n):] + [n]
+                    sig = self.method_sigs.get(n)
+                    self.err("DAL5046", "recursion is not allowed: " + " -> ".join(cycle), sig.pos if sig else Pos(1, 1, 2))
+                    reported = True
+                return
+            state[n] = 1
+            for c in self.method_calls.get(n, []):
+                visit(c, path + [n])
+            state[n] = 2
+
+        for n in list(self.method_calls):
+            visit(n, [])
+
+    def declare_peer(self, d: S.PeerDecl) -> None:
+        ok = self.declare_global(d.name, "peer", d.name_pos or d.pos, what="a peer name")
+        if self.interface_only or not ok:
+            return
+        if self.ctx is None:
+            self.err("DAL3072", "peers are found through the compile context (use dal.check_file / dal.check_source)", d.type_pos)
+            return
+        try:
+            iface = peermod.load_interface(self.ctx, self.ctx.main_key, d.type_name)
+        except FileNotFoundError:
+            self.err("DAL3072", f"peer type '{d.type_name}': there is no {d.type_name}.dal next to this file", d.type_pos)
+            return
+        except DalError as e:
+            self.diags.extend(e.diagnostics)
+            return
+        if iface.logic != d.type_name:
+            self.err("DAL3072", f"{d.type_name}.dal declares the logic '{iface.logic}', not '{d.type_name}'", d.type_pos)
+            return
+        if self.kind == "anim" and iface.kind == "anim":
+            self.err("DAL5045", "an anim logic cannot have another anim logic as a peer (they run on worker threads)", d.type_pos)
+            return
+        self.peer_ifaces[d.name] = iface
+        self.module.peers.append(ir.PeerDef(d.name, iface.logic, iface.kind, iface.filename,
+                                            {n: (list(ps), r) for n, (ps, r) in iface.methods.items()}))
+
+    def check_peer_binding(self, d: S.InputDecl, ty: Type) -> ir.PeerUse | None:
+        b = d.peer
+        assert b is not None
+        iface = self.peer_ifaces.get(b.peer)
+        if iface is None:
+            sym = self.globals.get(b.peer)
+            if sym is None:
+                self.err("DAL3040", f"undefined name '{b.peer}'" + self.suggest(b.peer, [k for k, v in self.globals.items() if v.kind == "peer"])
+                         + f" (declare the peer: peer {b.peer}: LogicName;)", b.pos)
+            elif sym.kind != "peer":
+                self.err("DAL3076", f"'{b.peer}' is a {sym.kind}, not a peer: an input can read a host item (host.x) or a peer (Peer.State)", b.pos)
+            return None
+        if self.kind == "actor" and iface.kind == "anim":
+            self.err("DAL5062", f"{iface.logic} is an anim logic and runs on a worker thread: an actor logic cannot read its state", b.pos)
+            return None
+        first = b.path[0]
+        cur = iface.vars.get(first)
+        if cur is None:
+            self.err("DAL3075", f"logic {iface.logic} has no state, input or param '{first}'" + self.suggest(first, iface.vars), b.path_pos[0])
+            return None
+        for member, mpos in zip(b.path[1:], b.path_pos[1:]):
+            if not isinstance(cur, StructType):
+                self.err("DAL4030", f"type {cur} has no members", mpos)
+                return None
+            fd = cur.field(member)
+            if fd is None:
+                self.err("DAL4030", f"{cur.kind} {cur.name} has no member '{member}'" + self.suggest(member, [x.name for x in cur.fields]), mpos)
+                return None
+            cur = fd.ty
+        if ty is not ERROR and cur is not ty:
+            self.err("DAL4020", f"{b.peer}.{'.'.join(b.path)} has type {cur}, but input '{d.name}' is declared {ty}", d.type_pos)
+            return None
+        return ir.PeerUse(b.peer, tuple(b.path))
+
+    PHASE_ORDER = ("pre_movement", "after_movement", "after_anim")
+
+    def check_updates(self, updates: list[S.UpdateDecl], logic: S.LogicDecl | None) -> None:
+        m = self.module
+        logic_phase = logic.phase if logic is not None else None
+        if self.kind == "anim":
+            for x, pos in [(logic, logic.phase_pos)] if (logic is not None and logic.phase) else []:
+                self.focus(logic)
+                self.err("DAL5064", "tick slots (in pre_movement / after_movement / after_anim) are for actor logic; an anim logic has one update", pos or logic.pos)
+            for d in updates:
+                if d.phase:
+                    self.focus(d)
+                    self.err("DAL5064", "tick slots (in pre_movement / after_movement / after_anim) are for actor logic; an anim logic has one update", d.phase_pos or d.pos)
+            logic_phase = None
+        m.phases_explicit = bool(logic_phase) or any(d.phase for d in updates if self.kind == "actor")
+        seen: dict[str, S.UpdateDecl] = {}
+        slotted: list[tuple[str, S.UpdateDecl]] = []
+        for d in updates:
+            phase = (d.phase if self.kind == "actor" else None) or logic_phase or "pre_movement"
+            if phase in seen:
+                self.focus(d)
+                if d.phase or seen[phase].phase:
+                    self.err("DAL5049", f"two updates run in the tick slot {phase}; each slot has at most one update block", d.pos)
+                else:
+                    self.err("DAL3012", "only one 'update' is allowed", d.pos)
+                continue
+            seen[phase] = d
+            slotted.append((phase, d))
+        slotted.sort(key=lambda pd: self.PHASE_ORDER.index(pd[0]))
+        for phase, d in slotted:
+            self.focus(d)
+            m.updates.append(self.check_update(d, phase))
 
     # ---- tags -------------------------------------------------------------------------------------------------
     def declare_tags(self, d: S.TagsDecl) -> None:
@@ -501,8 +683,12 @@ class Checker:
                 continue
             seen[mname] = mpos
             members.append(mname)
-        et = EnumType(d.name, members)
-        et.origin = self.origin_of(d)
+        origin = self.origin_of(d)
+        cached = self.ctx.types.get((origin, d.name)) if (self.ctx is not None and origin is not None) else None
+        et = cached if cached is not None else EnumType(d.name, members)
+        et.origin = origin
+        if cached is None and self.ctx is not None and origin is not None:
+            self.ctx.types[(origin, d.name)] = et
         self.enums[d.name] = et
         self.user_enums.append(et)
         self.globals[d.name].obj = et
@@ -587,14 +773,18 @@ class Checker:
         ok = self.declare_global(d.name, "input", d.name_pos or d.pos, what="an input name")
         ty = self.storable(self.resolve_type(d.type_name, d.type_pos), d.type_pos, "an input")
         host = None
+        peer = None
         value = None
-        if d.binding is not None:
+        if d.peer is not None:
+            peer = ir.PeerUse(d.peer.peer, tuple(d.peer.path)) if self.interface_only else self.check_peer_binding(d, ty)
+            value = self.zero(ty)
+        elif d.binding is not None:
             host = self.check_binding(d, ty)
             value = self.zero(ty)
         else:
             value = self.const_value(d.default, ty, d.pos, f"input '{d.name}'")
         if ok and ty is not ERROR:
-            self.module.inputs.append(ir.InputDef(d.name, ty, host, value))
+            self.module.inputs.append(ir.InputDef(d.name, ty, host, value, peer))
 
     def check_binding(self, d: S.InputDecl, ty: Type) -> ir.HostUse | None:
         b = d.binding
@@ -697,7 +887,7 @@ class Checker:
             self.err("DAL5021", f"fn '{d.name}' may finish without returning a {ret}; every path must end in 'return'", d.pos)
         self.module.funcs.append(ir.FnDef(d.name, params, ret, body, self.origin_of(d)))
 
-    def check_update(self, d: S.UpdateDecl) -> ir.UpdateDef:
+    def check_update(self, d: S.UpdateDecl, phase: str = "pre_movement") -> ir.UpdateDef:
         sc = Scope("update")
         if not self.valid_ident(d.dt_name, d.dt_pos, "the delta-time parameter"):
             pass
@@ -705,7 +895,7 @@ class Checker:
             self.err("DAL3005", f"'{d.dt_name}' hides the {self.globals[d.dt_name].kind} of the same name", d.dt_pos)
         sc.declare(d.dt_name, Local(FLOAT, False))
         pre = self.block(d.pre, sc)
-        return ir.UpdateDef(d.dt_name, self.block(d.body, sc), pre)
+        return ir.UpdateDef(d.dt_name, self.block(d.body, sc), pre, phase)
 
     def check_entry(self, d: S.EntryDecl) -> ir.EntryDef:
         sc = Scope("entry")
@@ -759,11 +949,37 @@ class Checker:
         if isinstance(s, S.ForStmt):
             return self.for_stmt(s, sc)
         if isinstance(s, S.CallStmt):
-            self.err("DAL2011", f"'{s.callee}(...);' is not a statement", s.pos)
-            return None
+            return self.call_stmt(s, sc)
+        if isinstance(s, S.ExprStmt):
+            return self.expr_stmt(s, sc)
         raise AssertionError(s)
 
+    def call_stmt(self, s: S.CallStmt, sc: Scope) -> ir.Stmt | None:
+        """`name(args);` -- a method called for what it does.  (The timer / window / buffer forms are gone after lowering.)"""
+        sym = self.globals.get(s.callee)
+        if sym is not None and sym.kind == "method" and sc.lookup(s.callee) is None:
+            call = S.CallExpr(s.pos, s.callee, s.args)
+            self.stmt_calls.add(id(call))
+            r = self.ex(call, sc)
+            return None if r.ty is ERROR else ir.ExprStmt(r)
+        if sym is not None and sym.kind == "view" and sc.lookup(s.callee) is None:
+            self.err("DAL2011", f"'{s.callee}(...);' is a view: it returns a value and changes nothing, use it in an expression", s.pos)
+            return None
+        self.err("DAL2011", f"'{s.callee}(...);' is not a statement", s.pos)
+        return None
+
+    def expr_stmt(self, s: S.ExprStmt, sc: Scope) -> ir.Stmt | None:
+        self.stmt_calls.add(id(s.expr))
+        r = self.ex(s.expr, sc)
+        return None if r.ty is ERROR else ir.ExprStmt(r)
+
+    def mark_value_call(self, e: S.Expr) -> None:
+        """The whole right-hand side of `let`, `=` and `return` may be a call that produces a value."""
+        if isinstance(e, (S.CallExpr, S.MemberCallExpr)):
+            self.value_calls.add(id(e))
+
     def let_stmt(self, s: S.LetStmt, sc: Scope) -> ir.Stmt | None:
+        self.mark_value_call(s.init)
         init = self.ex(s.init, sc)
         ty = init.ty
         if s.type_name is not None:
@@ -813,9 +1029,15 @@ class Checker:
                 self.err("DAL5010", "functions are pure and cannot write state; return a value and assign it in update/entry", name_pos)
                 self.ex(s.value, sc)
                 return None
+            if sc.ctx == "view":
+                self.err("DAL5044", "a view only reads: it cannot write state; use a method", name_pos)
+                self.ex(s.value, sc)
+                return None
             kind = "state"
             st = self.module.find_state(s.name)
             target_ty = st.ty if st else ERROR
+        if s.op == "=":
+            self.mark_value_call(s.value)
         value = self.ex(s.value, sc)
         if s.op != "=":
             cur = ir.LocalRef(target_ty, s.name) if kind == "local" else ir.StateRef(target_ty, s.name)
@@ -855,6 +1077,10 @@ class Checker:
                 self.err("DAL5010", "functions are pure and cannot write state; return a value and assign it in update/entry", name_pos)
                 self.ex(s.value, sc)
                 return None
+            if sc.ctx == "view":
+                self.err("DAL5044", "a view only reads: it cannot write state; use a method", name_pos)
+                self.ex(s.value, sc)
+                return None
             kind = "state"
             st = self.module.find_state(s.name)
             base_ty = st.ty if st else ERROR
@@ -883,6 +1109,8 @@ class Checker:
                 self.ex(s.value, sc)
                 return None
             cur_ty = fd.ty
+        if s.op == "=":
+            self.mark_value_call(s.value)
         value = self.ex(s.value, sc)
         if s.op != "=":
             base_ref = ir.LocalRef(base_ty, s.name) if kind == "local" else ir.StateRef(base_ty, s.name)
@@ -896,10 +1124,12 @@ class Checker:
         return ir.AssignField(kind, s.name, tuple(s.path), value)
 
     def return_stmt(self, s: S.ReturnStmt, sc: Scope) -> ir.Stmt:
-        if sc.ctx == "fn":
+        if sc.ctx in ("fn", "view") or (sc.ctx == "method" and sc.ret is not None):
             if s.value is None:
-                self.err("DAL5020", f"fn '{sc.fn_name}' must return a {sc.ret}", s.pos)
+                what = "fn" if sc.ctx == "fn" else sc.ctx
+                self.err("DAL5020", f"{what} '{sc.fn_name}' must return a {sc.ret}", s.pos)
                 return ir.Return(None)
+            self.mark_value_call(s.value)
             v = self.ex(s.value, sc)
             v = self.assignable(sc.ret or ERROR, v, s.value.pos, "the return value")
             return ir.Return(v)
@@ -922,6 +1152,8 @@ class Checker:
             return self.member_ref(e, sc)
         if isinstance(e, S.CallExpr):
             return self.call(e, sc)
+        if isinstance(e, S.MemberCallExpr):
+            return self.member_call(e, sc)
         if isinstance(e, S.UnaryExpr):
             return self.unary(e, sc)
         if isinstance(e, S.BinaryExpr):
@@ -985,6 +1217,10 @@ class Checker:
         if k == "action":
             return self.bad("DAL3030", f"action '{name}' is not a value: bind it to an input (input X: type <- host.action({name});) "
                                        f"or handle it with 'on input {name} started'", e.pos)
+        if k in ("method", "view"):
+            return self.bad("DAL3031", f"'{name}' is a {k}; call it as {name}(...)", e.pos)
+        if k == "peer":
+            return self.bad("DAL3030", f"peer '{name}' is not a value: read its state through an input (input X: T <- {name}.State;) or call its methods ({name}.Method(...))", e.pos)
         if k in ("fn", "extern", "entry"):
             return self.bad("DAL3031", f"'{name}' is a {'function' if k != 'entry' else 'entry'}; " + (f"call it as {name}(...)" if k != "entry" else "entries are called by the animation graph, not from code"), e.pos)
         return self.bad("DAL3040", f"'{name}' cannot be used as a value", e.pos)
@@ -1119,6 +1355,9 @@ class Checker:
     def check_handler(self, d: S.HandlerDecl) -> ir.HandlerDef | None:
         pos = d.target_pos or d.pos
         params: list[tuple[str, Type]] = []
+        if d.event in ("begin_play", "end_play"):
+            sc = Scope("handler")
+            return ir.HandlerDef(d.event, "", None, [], self.block(d.body, sc))
         if d.event in ("montage_ended", "montage_blending_out"):
             sym = self.globals.get(d.name)
             if sym is None or sym.kind != "montage":
@@ -1148,7 +1387,10 @@ class Checker:
     def cmd_stmt(self, s: S.CmdStmt, sc: Scope) -> ir.Stmt | None:
         pos = s.name_pos or s.pos
         if sc.ctx in ("fn", "const"):
-            self.err("DAL5042", "host commands are not allowed in functions (functions are pure); issue the command from update, an entry or a handler", pos)
+            self.err("DAL5042", "host commands are not allowed in functions (functions are pure); issue the command from update, an entry, a method or a handler", pos)
+            return None
+        if sc.ctx == "view":
+            self.err("DAL5044", "a view only reads: it cannot issue host commands; use a method", pos)
             return None
         cmd = COMMANDS.get(s.name)
         if cmd is None:
@@ -1207,9 +1449,10 @@ class Checker:
         if self.kind != "actor":
             return self.bad("DAL5041", f"host.{e.name}() asks the world synchronously and is only available in actor logic (logic Name : actor;); "
                                        "an anim instance runs on a worker thread", e.pos)
-        if sc.ctx in ("fn", "const"):
-            return self.bad("DAL5042", "host queries are not allowed in functions or constants; call them in update, an entry or a handler "
-                                       "and pass the result as an argument", e.pos)
+        if sc.ctx in ("fn", "const", "view"):
+            return self.bad("DAL5042" if sc.ctx != "view" else "DAL5044",
+                            "host queries are not allowed in functions, views or constants; call them in update, an entry, a method or a handler "
+                            "and pass the result as an argument", e.pos)
         if any(a.ty is ERROR for a in args):
             return ir.Lit(ERROR, 0)
         if len(args) != len(q.params):
@@ -1383,6 +1626,8 @@ class Checker:
         if sym is None:
             cands = list(BUILTINS) + list(CONSTRUCTORS) + [k for k, s in self.globals.items() if s.kind in ("fn", "extern")]
             return self.bad("DAL3040", f"undefined function '{name}'" + self.suggest(name, cands), e.pos)
+        if sym.kind in ("method", "view"):
+            return self.call_method(e, name, args, sc)
         if sym.kind in ("fn", "extern"):
             if sc.ctx == "const":
                 return self.bad("DAL5002", f"a constant expression cannot call '{name}'; only built-in functions are allowed", e.pos)
@@ -1406,6 +1651,81 @@ class Checker:
                 return ir.CallFn(ret, name, conv)
             return ir.CallExtern(ret, name, conv)
         return self.bad("DAL3031", f"'{name}' is a {sym.kind}, not a function", e.pos)
+
+    def call_allowed(self, e: S.Expr, what: str, ret: Type | None, sc: Scope, view: bool = False) -> bool:
+        """Methods run in order and may change state, so a result is only taken from the whole right-hand side of a
+        `let` / `=` / `return` (or the call is a statement); views are pure and may sit anywhere."""
+        ctx = sc.ctx
+        if ctx == "fn":
+            self.err("DAL5012", f"fn bodies are pure: they cannot call {what}", e.pos)
+            return False
+        if ctx == "const":
+            self.err("DAL5002", f"a constant expression cannot call {what}", e.pos)
+            return False
+        if view:
+            return True
+        if ctx == "view":
+            self.err("DAL5044", f"a view only reads: it cannot call {what}", e.pos)
+            return False
+        if id(e) in self.stmt_calls:
+            return True
+        if ret is None:
+            self.err("DAL4043", f"{what} returns nothing; call it as a statement: name(...);", e.pos)
+            return False
+        if id(e) not in self.value_calls:
+            self.err("DAL4042", f"the result of {what} can only be the whole right-hand side of 'let', '=' or 'return' "
+                                f"(methods change state, so they cannot hide inside an expression); put it in a variable first", e.pos)
+            return False
+        return True
+
+    def call_method(self, e: S.CallExpr, name: str, args: list[ir.Expr], sc: Scope) -> ir.Expr:
+        sig = self.method_sigs.get(name)
+        if sig is None:
+            return ir.Lit(ERROR, 0)
+        what = f"{'view' if sig.is_view else 'method'} '{name}'"
+        if not self.call_allowed(e, what, sig.ret, sc, sig.is_view):
+            return ir.Lit(ERROR, 0)
+        if len(args) != len(sig.params):
+            return self.bad("DAL4041", f"{name}() takes {len(sig.params)} argument(s) ({', '.join(f'{n}: {t}' for n, t in sig.params)}), got {len(args)}", e.pos)
+        conv = [self.assignable(pt, a, ae.pos, f"argument '{pn}' of {name}()") for (pn, pt), a, ae in zip(sig.params, args, e.args)]
+        if sc.ctx in ("method", "view"):
+            self.method_calls[sc.fn_name].append(name)
+        if sig.is_view:
+            return ir.CallView(sig.ret or ERROR, name, conv)
+        return ir.CallMethod(sig.ret if sig.ret is not None else VOID, name, conv)
+
+    def member_call(self, e: S.MemberCallExpr, sc: Scope) -> ir.Expr:
+        base = e.base
+        if isinstance(base, S.NameRef) and sc.lookup(base.name) is None and base.name in self.peer_ifaces:
+            return self.peer_call(e, base.name, sc)
+        if isinstance(base, S.NameRef) and sc.lookup(base.name) is None and base.name in self.globals and self.globals[base.name].kind == "peer":
+            return ir.Lit(ERROR, 0)          # the peer could not be loaded: already reported
+        return self.bad("DAL2004", "only functions can be called; write f(x), not x.f(...)", e.pos)
+
+    def peer_call(self, e: S.MemberCallExpr, peer: str, sc: Scope) -> ir.Expr:
+        iface = self.peer_ifaces[peer]
+        args = [self.ex(a, sc) for a in e.args]
+        if any(a.ty is ERROR for a in args):
+            return ir.Lit(ERROR, 0)
+        sig = iface.methods.get(e.name)
+        if sig is None:
+            hint = ""
+            if e.name in iface.views:
+                hint = f" ('{e.name}' is a view: read what you need through an input, input X: T <- {peer}.State;)"
+            return self.bad("DAL3077", f"logic {iface.logic} has no 'pub method {e.name}'" + self.suggest(e.name, iface.methods) + hint, e.name_pos or e.pos)
+        params, ret = sig
+        what = f"'{peer}.{e.name}'"
+        if self.kind == "anim":
+            return self.bad("DAL5045", f"an anim logic cannot call another logic ({what}): it runs on a worker thread; use host commands or let the actor read the state", e.pos)
+        queued = iface.kind == "anim"
+        if not self.call_allowed(e, what, ret, sc):
+            return ir.Lit(ERROR, 0)
+        if queued and ret is not None and id(e) not in self.stmt_calls:
+            return self.bad("DAL5063", f"{what} is queued for the animation instance (it runs at the start of its next update) and cannot return a value here", e.pos)
+        if len(args) != len(params):
+            return self.bad("DAL4041", f"{peer}.{e.name}() takes {len(params)} argument(s) ({', '.join(f'{n}: {t}' for n, t in params)}), got {len(args)}", e.pos)
+        conv = [self.assignable(pt, a, ae.pos, f"argument '{pn}' of {peer}.{e.name}()") for (pn, pt), a, ae in zip(params, args, e.args)]
+        return ir.CallPeer(ret if ret is not None else VOID, peer, e.name, conv, queued)
 
     def make_struct(self, e: S.CallExpr, st: StructType, args: list[ir.Expr], sc: Scope) -> ir.Expr:
         if st.kind == "settings":

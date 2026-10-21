@@ -220,6 +220,13 @@ def as_hit(v):
     return v if type(v) is Hit else Hit(*v)
 
 
+def path_get(v, path):
+    """The member chain ``path`` of a value (``("Left", "Axis")``): how an input reads inside a peer's struct."""
+    for member in path:
+        v = getattr(v, member)
+    return v
+
+
 def as_tag(v):
     return "" if v is None else str(v)
 
@@ -989,11 +996,20 @@ class LogicBase:
     DAL_KIND = "anim"
     DAL_HANDLERS: tuple = ()      # (event, name, phase, method, value type)
 
-    def __init__(self, host, params: dict):
+    DAL_PEERS: tuple = ()         # (peer name, logic name)
+    DAL_METHODS: tuple = ()       # pub methods: other logics (and hosts) may call them
+    DAL_VIEWS: tuple = ()         # pub views
+    DAL_PHASES: tuple = ()        # tick slots of the logic (empty: one update)
+
+    def __init__(self, host, params: dict, peers: dict | None = None):
         from .hostapi import HostV1
 
         self.host = host if host is not None else HostV1()
         self.overrides: dict = {}
+        self.peers: dict = dict(peers) if peers else {}     # peer name -> the other logic (a generated class or an Interpreter)
+        self.unresolved: set = set()                         # peers that were used but not connected
+        self._peer_queue: list = []
+        self._begun = False
         self._dt = 0.0
         self._pending: list = []      # events posted by the caller
         self._cmds: list = []         # commands queued during the update
@@ -1005,7 +1021,7 @@ class LogicBase:
             setattr(self, name, self._coerce(type_name, params[name]) if name in params else default)
 
     def set_input(self, name: str, value) -> None:
-        """Set a free input (an input without a host binding)."""
+        """Set a free input (an input without a host or peer binding)."""
         for n, type_name, host_spec in self.DAL_INPUTS:
             if n == name:
                 if host_spec is not None:
@@ -1022,6 +1038,40 @@ class LogicBase:
 
     def sample_inputs(self) -> None:
         self._sample()
+
+    # ---- peers (v3) --------------------------------------------------------------------------------------
+    def connect(self, name: str, other) -> None:
+        """Wire the peer ``name`` (a ``peer`` declaration) to another logic instance."""
+        self.peers[name] = other
+
+    def dal_get(self, name: str):
+        """Another logic reads a state, input or param of this one."""
+        return getattr(self, name)
+
+    def dal_call(self, method: str, *args):
+        """Another logic (or the host) calls a ``pub method``."""
+        if method not in self.DAL_METHODS:
+            raise KeyError(f"{self.DAL_NAME} has no pub method {method!r}")
+        return getattr(self, method)(*args)
+
+    def dal_enqueue(self, method: str, args: tuple) -> None:
+        """A call queued by an actor logic: it runs at the start of this logic's next update."""
+        self._peer_queue.append((method, tuple(args)))
+
+    def _drain_peer_calls(self) -> None:
+        queue, self._peer_queue = self._peer_queue, []
+        for method, args in queue:
+            self.dal_call(method, *args)
+
+    def _peer_call(self, peer: str, method: str, args: tuple, default=None, queued: bool = False):
+        other = self.peers.get(peer)
+        if other is None:
+            self.unresolved.add(peer)
+            return default
+        if queued:
+            other.dal_enqueue(method, args)
+            return None
+        return other.dal_call(method, *args)
 
     # ---- events and commands (v1) ---------------------------------------------------------------------
     def post_event(self, kind: str, name: str, *args) -> None:

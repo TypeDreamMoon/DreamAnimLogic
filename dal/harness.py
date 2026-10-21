@@ -119,6 +119,8 @@ def random_frames(module: ir.Module, count: int, seed: int = 1) -> list[dict]:
         f["actor_rotation"] = _rand_quat(rng)
         f["control_rotation"] = (rng.uniform(-90, 90), rng.uniform(-180, 180), 0.0)
         for i in module.inputs:
+            if i.peer is not None:
+                continue
             if i.host is None:
                 f["free"][i.name] = _rand_value(rng, i.ty)
             elif i.host.item == "action":
@@ -127,7 +129,7 @@ def random_frames(module: ir.Module, count: int, seed: int = 1) -> list[dict]:
                 f["notifies"][i.host.arg] = rng.random() < 0.25
         if module.entries:
             f["calls"] = [e.name for e in module.entries if rng.random() < 0.6]
-        if module.handlers:
+        if any(h.event not in ("begin_play", "end_play") for h in module.handlers):
             f["events"] = _random_events(module, rng)
         if module.montages:
             f["montages"] = {}
@@ -146,8 +148,9 @@ def random_frames(module: ir.Module, count: int, seed: int = 1) -> list[dict]:
 
 def _random_events(module: ir.Module, rng: random.Random) -> list[tuple]:
     out: list[tuple] = []
+    handlers = [h for h in module.handlers if h.event not in ("begin_play", "end_play")]
     for _ in range(rng.choice([0, 0, 1, 1, 2, 3])):
-        h = rng.choice(module.handlers)
+        h = rng.choice(handlers)
         if h.event in ("notify", "notify_begin", "notify_end"):
             out.append((h.event, h.name))
         elif h.event in ("montage_ended", "montage_blending_out"):
@@ -232,3 +235,88 @@ def verify(module: ir.Module, frames: int = 300, seed: int = 1, tol: float = 0.0
     """Interpreter vs generated Python on random frames; returns the list of differences (empty = consistent)."""
     seq = random_frames(module, frames, seed)
     return compare(run_interpreter(module, seq, **params), run_python(module, seq, **params), tol)
+
+
+# ---- several logics that read and call each other -----------------------------------------------------------------
+
+def phases_of(module: ir.Module) -> list[str]:
+    """The tick slots a logic runs in (an anim logic has none)."""
+    if module.kind != "actor":
+        return []
+    return [u.phase for u in module.updates] or [module.default_phase]
+
+
+def default_schedule(modules: dict[str, ir.Module]) -> list[tuple[str, str | None]]:
+    """The order the engine ticks the logics of one actor: actor logics before the movement, after the movement, then the
+    animation instances, then the actor logics that run after the animation.  ``(name, None)`` runs a whole ``update``."""
+    steps: list[tuple[str, str | None]] = []
+    for slot in ("pre_movement", "after_movement"):
+        steps += [(n, slot) for n, m in modules.items() if slot in phases_of(m)]
+    steps += [(n, None) for n, m in modules.items() if m.kind == "anim"]
+    steps += [(n, "after_anim") for n, m in modules.items() if "after_anim" in phases_of(m)]
+    return steps
+
+
+def random_system_frames(modules: dict[str, ir.Module], count: int, seed: int = 1) -> list[dict]:
+    """Random frames for several logics: the host values once, free inputs and entry calls per logic."""
+    rng = random.Random(seed)
+    first = next(iter(modules.values()))
+    frames = random_frames(first, count, seed)
+    for f in frames:
+        f["free"] = {}
+        f["calls"] = {}
+        for name, m in modules.items():
+            f["free"][name] = {i.name: _rand_value(rng, i.ty) for i in m.inputs if i.is_free}
+            f["calls"][name] = [e.name for e in m.entries if rng.random() < 0.6]
+    return frames
+
+
+def run_system(modules: dict[str, ir.Module], frames: list[dict], backend: str = "python",
+               schedule: list[tuple[str, str | None]] | None = None, sources: dict[str, str] | None = None) -> list[dict]:
+    """Run several connected logics frame by frame; returns ``{logic: snapshot}`` per frame.
+
+    ``backend`` is 'interp' (the reference interpreter) or 'python' (generated classes)."""
+    hosts = {n: ScriptedHost() for n in modules}
+    objs: dict = {}
+    for n, m in modules.items():
+        if backend == "interp":
+            objs[n] = Interpreter(m, hosts[n], externs=load_standins(m))
+        else:
+            objs[n] = load_class(m, (sources or {}).get(n))(hosts[n])
+    for n, m in modules.items():
+        for p in m.peers:
+            if p.logic in objs:
+                objs[n].connect(p.name, objs[p.logic])
+    steps = schedule or default_schedule(modules)
+    out = []
+    for f in frames:
+        for n in modules:
+            hosts[n].load(f)
+            for name, value in f.get("free", {}).get(n, {}).items():
+                objs[n].set_input(name, value)
+        for n, slot in steps:
+            if slot is None:
+                objs[n].update(f["dt"])
+            else:
+                objs[n].update_phase(slot, f["dt"])
+        for n in modules:
+            for name in f.get("calls", {}).get(n, []):
+                objs[n].call_entry(name)
+        snap = {}
+        for n in modules:
+            snap[n] = _snapshot(objs[n], hosts[n])
+        out.append(snap)
+    return out
+
+
+def verify_system(modules: dict[str, ir.Module], frames: int = 200, seed: int = 1, tol: float = 0.0,
+                  schedule: list[tuple[str, str | None]] | None = None) -> list[tuple]:
+    """Interpreter vs generated Python for a connected system; (frame, logic.name, interpreter, python) differences."""
+    seq = random_system_frames(modules, frames, seed)
+    a, b = run_system(modules, seq, "interp", schedule), run_system(modules, seq, "python", schedule)
+    diffs = []
+    for i, (fa, fb) in enumerate(zip(a, b)):
+        for logic in fa:
+            for d in compare([fa[logic]], [fb[logic]], tol):
+                diffs.append((i, f"{logic}.{d[1]}", d[2], d[3]))
+    return diffs

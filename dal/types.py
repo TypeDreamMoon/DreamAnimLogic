@@ -61,6 +61,9 @@ ERROR = _ErrorType()
 HIT = Type("hit")
 HIT_MEMBERS = {"blocking": "bool", "point": "vec3", "normal": "vec3", "distance": "float", "time": "float"}
 
+# v3: the type of a call that returns nothing (a method without `->`); never stored
+VOID = Type("void")
+
 # v1: the type of a montage reference in a host command (compile-time only, never a value)
 MONTAGE = Type("montage")
 

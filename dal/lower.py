@@ -65,6 +65,9 @@ class Lowerer:
         return S.MemberRef(pos, S.NameRef(pos, base), field, pos)
 
     # ---- entry ----------------------------------------------------------------------------------------------------------
+    PHASE_ORDER = ("pre_movement", "after_movement", "after_anim")
+    SUGAR_CALLS = ("start", "stop", "open", "close", "consume")
+
     def run(self) -> S.SourceUnit:
         sugar = (S.TimerDecl, S.WindowDecl, S.BufferDecl, S.ComboDecl)
         has_sugar = any(isinstance(d, sugar) for d in self.unit.decls)
@@ -103,19 +106,30 @@ class Lowerer:
 
         # rewrite user code (and the generated code, which may contain user expressions)
         final: list[S.Decl] = []
-        update: S.UpdateDecl | None = None
+        updates: list[S.UpdateDecl] = []
         for d in out:
             if isinstance(d, S.UpdateDecl):
-                update = d
+                updates.append(d)
                 continue
             final.append(self.rewrite_decl(d))
-        logic_pos = next((d.pos for d in self.unit.decls if isinstance(d, S.LogicDecl)), Pos(1, 1, 2))
-        if update is None and (self.pre or self.prefix):
-            update = S.UpdateDecl(logic_pos, self.dt_name, logic_pos, [])
-        if update is not None:
-            body = self.rewrite_stmts(self.prefix) + self.rewrite_stmts(update.body)
-            update = replace(update, pre=self.pre + self.rewrite_stmts(update.pre), body=body)
-            final.append(update)
+        logic = next((d for d in self.unit.decls if isinstance(d, S.LogicDecl)), None)
+        logic_pos = logic.pos if logic is not None else Pos(1, 1, 2)
+        if not updates and (self.pre or self.prefix):
+            updates = [S.UpdateDecl(logic_pos, self.dt_name, logic_pos, [])]
+        # timers, windows and combos belong to the earliest tick slot of the logic (events are handled there too)
+        default_phase = (logic.phase if logic is not None and logic.kind == "actor" else None) or "pre_movement"
+
+        def slot(u: S.UpdateDecl) -> int:
+            ph = (u.phase if logic is not None and logic.kind == "actor" else None) or default_phase
+            return self.PHASE_ORDER.index(ph)
+
+        first = min(updates, key=slot) if updates else None
+        for u in updates:
+            if u is first:
+                body = self.rewrite_stmts(self.prefix) + self.rewrite_stmts(u.body)
+                final.append(replace(u, pre=self.pre + self.rewrite_stmts(u.pre), body=body))
+            else:
+                final.append(replace(u, pre=self.rewrite_stmts(u.pre), body=self.rewrite_stmts(u.body)))
 
         if self.diags:
             raise DalError(self.diags)
@@ -129,7 +143,7 @@ class Lowerer:
     def _any_call_stmt(self) -> bool:
         def walk(stmts):
             for s in stmts:
-                if isinstance(s, S.CallStmt):
+                if isinstance(s, S.CallStmt) and s.callee in self.SUGAR_CALLS:
                     return True
                 if isinstance(s, S.IfStmt) and (walk(s.then) or walk(s.orelse)):
                     return True
@@ -287,7 +301,7 @@ class Lowerer:
     BUFFER_MEMBERS = ("pending", "empty", "remaining")
 
     def rewrite_decl(self, d: S.Decl) -> S.Decl:
-        if isinstance(d, S.FnDecl):
+        if isinstance(d, (S.FnDecl, S.MethodDecl)):
             return replace(d, body=self.rewrite_stmts(d.body))
         if isinstance(d, S.EntryDecl):
             return replace(d, body=self.rewrite_stmts(d.body))
@@ -310,8 +324,10 @@ class Lowerer:
             return self.rewrite_call_stmt(s)
         if isinstance(s, S.LetStmt):
             return replace(s, init=self.rewrite_expr(s.init))
-        if isinstance(s, S.AssignStmt):
+        if isinstance(s, (S.AssignStmt, S.MemberAssignStmt)):
             return replace(s, value=self.rewrite_expr(s.value))
+        if isinstance(s, S.ExprStmt):
+            return replace(s, expr=self.rewrite_expr(s.expr))
         if isinstance(s, S.IfStmt):
             return replace(s, cond=self.rewrite_expr(s.cond), then=self.rewrite_stmts(s.then), orelse=self.rewrite_stmts(s.orelse))
         if isinstance(s, S.ForStmt):
@@ -326,9 +342,8 @@ class Lowerer:
         pos = s.pos
         want = {"start": ("timer", "buffer"), "stop": ("timer", "buffer"), "open": ("window",), "close": ("window",), "consume": ("buffer",)}
         if s.callee not in want:
-            self.err("DAL2011", f"'{s.callee}(...);' is not a statement: calls are only statements for timers, windows and buffers "
-                                f"(start, stop, open, close, consume) and host commands (host.jump();)", pos)
-            return []
+            # a call of a method (the checker knows whether there is one)
+            return [replace(s, args=[self.rewrite_expr(a) for a in s.args])]
         if not s.args or not isinstance(s.args[0], S.NameRef) or self.kinds.get(s.args[0].name) not in want[s.callee]:
             what = " or ".join(want[s.callee])
             self.err("DAL3056", f"{s.callee}() takes a {what} as its first argument", pos)
@@ -374,6 +389,8 @@ class Lowerer:
             return replace(e, args=[self.rewrite_expr(a) for a in e.args])
         if isinstance(e, S.HostCallExpr):
             return replace(e, args=[self.rewrite_expr(a) for a in e.args])
+        if isinstance(e, S.MemberCallExpr):
+            return replace(e, base=self.rewrite_expr(e.base), args=[self.rewrite_expr(a) for a in e.args])
         return e
 
 

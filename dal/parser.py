@@ -14,6 +14,8 @@ from .lexer import RESERVED_WORDS, Token, tokenize
 ASSIGN_OPS = ("=", "+=", "-=", "*=", "/=")
 
 HANDLER_EVENTS = ("notify", "notify_begin", "notify_end", "montage_ended", "montage_blending_out", "input")
+LIFECYCLE_EVENTS = ("begin_play", "end_play")         # `on begin_play { ... }`: no name, not an event of the queue
+PHASES = ("pre_movement", "after_movement", "after_anim")
 INPUT_PHASES = ("started", "triggered", "ongoing", "completed", "canceled")
 LOGIC_KINDS = ("anim", "actor")
 
@@ -122,13 +124,20 @@ class Parser:
             return self.parse_action()
         if t.kind == "IDENT" and t.text == "use":
             return self.parse_use()
+        if t.kind == "IDENT" and t.text == "pub" and self.peek().kind == "IDENT" and self.peek().text in ("method", "view"):
+            self.advance()
+            return self.parse_method(pub=True)
+        if t.kind == "IDENT" and t.text in ("method", "view") and self.peek().kind == "IDENT":
+            return self.parse_method(pub=False)
+        if t.kind == "IDENT" and t.text == "peer" and self.peek().kind == "IDENT":
+            return self.parse_peer()
         if t.kind == "IDENT" and t.text == "struct":
             return self.parse_struct()
         if t.kind == "IDENT" and t.text == "tags" and self.peek().kind == "IDENT":
             return self.parse_tags()
         raise self.error(
             "DAL2001",
-            "expected a declaration (use, logic, enum, struct, tags, const, param, input, state, fn, extern, update, entry, "
+            "expected a declaration (use, logic, enum, struct, tags, const, param, input, state, fn, method, view, peer, extern, update, entry, "
             f"on, timer, window, buffer, combo, montage, action), found {self.describe(t)}",
         )
 
@@ -163,6 +172,28 @@ class Parser:
             fields.append(S.FieldDecl(f.text, type_name, f.pos, type_pos, init, derived))
         self.advance()
         return fields
+
+    def parse_method(self, pub: bool) -> S.MethodDecl:
+        kw = self.advance()      # method | view
+        is_view = kw.text == "view"
+        name = self.ident("a view name" if is_view else "a method name")
+        params = self.parse_params()
+        ret_name = ret_pos = None
+        if self.tok.is_op("->"):
+            self.advance()
+            ret_name, ret_pos = self.parse_type_name()
+        elif is_view:
+            raise self.error("DAL2001", "expected '->' (a view declares the type it returns: view name(...) -> float)")
+        body = self.parse_block()
+        return S.MethodDecl(kw.pos, name.text, params, ret_name, ret_pos, body, pub, is_view, name_pos=name.pos)
+
+    def parse_peer(self) -> S.PeerDecl:
+        kw = self.advance()      # peer
+        name = self.ident("a peer name")
+        self.expect_op(":", "after the peer name")
+        type_name, type_pos = self.parse_type_name()
+        self.expect_op(";", "after the peer")
+        return S.PeerDecl(kw.pos, name.text, type_name, type_pos, name_pos=name.pos)
 
     def parse_tags(self) -> S.TagsDecl:
         kw = self.advance()      # tags
@@ -210,8 +241,20 @@ class Parser:
                 raise self.error("DAL2020", f"expected the logic kind 'anim' or 'actor', found {self.describe(k)}")
             self.advance()
             kind, kind_pos = k.text, k.pos
+        phase, phase_pos = self.parse_phase()
         self.expect_op(";", "after the logic name")
-        return S.LogicDecl(kw.pos, name.text, kind, kind_pos, name_pos=name.pos)
+        return S.LogicDecl(kw.pos, name.text, kind, kind_pos, phase, phase_pos, name_pos=name.pos)
+
+    def parse_phase(self) -> tuple[str | None, Pos | None]:
+        """Optional `in pre_movement | after_movement | after_anim`."""
+        if not self.tok.is_kw("in"):
+            return None, None
+        self.advance()
+        t = self.tok
+        if t.kind != "IDENT" or t.text not in PHASES:
+            raise self.error("DAL2023", f"expected a tick slot ({', '.join(PHASES)}) after 'in', found {self.describe(t)}")
+        self.advance()
+        return t.text, t.pos
 
     def parse_enum(self) -> S.EnumDecl:
         kw = self.advance()
@@ -259,16 +302,36 @@ class Parser:
         type_name, type_pos = self.parse_type_name()
         binding = None
         default = None
+        peer = None
         if self.tok.is_op("<") and self.peek().is_op("-") and self.peek().pos.col == self.tok.pos.col + 1 \
                 and self.peek().pos.line == self.tok.pos.line:
             self.advance()
             self.advance()
-            binding = self.parse_host_binding()
+            if self.tok.kind == "IDENT":
+                peer = self.parse_peer_binding()
+            else:
+                binding = self.parse_host_binding()
         elif self.tok.is_op("="):
             self.advance()
             default = self.parse_expr()
         self.expect_op(";", "after the input")
-        return S.InputDecl(kw.pos, name.text, type_name, type_pos, binding, default, name_pos=name.pos)
+        return S.InputDecl(kw.pos, name.text, type_name, type_pos, binding, default, peer, name_pos=name.pos)
+
+    def parse_peer_binding(self) -> S.PeerBinding:
+        peer = self.ident("a peer name")
+        path: list[str] = []
+        path_pos: list[Pos] = []
+        while self.tok.is_op("."):
+            self.advance()
+            m = self.tok
+            if m.kind != "IDENT":
+                raise self.error("DAL2001", f"expected a member name after '.', found {self.describe(m)}")
+            self.advance()
+            path.append(m.text)
+            path_pos.append(m.pos)
+        if not path:
+            raise self.error("DAL2001", f"expected '.<state>' after the peer name '{peer.text}' (input X: T <- {peer.text}.State;)", self.tok.pos)
+        return S.PeerBinding(peer.text, path, peer.pos, path_pos)
 
     def parse_host_binding(self) -> S.HostBinding:
         h = self.tok
@@ -362,8 +425,9 @@ class Parser:
     def parse_update(self) -> S.UpdateDecl:
         kw = self.advance()
         dt_name, dt_pos = self.parse_dt_param("update")
+        phase, phase_pos = self.parse_phase()
         body = self.parse_block()
-        return S.UpdateDecl(kw.pos, dt_name, dt_pos, body)
+        return S.UpdateDecl(kw.pos, dt_name, dt_pos, body, phase=phase, phase_pos=phase_pos)
 
     def parse_entry(self) -> S.EntryDecl:
         kw = self.advance()
@@ -417,6 +481,11 @@ class Parser:
                 after = self.tokens[j + 1]
                 if after.kind == "OP" and after.text in ASSIGN_OPS and j > self.i:
                     return self.parse_member_assign()
+                if after.is_op("(") and j > self.i:
+                    # Peer.Method(args);
+                    call = self.parse_postfix()
+                    self.expect_op(";", "after the call")
+                    return S.ExprStmt(t.pos, call)
         if t.kind in ("INT", "FLOAT", "STRING") or t.kind == "IDENT" or t.is_op("("):
             raise self.error(
                 "DAL2011",
@@ -532,8 +601,11 @@ class Parser:
         t = self.tok
         if not (t.kind == "IDENT" or t.is_kw("input")):
             raise self.error("DAL2001", f"expected an event name after 'on', found {self.describe(t)}")
+        if t.kind == "IDENT" and t.text in LIFECYCLE_EVENTS:
+            self.advance()
+            return S.HandlerDecl(kw.pos, t.text, "", t.pos, None, self.parse_block())
         if t.text not in HANDLER_EVENTS:
-            raise self.error("DAL2021", f"unknown event '{t.text}'; events: {', '.join(HANDLER_EVENTS)}")
+            raise self.error("DAL2021", f"unknown event '{t.text}'; events: {', '.join(HANDLER_EVENTS + LIFECYCLE_EVENTS)}")
         self.advance()
         name = self.ident("the name the event is about")
         phase = None
@@ -794,32 +866,45 @@ class Parser:
             if t.is_op("("):
                 if isinstance(expr, S.NameRef):
                     self.advance()
-                    args: list[S.Expr] = []
-                    names: list[str | None] = []
-                    name_pos: list[Pos | None] = []
-                    if not self.tok.is_op(")"):
-                        while True:
-                            a = self.tok
-                            if a.kind == "IDENT" and self.peek().is_op(":") and a.text not in RESERVED_WORDS:
-                                self.advance()
-                                self.advance()
-                                names.append(a.text)
-                                name_pos.append(a.pos)
-                            else:
-                                names.append(None)
-                                name_pos.append(None)
-                            args.append(self.parse_expr())
-                            if self.tok.is_op(","):
-                                self.advance()
-                                continue
-                            break
-                    self.expect_op(")", "to close the argument list")
+                    args, names, name_pos = self.parse_call_args()
                     named = any(n is not None for n in names)
                     expr = S.CallExpr(expr.pos, expr.name, args, names if named else None, name_pos if named else None)
+                    continue
+                if isinstance(expr, S.MemberRef):
+                    # Peer.Method(args), curve.eval(x), map.has(k): the checker decides what the base may be
+                    self.advance()
+                    args, names, _name_pos = self.parse_call_args()
+                    if any(n is not None for n in names):
+                        raise self.error("DAL4054", "named arguments are only used to build structs: Name(member: value)", t.pos)
+                    expr = S.MemberCallExpr(expr.pos, expr.base, expr.field, args, expr.field_pos)
                     continue
                 raise self.error("DAL2004", "only functions can be called; write f(x), not x.f(...)", t.pos)
             break
         return expr
+
+    def parse_call_args(self) -> tuple[list[S.Expr], list[str | None], list[Pos | None]]:
+        """Arguments after '(' up to and including ')': `a, b` or, for a struct, `member: a, other: b`."""
+        args: list[S.Expr] = []
+        names: list[str | None] = []
+        name_pos: list[Pos | None] = []
+        if not self.tok.is_op(")"):
+            while True:
+                a = self.tok
+                if a.kind == "IDENT" and self.peek().is_op(":") and a.text not in RESERVED_WORDS:
+                    self.advance()
+                    self.advance()
+                    names.append(a.text)
+                    name_pos.append(a.pos)
+                else:
+                    names.append(None)
+                    name_pos.append(None)
+                args.append(self.parse_expr())
+                if self.tok.is_op(","):
+                    self.advance()
+                    continue
+                break
+        self.expect_op(")", "to close the argument list")
+        return args, names, name_pos
 
     def parse_primary(self) -> S.Expr:
         t = self.tok

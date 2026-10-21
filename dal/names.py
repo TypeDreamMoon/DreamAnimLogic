@@ -30,6 +30,10 @@ UE_RESERVED = frozenset(
     DeltaSeconds DeltaTime TickType ThisTickFunction EndPlayReason""".split()
 )
 
+# The locals of the generated sampling code.  A peer may carry one of these names (`peer Character: AlsCharacter;`): the
+# generator renames its own local then.
+SAMPLE_LOCALS = frozenset("Pawn Character Movement World PlayerInput LocalPlayer Subsystem Controller".split())
+
 # Members of UAnimInstance that a state/input/param could shadow.
 ANIM_INSTANCE_MEMBERS = frozenset(
     """ActiveAnimNotifyEventReference ActiveAnimNotifyState Bones ComponentSpaceFlags CurrentSkeleton NotifyQueue
@@ -50,7 +54,8 @@ ACTOR_COMPONENT_MEMBERS = frozenset(
 
 # Attributes of the generated Python class (and its LogicBase) that a DAL name must not hide.
 PY_CLASS_API = frozenset(
-    "reset snapshot overrides set_input sample_inputs call_entry values host update".split()
+    ("reset snapshot overrides set_input sample_inputs call_entry values host update update_phase begin_play end_play "
+     "peers connect unresolved variables dal_get dal_call dal_enqueue take_commands post_event").split()
 )
 
 RESERVED_PREFIXES = ("Dal_", "DAL_", "DalHost_", "DalNotify_", "DalAction_", "DalMontage_", "AnimNotify_", "Montage_", "Native", "Blueprint")
@@ -59,13 +64,13 @@ RESERVED_PREFIXES = ("Dal_", "DAL_", "DalHost_", "DalNotify_", "DalAction_", "Da
 _GENERATED_NAME = re.compile(r"^b?Dal[A-Z_]")
 
 
-def reserved_reason(name: str, allow_py_keyword: bool = False) -> str | None:
+def reserved_reason(name: str, allow_py_keyword: bool = False, allow_sample_locals: bool = False) -> str | None:
     """Why ``name`` cannot be declared, or None if it is fine."""
     if not allow_py_keyword and name in PY_RESERVED:
         return "it is a Python keyword and the Python backend would emit it as an identifier"
     if name in CPP_KEYWORDS:
         return "it is a C++ keyword"
-    if name in UE_RESERVED:
+    if name in UE_RESERVED and not (allow_sample_locals and name in SAMPLE_LOCALS):
         return "it is a macro or symbol used by Unreal Engine headers"
     if name in PY_CLASS_API:
         return "it is an attribute of the generated class API"

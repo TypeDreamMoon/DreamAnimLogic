@@ -183,8 +183,13 @@ class ParserTests(unittest.TestCase):
     def test_host_only_in_input_bindings(self):
         self.assertEqual(parse_error("logic A;\nupdate(dt) { X = host.time; }")[0], "DAL2012")
 
-    def test_method_call_syntax_is_rejected(self):
-        self.assertEqual(parse_error("logic A;\nconst C: float = x.f(1);")[0], "DAL2004")
+    def test_calls_on_members_parse_and_the_checker_rejects_what_has_no_methods(self):
+        unit = parse("logic A;\nconst C: float = x.f(1);")
+        self.assertIsInstance(unit.decls[1].init, S.MemberCallExpr)
+        import dal
+        with self.assertRaises(DalError) as cm:
+            dal.check_source("logic A;\nconst C: float = x.f(1);", "t.dal")
+        self.assertEqual(cm.exception.first.code, "DAL2004")
 
     def test_else_if_nests(self):
         unit = parse("logic A; update(dt) { if (a) { } else if (b) { } else { } }")

@@ -16,7 +16,7 @@ from . import runtime as rt
 from . import values as vals
 from .builtins import BUILTINS, CONSTRUCTORS
 from .hostapi import HostV1
-from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, EnumType, StructType, TagType, Type, zero_value
+from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, VOID, EnumType, StructType, TagType, Type, zero_value
 
 
 class InterpError(Exception):
@@ -70,10 +70,12 @@ def command_arg(expr: ir.Expr, value):
 class Evaluator:
     """Expression/statement evaluator.  ``env`` maps local names; ``owner`` supplies inputs/states/params."""
 
-    def __init__(self, owner=None, externs: dict[str, Callable] | None = None, funcs: dict[str, ir.FnDef] | None = None):
+    def __init__(self, owner=None, externs: dict[str, Callable] | None = None, funcs: dict[str, ir.FnDef] | None = None,
+                 methods: dict[str, ir.MethodDef] | None = None):
         self.owner = owner
         self.externs = externs or {}
         self.funcs = funcs or {}
+        self.methods = methods or {}
 
     # ---- expressions ----------------------------------------------------------
     def ev(self, e: ir.Expr, env: dict):
@@ -132,6 +134,12 @@ class Evaluator:
             return self.owner.host_query(e, [self.ev(a, env) for a in e.args])
         if k is ir.Valid:
             return bool(self.ev(e.x, env))
+        if k is ir.CallMethod or k is ir.CallView:
+            return self.call_method(self.methods[e.name], [self.ev(a, env) for a in e.args])
+        if k is ir.CallPeer:
+            if self.owner is None:
+                raise InterpError("peer calls need a running logic")
+            return self.owner.peer_call(e, [self.ev(a, env) for a in e.args])
         if k is ir.MakeStruct:
             return vals.new_struct(e.ty, {n: vals.copy_value(self.ev(v, env)) for n, v in e.fields})
         if k is ir.MontageRef:
@@ -218,11 +226,22 @@ class Evaluator:
                 raise _ReturnValue(None if s.value is None else vals.copy_value(self.ev(s.value, env)))
             elif k is ir.Command:
                 self.owner.emit_command(s.name, [command_arg(a, self.ev(a, env)) for a in s.args])
+            elif k is ir.ExprStmt:
+                self.ev(s.expr, env)
             elif k is ir.For:
                 for i in range(s.lo, s.hi):
                     env[s.var] = i
                     self.run_block(s.body, env)
                 env.pop(s.var, None)
+
+    def call_method(self, m: ir.MethodDef, args: list):
+        """Run a method or a view; the result is None for a method without one."""
+        env = {n: a for (n, _), a in zip(m.params, args)}
+        try:
+            self.run_block(m.body, env)
+        except _ReturnValue as r:
+            return r.value
+        return None
 
     def call_fn(self, fn: ir.FnDef, args: list):
         env = {n: a for (n, _), a in zip(fn.params, args)}
@@ -246,14 +265,18 @@ def eval_const(expr: ir.Expr):
 class Interpreter:
     """Runs a checked module.  Mirrors the API of the generated Python class."""
 
-    def __init__(self, module: ir.Module, host=None, externs: dict[str, Callable] | None = None, **params):
+    def __init__(self, module: ir.Module, host=None, externs: dict[str, Callable] | None = None, peers: dict | None = None, **params):
         self.module = module
         self.host = host if host is not None else HostV1()
         self.overrides: dict[str, object] = {}
         self.values: dict[str, object] = {}
+        self.peers: dict[str, object] = dict(peers) if peers else {}       # name -> the other logic (an Interpreter or a generated class)
+        self.unresolved: set[str] = set()                                  # peers that were used but not connected
         self._dt = 0.0
         self._pending: list[tuple] = []
         self._cmds: list[tuple] = []
+        self._peer_queue: list[tuple] = []
+        self._begun = False
         self._params = {}
         for p in module.params:
             self._params[p.name] = p.default
@@ -262,7 +285,7 @@ class Interpreter:
             if p is None:
                 raise InterpError(f"unknown param {name!r}")
             self._params[name] = coerce(p.ty, val)
-        self.ev = Evaluator(self, externs, {f.name: f for f in module.funcs})
+        self.ev = Evaluator(self, externs, {f.name: f for f in module.funcs}, {x.name: x for x in module.methods})
         self.reset()
 
     def reset(self) -> None:
@@ -275,6 +298,42 @@ class Interpreter:
         self._dt = 0.0
         self._pending = []
         self._cmds = []
+        self._peer_queue = []
+        self._begun = False
+
+    # ---- peers ------------------------------------------------------------------------------------
+    def connect(self, name: str, other) -> None:
+        self.peers[name] = other
+
+    def dal_get(self, name: str):
+        """Another logic reads a state, input or param of this one."""
+        return self.values[name]
+
+    def dal_call(self, method: str, *args):
+        m = self.module.find_method(method)
+        if m is None or not m.pub or m.is_view:
+            raise InterpError(f"no pub method {method!r}")
+        return self.ev.call_method(m, [coerce(t, a) for (_n, t), a in zip(m.params, args)])
+
+    def dal_enqueue(self, method: str, args: tuple) -> None:
+        """A queued call from an actor logic: it runs at the start of the next update."""
+        self._peer_queue.append((method, tuple(args)))
+
+    def peer_call(self, e: ir.CallPeer, args: list):
+        other = self.peers.get(e.peer)
+        if other is None:
+            self.unresolved.add(e.peer)
+            return None if e.ty is VOID else vals.default_of(e.ty) if isinstance(e.ty, StructType) else zero_value(e.ty)
+        if e.queued:
+            other.dal_enqueue(e.method, tuple(args))
+            return None
+        result = other.dal_call(e.method, *args)
+        return None if e.ty is VOID else coerce(e.ty, result)
+
+    def _drain_peer_calls(self) -> None:
+        queue, self._peer_queue = self._peer_queue, []
+        for method, args in queue:
+            self.dal_call(method, *args)
 
     # ---- host traffic ------------------------------------------------------------------------------
     def emit_command(self, name: str, args: list) -> None:
@@ -309,13 +368,27 @@ class Interpreter:
     # the generated class names these the same way
     def set_input(self, name: str, value) -> None:
         d = self.module.find_input(name)
-        if d is None or d.host is not None:
+        if d is None or not d.is_free:
             raise InterpError(f"{name!r} is not a free input")
         self.values[name] = coerce(d.ty, value)
 
     def sample_inputs(self) -> None:
         h = self.host
         for i in self.module.inputs:
+            if i.peer is not None:
+                if i.name in self.overrides:
+                    self.values[i.name] = coerce(i.ty, self.overrides[i.name])
+                    continue
+                other = self.peers.get(i.peer.peer)
+                if other is None:
+                    self.unresolved.add(i.peer.peer)
+                    self.values[i.name] = zero_value(i.ty)
+                    continue
+                v = other.dal_get(i.peer.path[0])
+                for member in i.peer.path[1:]:
+                    v = getattr(v, member)
+                self.values[i.name] = coerce(i.ty, v)
+                continue
             if i.host is None:
                 continue
             if i.name in self.overrides:
@@ -356,23 +429,63 @@ class Interpreter:
 
     # ---- running ---------------------------------------------------------------------------------------
     def update(self, dt: float) -> None:
-        """sample inputs, collect events, tick timers, run handlers, run the body, flush the commands."""
+        """Every tick slot of the logic, in order (one for a program without tick slots):
+        sample inputs, collect events, tick timers, run handlers, run the body, flush the commands."""
+        slots = [u.phase for u in self.module.updates] or [self.module.default_phase]
+        for phase in slots:
+            self.update_phase(phase, dt)
+
+    def update_phase(self, phase: str, dt: float) -> None:
+        """One tick slot.  The first slot of the logic also takes the queued peer calls, the events and the timers."""
+        m = self.module
+        u = next((x for x in m.updates if x.phase == phase), None)
+        first = phase == (m.updates[0].phase if m.updates else m.default_phase)
+        if u is None and not first:
+            return
+        self._ensure_begun()
         self.sample_inputs()
-        events = self._collect_events() if self.module.handlers else []
         self._dt = float(dt)
-        u = self.module.update
+        events: list[tuple] = []
+        if first:
+            self._drain_peer_calls()
+            events = self._collect_events() if any(h.event not in ("begin_play", "end_play") for h in m.handlers) else []
+            if u is not None:
+                self._run(u.pre, {u.dt_name: self._dt})
+            self._dispatch(events)
         if u is not None:
-            try:
-                self.ev.run_block(u.pre, {u.dt_name: self._dt})
-            except _ReturnValue:
-                pass
-        self._dispatch(events)
-        if u is not None:
-            try:
-                self.ev.run_block(u.body, {u.dt_name: self._dt})
-            except _ReturnValue:
-                pass
+            self._run(u.body, {u.dt_name: self._dt})
         self.flush()
+
+    def _run(self, body: list, env: dict) -> None:
+        try:
+            self.ev.run_block(body, env)
+        except _ReturnValue:
+            pass
+
+    # ---- lifecycle -------------------------------------------------------------------------------------
+    def _ensure_begun(self) -> None:
+        if not self._begun:
+            self.begin_play()
+
+    def begin_play(self) -> None:
+        """Run the `on begin_play` handlers once (update does it itself before the first frame when the host did not)."""
+        if self._begun:
+            return
+        self._begun = True
+        handlers = [h for h in self.module.handlers if h.event == "begin_play"]
+        if handlers:
+            self.sample_inputs()
+            for h in handlers:
+                self._run(h.body, {})
+            self.flush()
+
+    def end_play(self) -> None:
+        handlers = [h for h in self.module.handlers if h.event == "end_play"]
+        if handlers:
+            self.sample_inputs()
+            for h in handlers:
+                self._run(h.body, {})
+            self.flush()
 
     def call_entry(self, name: str) -> None:
         for e in self.module.entries:

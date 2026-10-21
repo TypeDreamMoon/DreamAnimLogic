@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from . import ir
 from .builtins import BUILTIN_CONSTS, BUILTINS
-from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, EnumType, StructType, TagType, Type, py_member_name
+from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, VOID, EnumType, StructType, TagType, Type, py_member_name, zero_value
 
 INDENT = "    "
 
@@ -138,6 +138,16 @@ class PyGen:
             return f"({self.x(e.a)} if {self.x(e.c)} else {self.x(e.b)})"
         if k is ir.Valid:
             return f"bool({self.x(e.x)})"
+        if k is ir.CallMethod or k is ir.CallView:
+            x = self.m.find_method(e.name)
+            name = e.name if x.pub else ("_v_" if x.is_view else "_m_") + e.name       # type: ignore[union-attr]
+            return f"self.{name}({', '.join(unparen(self.x(a)) for a in e.args)})"
+        if k is ir.CallPeer:
+            args = "(" + "".join(self.val(a) + ", " for a in e.args) + ")"
+            if e.ty is VOID:
+                return f"self._peer_call({e.peer!r}, {e.method!r}, {args}, None, {e.queued})"
+            default = py_value(e.ty, zero_value(e.ty))
+            return f"{py_coercer(e.ty)}(self._peer_call({e.peer!r}, {e.method!r}, {args}, {default}))"
         if k is ir.MakeStruct:
             return f"{e.ty.name}(" + ", ".join(f"{n}={self.val(v)}" for n, v in e.fields) + ")"
         if k is ir.Member:
@@ -230,6 +240,8 @@ class PyGen:
                         out.append(f"{pad}else:")
                         out.extend(self.stmts(cur.orelse, depth + 1) or [f"{pad}{INDENT}pass"])
                     break
+            elif isinstance(s, ir.ExprStmt):
+                out.append(f"{pad}{unparen(self.x(s.expr))}")
             elif isinstance(s, ir.Return):
                 out.append(f"{pad}return" + (f" {self.val(s.value)}" if s.value is not None else ""))
             elif isinstance(s, ir.Command):
@@ -364,6 +376,8 @@ class PyGen:
             spec = None
             if i.host:
                 spec = f"host.{i.host.item}" + (f"({i.host.arg!r})" if i.host.arg is not None else "")
+            elif i.peer:
+                spec = f"peer.{i.peer.peer}." + ".".join(i.peer.path)
             L.append(f"{INDENT*2}({i.name!r}, {i.ty.name!r}, {spec!r}),")
         L.append(f"{INDENT})")
         L.append(f"{INDENT}DAL_STATES = (")
@@ -375,17 +389,36 @@ class PyGen:
         if coerced:
             L.append(f"{INDENT}DAL_TYPES = {{" + ", ".join(f"{t.name!r}: {py_coercer(t)}" for t in coerced) + "}")
         traffic = bool(m.handlers) or m.uses_commands
+        lifecycle = m.lifecycle
+        event_handlers = [(k, h) for k, h in enumerate(m.handlers) if h.event not in ("begin_play", "end_play")]
+        phased = m.phases_explicit or len(m.updates) > 1
+        queue_target = m.kind == "anim" and any(x.pub and not x.is_view for x in m.methods)
         if m.kind != "anim" or m.handlers or m.montages or m.actions:
             L.append(f"{INDENT}DAL_KIND = {m.kind!r}")
-        if m.handlers:
+        if event_handlers:
             L.append(f"{INDENT}DAL_HANDLERS = (")
-            for k, h in enumerate(m.handlers):
+            for k, h in event_handlers:
                 vt = h.params[0][1].name if h.event == "input" else ""
                 L.append(f"{INDENT*2}({h.event!r}, {h.name!r}, {h.phase!r}, '_h{k}', {vt!r}),")
             L.append(f"{INDENT})")
+        if m.peers:
+            L.append(f"{INDENT}DAL_PEERS = (" + "".join(f"({p.name!r}, {p.logic!r}), " for p in m.peers) + ")")
+        pub_methods = [x for x in m.methods if x.pub and not x.is_view]
+        pub_views = [x for x in m.methods if x.pub and x.is_view]
+        if pub_methods:
+            L.append(f"{INDENT}DAL_METHODS = (" + "".join(f"{x.name!r}, " for x in pub_methods) + ")")
+        if pub_views:
+            L.append(f"{INDENT}DAL_VIEWS = (" + "".join(f"{x.name!r}, " for x in pub_views) + ")")
+        if phased:
+            names = [u.phase for u in m.updates] or [m.default_phase]
+            L.append(f"{INDENT}DAL_PHASES = (" + "".join(f"{n!r}, " for n in names) + ")")
         L.append("")
-        L.append(f"{INDENT}def __init__(self, host=None, **params):")
-        L.append(f"{INDENT*2}_rt.LogicBase.__init__(self, host, params)")
+        if m.peers:
+            L.append(f"{INDENT}def __init__(self, host=None, peers=None, **params):")
+            L.append(f"{INDENT*2}_rt.LogicBase.__init__(self, host, params, peers)")
+        else:
+            L.append(f"{INDENT}def __init__(self, host=None, **params):")
+            L.append(f"{INDENT*2}_rt.LogicBase.__init__(self, host, params)")
         L.append(f"{INDENT*2}self.reset()")
         L.append("")
         L.append(f"{INDENT}def reset(self):")
@@ -394,16 +427,22 @@ class PyGen:
         if traffic:
             L.append(f"{INDENT*2}self._pending = []")
             L.append(f"{INDENT*2}self._cmds = []")
+        if any(h.event == "begin_play" for h in lifecycle):
+            L.append(f"{INDENT*2}self._begun = False")
+        if queue_target:
+            L.append(f"{INDENT*2}self._peer_queue = []")
         for i in m.inputs:
             L.append(f"{INDENT*2}self.{i.name} = {py_value(i.ty, i.default)}")
         for s in m.states:
             L.append(f"{INDENT*2}self.{s.name} = {py_value(s.ty, s.default)}")
         L.append("")
         L.append(f"{INDENT}def _sample(self):")
-        L.append(f'{INDENT*2}"""Read the host-bound inputs (a frame snapshot); overrides win over the host."""')
+        L.append(f'{INDENT*2}"""Read the host-bound and peer-bound inputs (a frame snapshot); overrides win over both."""')
         bound = [i for i in m.inputs if i.host]
+        peered = [i for i in m.inputs if i.peer]
         if bound:
             L.append(f"{INDENT*2}h = self.host")
+        if bound or peered:
             L.append(f"{INDENT*2}ov = self.overrides")
         for i in bound:
             h = i.host
@@ -431,28 +470,106 @@ class PyGen:
             L.append(
                 f"{INDENT*2}self.{i.name} = " + conv.format(f"ov[{i.name!r}] if {i.name!r} in ov else {src}")
             )
-        if not bound:
+        for i in peered:
+            pu = i.peer
+            assert pu is not None
+            path = "(" + "".join(f"{x!r}, " for x in pu.path[1:]) + ")"
+            L.append(f"{INDENT*2}if {i.name!r} in ov:")
+            L.append(f"{INDENT*3}self.{i.name} = {py_coercer(i.ty)}(ov[{i.name!r}])")
+            L.append(f"{INDENT*2}else:")
+            L.append(f"{INDENT*3}p = self.peers.get({pu.peer!r})")
+            L.append(f"{INDENT*3}if p is None:")
+            L.append(f"{INDENT*4}self.unresolved.add({pu.peer!r})")
+            L.append(f"{INDENT*4}self.{i.name} = {py_value(i.ty, i.default)}")
+            L.append(f"{INDENT*3}else:")
+            L.append(f"{INDENT*4}self.{i.name} = {py_coercer(i.ty)}(_rt.path_get(p.dal_get({pu.path[0]!r}), {path}))")
+        if not bound and not peered:
             L.append(f"{INDENT*2}pass")
         L.append("")
 
-        u = m.update
-        dt_name = u.dt_name if u is not None else "dt"
-        L.append(f"{INDENT}def update(self, {dt_name}):")
-        L.append(f'{INDENT*2}"""One frame: sample the inputs, collect events, tick timers, run handlers, run the body, flush commands."""')
-        L.append(f"{INDENT*2}self._sample()")
-        if m.handlers:
-            L.append(f"{INDENT*2}events = self._collect_events()")
-        L.append(f"{INDENT*2}{dt_name} = float({dt_name})")
-        L.append(f"{INDENT*2}self._dt = {dt_name}")
-        if u is not None:
-            L.extend(self.stmts(u.pre, 2))
-        if m.handlers:
-            L.append(f"{INDENT*2}self._dispatch(events)")
-        if u is not None:
-            L.extend(self.stmts(u.body, 2))
-        if m.uses_commands:
-            L.append(f"{INDENT*2}self._flush()")
-        L.append("")
+        # ---- the update: one block (as in every earlier version) or one block per tick slot
+        def block_lines(u, first: bool, depth: int) -> list[str]:
+            """sample, [peer queue, events, timers, handlers], body, flush -- the steps of one update block."""
+            pad = INDENT * depth
+            dt = u.dt_name if u is not None else "dt"
+            out: list[str] = []
+            if any(h.event == "begin_play" for h in lifecycle):
+                out.append(f"{pad}if not self._begun:")
+                out.append(f"{pad}{INDENT}self.begin_play()")
+            out.append(f"{pad}self._sample()")
+            if first and queue_target:
+                out.append(f"{pad}self._drain_peer_calls()")
+            if first and event_handlers:
+                out.append(f"{pad}events = self._collect_events()")
+            out.append(f"{pad}{dt} = float({dt})")
+            out.append(f"{pad}self._dt = {dt}")
+            if first and u is not None:
+                out.extend(self.stmts(u.pre, depth))
+            if first and event_handlers:
+                out.append(f"{pad}self._dispatch(events)")
+            if u is not None:
+                out.extend(self.stmts(u.body, depth))
+            if m.uses_commands:
+                out.append(f"{pad}self._flush()")
+            return out
+
+        if not phased:
+            u = m.update
+            dt_name = u.dt_name if u is not None else "dt"
+            L.append(f"{INDENT}def update(self, {dt_name}):")
+            L.append(f'{INDENT*2}"""One frame: sample the inputs, collect events, tick timers, run handlers, run the body, flush commands."""')
+            L.extend(block_lines(u, True, 2))
+            L.append("")
+        else:
+            slots = m.updates or [None]
+            slot_names = [u.phase if u is not None else m.default_phase for u in slots]
+            L.append(f"{INDENT}def update(self, dt):")
+            L.append(f'{INDENT*2}"""One frame of every tick slot, in order (a host that interleaves the slots with other work calls update_phase)."""')
+            for name in slot_names:
+                L.append(f"{INDENT*2}self.update_phase({name!r}, dt)")
+            L.append("")
+            L.append(f"{INDENT}def update_phase(self, phase, dt):")
+            L.append(f'{INDENT*2}"""One tick slot: pre_movement, after_movement or after_anim (a slot the logic does not use does nothing)."""')
+            for k, name in enumerate(slot_names):
+                L.append(f"{INDENT*2}{'if' if k == 0 else 'elif'} phase == {name!r}:")
+                L.append(f"{INDENT*3}self._u_{name}(dt)")
+            L.append("")
+            for k, (u, name) in enumerate(zip(slots, slot_names)):
+                L.append(f"{INDENT}def _u_{name}(self, {u.dt_name if u is not None else 'dt'}):")
+                L.append(f"{INDENT*2}# update in {name}")
+                L.extend(block_lines(u, k == 0, 2))
+                L.append("")
+        # ---- lifecycle
+        if any(h.event == "begin_play" for h in lifecycle):
+            L.append(f"{INDENT}def begin_play(self):")
+            L.append(f'{INDENT*2}"""Run the `on begin_play` handlers once; update() does it itself before the first frame when the host did not."""')
+            L.append(f"{INDENT*2}if self._begun:")
+            L.append(f"{INDENT*3}return")
+            L.append(f"{INDENT*2}self._begun = True")
+            L.append(f"{INDENT*2}self._sample()")
+            for k, h in enumerate(m.handlers):
+                if h.event == "begin_play":
+                    L.append(f"{INDENT*2}self._h{k}()")
+            if m.uses_commands:
+                L.append(f"{INDENT*2}self._flush()")
+            L.append("")
+        if any(h.event == "end_play" for h in lifecycle):
+            L.append(f"{INDENT}def end_play(self):")
+            L.append(f'{INDENT*2}"""Run the `on end_play` handlers."""')
+            L.append(f"{INDENT*2}self._sample()")
+            for k, h in enumerate(m.handlers):
+                if h.event == "end_play":
+                    L.append(f"{INDENT*2}self._h{k}()")
+            if m.uses_commands:
+                L.append(f"{INDENT*2}self._flush()")
+            L.append("")
+        # ---- methods and views
+        for x in m.methods:
+            name = (x.name if x.pub else ("_v_" if x.is_view else "_m_") + x.name)
+            L.append(f"{INDENT}def {name}({', '.join(['self'] + [n for n, _t in x.params])}):")
+            L.append(f"{INDENT*2}# {'pub ' if x.pub else ''}{'view' if x.is_view else 'method'} {x.name}")
+            L.extend(self.stmts(x.body, 2) or [f"{INDENT*2}pass"])
+            L.append("")
         for e in m.entries:
             L.append(f"{INDENT}def {e.name}(self):")
             L.append(f'{INDENT*2}"""Entry: runs with the delta time of the last update."""')

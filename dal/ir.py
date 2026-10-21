@@ -126,6 +126,30 @@ class MakeStruct(Expr):
 
 
 @dataclass
+class CallMethod(Expr):
+    """name(args): a call of a `method` (ty is VOID for a method without a result)."""
+    name: str
+    args: list[Expr]
+
+
+@dataclass
+class CallView(Expr):
+    """name(args): a call of a `view`."""
+    name: str
+    args: list[Expr]
+
+
+@dataclass
+class CallPeer(Expr):
+    """Peer.Method(args): a call of a `pub method` of another logic.  Between actor logics it runs at once; a call of an
+    anim logic is queued and runs at the start of its next update (``queued``)."""
+    peer: str
+    method: str
+    args: list[Expr]
+    queued: bool = False
+
+
+@dataclass
 class MontageRef(Expr):
     """A declared montage as a command argument (compile-time only)."""
     name: str
@@ -189,6 +213,12 @@ class Command(Stmt):
 
 
 @dataclass
+class ExprStmt(Stmt):
+    """A call used as a statement; a result is dropped."""
+    expr: Expr
+
+
+@dataclass
 class For(Stmt):
     """for var in lo..hi { body }  with constant bounds (hi exclusive)."""
     var: str
@@ -222,11 +252,24 @@ class HostUse:
 
 
 @dataclass
+class PeerUse:
+    """input X: T <- Peer.State.Member: where the value comes from."""
+    peer: str
+    path: tuple[str, ...]
+
+
+@dataclass
 class InputDef:
     name: str
     ty: Type
     host: HostUse | None
     default: object
+    peer: PeerUse | None = None
+
+    @property
+    def is_free(self) -> bool:
+        """Not bound to the host or to a peer: set by game code."""
+        return self.host is None and self.peer is None
 
 
 @dataclass
@@ -261,6 +304,7 @@ class UpdateDef:
     dt_name: str
     body: list[Stmt]
     pre: list[Stmt] = field(default_factory=list)      # timer ticks etc., run before events are handled
+    phase: str = "pre_movement"                         # tick slot: pre_movement | after_movement | after_anim (actor logic)
 
 
 @dataclass
@@ -293,6 +337,27 @@ class EntryDef:
 
 
 @dataclass
+class MethodDef:
+    """A `method` (reads and writes state, issues commands) or, with ``is_view``, a read-only `view`."""
+    name: str
+    params: list[tuple[str, Type]]
+    ret: Type | None
+    body: list[Stmt]
+    pub: bool = False
+    is_view: bool = False
+
+
+@dataclass
+class PeerDef:
+    """peer Character: AlsCharacter;  -- ``methods`` are the pub methods of the other logic (name -> parameters, result)."""
+    name: str
+    logic: str
+    kind: str                                                    # 'anim' | 'actor'
+    filename: str
+    methods: dict[str, tuple[list[tuple[str, Type]], Type | None]] = field(default_factory=dict)
+
+
+@dataclass
 class LibRef:
     """A library file the module uses (``use "x.dal";``)."""
     key: str                  # normalised path, what ``origin`` fields hold
@@ -312,7 +377,10 @@ class Module:
     states: list[StateDef] = field(default_factory=list)
     funcs: list[FnDef] = field(default_factory=list)          # topologically ordered: callees first
     externs: list[ExternDef] = field(default_factory=list)
-    update: UpdateDef | None = None
+    updates: list[UpdateDef] = field(default_factory=list)      # one per tick slot, in slot order
+    methods: list[MethodDef] = field(default_factory=list)      # methods and views, in source order
+    peers: list[PeerDef] = field(default_factory=list)
+    phases_explicit: bool = False                               # a tick slot was written (`in after_movement`)
     entries: list[EntryDef] = field(default_factory=list)
     kind: str = "anim"                                          # 'anim' (UAnimInstance) | 'actor' (UActorComponent)
     montages: list[MontageDef] = field(default_factory=list)
@@ -326,6 +394,25 @@ class Module:
     tagsets: list = field(default_factory=list)                 # TagType (library tag sets included)
     libs: list[LibRef] = field(default_factory=list)            # libraries used, dependencies first
     is_library: bool = False                                    # a file without `logic`: only shared declarations
+
+    @property
+    def update(self) -> UpdateDef | None:
+        """The (first) update block: the only one for programs without tick slots."""
+        return self.updates[0] if self.updates else None
+
+    @property
+    def default_phase(self) -> str:
+        return self.updates[0].phase if self.updates else "pre_movement"
+
+    @property
+    def lifecycle(self) -> list[HandlerDef]:
+        return [h for h in self.handlers if h.event in ("begin_play", "end_play")]
+
+    def find_method(self, name: str) -> "MethodDef | None":
+        return next((x for x in self.methods if x.name == name), None)
+
+    def find_peer(self, name: str) -> "PeerDef | None":
+        return next((p for p in self.peers if p.name == name), None)
 
     # lookup helpers -----------------------------------------------------------
     def find_input(self, name: str) -> InputDef | None:
@@ -353,9 +440,11 @@ class Module:
         """All statement lists with an owner label."""
         for f in self.funcs:
             yield ("fn " + f.name, f.body)
-        if self.update:
-            yield ("update.pre", self.update.pre)
-            yield ("update", self.update.body)
+        for u in self.updates:
+            yield ("update.pre", u.pre)
+            yield ("update", u.body)
+        for x in self.methods:
+            yield (("view " if x.is_view else "method ") + x.name, x.body)
         for e in self.entries:
             yield ("entry " + e.name, e.body)
         for h in self.handlers:
@@ -375,7 +464,7 @@ def children(e: Expr) -> list[Expr]:
         return [e.a, e.b]
     if isinstance(e, Cond):
         return [e.c, e.a, e.b]
-    if isinstance(e, (Make, CallFn, CallBuiltin, CallExtern, HostQuery)):
+    if isinstance(e, (Make, CallFn, CallBuiltin, CallExtern, HostQuery, CallMethod, CallView, CallPeer)):
         return list(e.args)
     if isinstance(e, MakeStruct):
         return [v for _n, v in e.fields]
@@ -415,6 +504,8 @@ def walk_stmt_exprs(stmts: list[Stmt]):
         elif isinstance(s, Command):
             for a in s.args:
                 yield from walk_exprs(a)
+        elif isinstance(s, ExprStmt):
+            yield from walk_exprs(s.expr)
         elif isinstance(s, For):
             yield from walk_stmt_exprs(s.body)
 
@@ -460,6 +551,12 @@ def dump_expr(e: Expr) -> str:
         return f"extern:{e.name}({', '.join(dump_expr(a) for a in e.args)})"
     if isinstance(e, Valid):
         return f"valid({dump_expr(e.x)})"
+    if isinstance(e, CallMethod):
+        return f"method:{e.name}({', '.join(dump_expr(a) for a in e.args)})"
+    if isinstance(e, CallView):
+        return f"view:{e.name}({', '.join(dump_expr(a) for a in e.args)})"
+    if isinstance(e, CallPeer):
+        return f"peer:{e.peer}.{e.method}({', '.join(dump_expr(a) for a in e.args)})" + (" queued" if e.queued else "")
     if isinstance(e, MakeStruct):
         return f"{e.ty.name}({', '.join(f'{n}: {dump_expr(v)}' for n, v in e.fields)})"
     if isinstance(e, MontageRef):
@@ -490,6 +587,8 @@ def dump_stmts(stmts: list[Stmt], indent: int = 1) -> list[str]:
             out.append(f"{pad}return" + (f" {dump_expr(s.value)}" if s.value is not None else ""))
         elif isinstance(s, Command):
             out.append(f"{pad}host.{s.name}({', '.join(dump_expr(a) for a in s.args)})")
+        elif isinstance(s, ExprStmt):
+            out.append(f"{pad}{dump_expr(s.expr)}")
         elif isinstance(s, For):
             out.append(f"{pad}for {s.var} in {s.lo}..{s.hi}")
             out.extend(dump_stmts(s.body, indent + 1))
@@ -514,8 +613,12 @@ def dump(m: Module) -> str:
         out.append(f"const {c.name}: {c.ty} = {_fmt_value(c.value)}")
     for p in m.params:
         out.append(f"param {p.name}: {p.ty} = {_fmt_value(p.default)}")
+    for p in m.peers:
+        out.append(f"peer {p.name}: {p.logic}")
     for i in m.inputs:
-        if i.host:
+        if i.peer:
+            out.append(f"input {i.name}: {i.ty} <- {i.peer.peer}." + ".".join(i.peer.path))
+        elif i.host:
             h = f"host.{i.host.item}" + (f"({i.host.arg!r})" if i.host.arg is not None else "")
             out.append(f"input {i.name}: {i.ty} <- {h}")
         else:
@@ -529,12 +632,16 @@ def dump(m: Module) -> str:
         ps = ", ".join(f"{n}: {t}" for n, t in f.params)
         out.append(f"fn {f.name}({ps}) -> {f.ret}")
         out.extend(dump_stmts(f.body))
-    if m.update:
-        out.append(f"update({m.update.dt_name})")
-        if m.update.pre:
+    for x in m.methods:
+        ps = ", ".join(f"{n}: {t}" for n, t in x.params)
+        out.append(("pub " if x.pub else "") + ("view " if x.is_view else "method ") + f"{x.name}({ps})" + (f" -> {x.ret}" if x.ret else ""))
+        out.extend(dump_stmts(x.body))
+    for u in m.updates:
+        out.append(f"update({u.dt_name})" + (f" in {u.phase}" if m.phases_explicit else ""))
+        if u.pre:
             out.append("  pre:")
-            out.extend(dump_stmts(m.update.pre, 2))
-        out.extend(dump_stmts(m.update.body))
+            out.extend(dump_stmts(u.pre, 2))
+        out.extend(dump_stmts(u.body))
     for e in m.entries:
         out.append(f"entry {e.name}({e.dt_name})")
         out.extend(dump_stmts(e.body))
