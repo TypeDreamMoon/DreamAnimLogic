@@ -110,6 +110,7 @@ class PyGen:
     def __init__(self, m: ir.Module):
         self.m = m
         self.self_locals = False          # in the body of _derive the members of the settings are attributes of self
+        self.loops = 0                    # `while` loops generated so far (their counters are numbered)
 
     # ---- value semantics of structs -------------------------------------------------------
     @staticmethod
@@ -282,6 +283,14 @@ class PyGen:
             elif isinstance(s, ir.For):
                 out.append(f"{pad}for {s.var} in range({s.lo}, {s.hi}):")
                 out.extend(self.stmts(s.body, depth + 1) or [f"{pad}{INDENT}pass"])
+            elif isinstance(s, ir.While):
+                self.loops += 1
+                out.append(f"{pad}for _dal_run{self.loops} in range({s.bound}):")
+                out.append(f"{pad}{INDENT}if not {unparen(self.x(s.cond))}:")
+                out.append(f"{pad}{INDENT}{INDENT}break")
+                out.extend(self.stmts(s.body, depth + 1))
+            elif isinstance(s, ir.Break):
+                out.append(f"{pad}break")
         return out
 
     # ---- tag sets ---------------------------------------------------------------------------

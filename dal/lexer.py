@@ -13,6 +13,8 @@ KEYWORDS = frozenset(
         "false", "cpp", "include", "py", "host",
         # v1 / v2: these were reserved words in v0, so no v0 program can use them as names
         "on", "for", "in", "timer", "window", "buffer", "combo", "montage",
+        # v4: loops (`while` and `break` were reserved words)
+        "while", "break",
     }
 )
 
@@ -22,7 +24,7 @@ KEYWORDS = frozenset(
 # start, reset, closes_on, notify_state ... -- that are only special at fixed places and stay valid names.)
 RESERVED_WORDS = frozenset(
     {
-        "while", "loop", "break", "continue", "match", "switch", "case",
+        "loop", "continue", "match", "switch", "case",
         "struct", "use", "import", "event", "emit", "cancel", "command",
         "self", "null", "export", "static", "type", "mut", "as", "do", "yield",
     }

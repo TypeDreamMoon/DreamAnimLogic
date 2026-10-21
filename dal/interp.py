@@ -247,8 +247,21 @@ class Evaluator:
             elif k is ir.For:
                 for i in range(s.lo, s.hi):
                     env[s.var] = i
-                    self.run_block(s.body, env)
+                    try:
+                        self.run_block(s.body, env)
+                    except _BreakLoop:
+                        break
                 env.pop(s.var, None)
+            elif k is ir.While:
+                for _run in range(s.bound):
+                    if not self.ev(s.cond, env):
+                        break
+                    try:
+                        self.run_block(s.body, env)
+                    except _BreakLoop:
+                        break
+            elif k is ir.Break:
+                raise _BreakLoop()
 
     def call_method(self, m: ir.MethodDef, args: list):
         """Run a method or a view; the result is None for a method without one."""
@@ -271,6 +284,10 @@ class Evaluator:
 class _ReturnValue(Exception):
     def __init__(self, value):
         self.value = value
+
+
+class _BreakLoop(Exception):
+    """`break;` -- caught by the innermost loop."""
 
 
 def eval_const(expr: ir.Expr):

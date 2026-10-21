@@ -226,6 +226,19 @@ class If(Stmt):
 
 
 @dataclass
+class While(Stmt):
+    """while (cond) bound N { body }: the body runs while ``cond`` holds, at most ``bound`` times (a loop cannot run for ever)."""
+    cond: Expr
+    bound: int
+    body: list[Stmt]
+
+
+@dataclass
+class Break(Stmt):
+    """break; -- leaves the innermost loop."""
+
+
+@dataclass
 class Return(Stmt):
     value: Expr | None
 
@@ -558,7 +571,7 @@ def walk_stmts(stmts: list[Stmt]):
         if isinstance(s, If):
             yield from walk_stmts(s.then)
             yield from walk_stmts(s.orelse)
-        elif isinstance(s, For):
+        elif isinstance(s, (For, While)):
             yield from walk_stmts(s.body)
 
 
@@ -581,6 +594,9 @@ def walk_stmt_exprs(stmts: list[Stmt]):
         elif isinstance(s, ExprStmt):
             yield from walk_exprs(s.expr)
         elif isinstance(s, For):
+            yield from walk_stmt_exprs(s.body)
+        elif isinstance(s, While):
+            yield from walk_exprs(s.cond)
             yield from walk_stmt_exprs(s.body)
 
 
@@ -674,6 +690,11 @@ def dump_stmts(stmts: list[Stmt], indent: int = 1) -> list[str]:
         elif isinstance(s, For):
             out.append(f"{pad}for {s.var} in {s.lo}..{s.hi}")
             out.extend(dump_stmts(s.body, indent + 1))
+        elif isinstance(s, While):
+            out.append(f"{pad}while {dump_expr(s.cond)} bound {s.bound}")
+            out.extend(dump_stmts(s.body, indent + 1))
+        elif isinstance(s, Break):
+            out.append(f"{pad}break")
     return out
 
 

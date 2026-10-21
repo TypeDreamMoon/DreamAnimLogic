@@ -570,6 +570,12 @@ class Parser:
             return self.parse_if()
         if t.is_kw("for"):
             return self.parse_for()
+        if t.is_kw("while"):
+            return self.parse_while()
+        if t.is_kw("break"):
+            self.advance()
+            self.expect_op(";", "after 'break'")
+            return S.BreakStmt(t.pos)
         if t.is_kw("host"):
             return self.parse_cmd()
         if t.kind == "IDENT" and self.peek().is_op("(") and t.text not in RESERVED_WORDS:
@@ -670,6 +676,18 @@ class Parser:
         hi = self.parse_additive()
         body = self.parse_block()
         return S.ForStmt(kw.pos, var.text, lo, hi, body, var.pos)
+
+    def parse_while(self) -> S.WhileStmt:
+        kw = self.advance()
+        self.expect_op("(", "after 'while'")
+        cond = self.parse_expr()
+        self.expect_op(")", "to close the condition")
+        if not (self.tok.kind == "IDENT" and self.tok.text == "bound"):
+            raise self.error("DAL2001", f"a 'while' needs the bound on its runs: while (cond) bound 8 {{ ... }}, found {self.describe(self.tok)}")
+        self.advance()
+        bound = self.parse_additive()
+        body = self.parse_block()
+        return S.WhileStmt(kw.pos, cond, bound, body)
 
     def parse_args(self) -> list[S.Expr]:
         self.expect_op("(", "to open the argument list")

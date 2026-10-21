@@ -178,6 +178,19 @@ class ForStmt(Stmt):
     var_pos: Pos = None  # type: ignore[assignment]
 
 
+@dataclass
+class WhileStmt(Stmt):
+    """while (cond) bound 8 { ... } -- runs the body while the condition holds, at most `bound` times."""
+    cond: Expr
+    bound: Expr
+    body: list[Stmt]
+
+
+@dataclass
+class BreakStmt(Stmt):
+    """break; -- leaves the innermost `for` / `while`."""
+
+
 # ---- declarations ----------------------------------------------------------
 
 @dataclass

@@ -653,6 +653,7 @@ class CppGen:
         self.m = module
         self.o = options
         self.ex = CppExprGen(module)
+        self.loops = 0                    # `while` loops generated so far (their counters are numbered)
         self.cls = "U" + module.name
         self.api = (options.module_api + " ") if options.module_api else ""
         self.actor = module.kind == "actor"
@@ -781,6 +782,15 @@ class CppGen:
                 out.append(f"{pad}{{")
                 out.extend(self.stmts(s.body, depth + 1))
                 out.append(f"{pad}}}")
+            elif isinstance(s, ir.While):
+                self.loops += 1
+                counter = f"DalLoop{self.loops}"
+                out.append(f"{pad}for (int32 {counter} = 0; {counter} < {s.bound} && {self.ex.x(s.cond)}; ++{counter})")
+                out.append(f"{pad}{{")
+                out.extend(self.stmts(s.body, depth + 1))
+                out.append(f"{pad}}}")
+            elif isinstance(s, ir.Break):
+                out.append(f"{pad}break;")
         return out
 
     def if_chain(self, s: ir.If, depth: int) -> list[str]:

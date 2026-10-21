@@ -170,6 +170,7 @@ class Checker:
         self.struct_cached: set[str] = set()              # struct types reused from another compilation unit (already complete)
         self.allow_settings_param = False                 # the next name read is the base of a member access
         self.interface_only = False                       # stop after the declarations (the checker run for a peer's interface)
+        self.loop_depth = 0                               # how many loops enclose the statement being checked (`break` needs one)
         self.method_sigs: dict[str, MethodSig] = {}
         self.entry_sigs: dict[int, list[ir.EntryParam]] = {}      # id(EntryDecl) -> its typed parameters
         self.method_calls: dict[str, list[str]] = {}      # call graph of methods and views (recursion check)
@@ -1266,15 +1267,17 @@ class Checker:
         sc.push()
         out: list[ir.Stmt] = []
         terminated = False
+        what = "return"
         for s in stmts:
             if terminated:
-                self.warn("DAL5090", "unreachable code after 'return'", s.pos)
+                self.warn("DAL5090", f"unreachable code after '{what}'", s.pos)
                 terminated = False
             r = self.stmt(s, sc)
             if r is not None:
                 out.append(r)
-                if isinstance(r, ir.Return):
+                if isinstance(r, (ir.Return, ir.Break)):
                     terminated = True
+                    what = "return" if isinstance(r, ir.Return) else "break"
         sc.pop()
         return out
 
@@ -1296,6 +1299,13 @@ class Checker:
             return self.cmd_stmt(s, sc)
         if isinstance(s, S.ForStmt):
             return self.for_stmt(s, sc)
+        if isinstance(s, S.WhileStmt):
+            return self.while_stmt(s, sc)
+        if isinstance(s, S.BreakStmt):
+            if self.loop_depth == 0:
+                self.err("DAL5053", "'break' leaves a loop: it belongs in the body of a 'for' or a 'while'", s.pos)
+                return None
+            return ir.Break()
         if isinstance(s, S.CallStmt):
             return self.call_stmt(s, sc)
         if isinstance(s, S.ExprStmt):
@@ -2046,9 +2056,47 @@ class Checker:
             return None
         sc.push()
         sc.declare(s.var, Local(INT, False))
-        body = self.block(s.body, sc)
+        self.loop_depth += 1
+        try:
+            body = self.block(s.body, sc)
+        finally:
+            self.loop_depth -= 1
         sc.pop()
         return ir.For(s.var, lo, hi, body)
+
+    def while_stmt(self, s: S.WhileStmt, sc: Scope) -> ir.Stmt | None:
+        """`while (cond) bound N { ... }`: the bound is a constant 1..64 (a program cannot loop for ever)."""
+        c = self.ex(s.cond, sc)
+        ok = True
+        if c.ty is not BOOL and c.ty is not ERROR:
+            self.err("DAL4003", f"the condition of 'while' must be bool, not {c.ty}", s.cond.pos)
+        if c.ty is ERROR:
+            ok = False
+        v = self.ex(s.bound, Scope("const"))
+        bound = 0
+        if v.ty is ERROR:
+            ok = False
+        elif v.ty is not INT:
+            self.err("DAL4026", f"the bound of a 'while' must be an int constant, not {v.ty}", s.bound.pos)
+            ok = False
+        else:
+            folded = self.fold(v, s.bound.pos)
+            if folded is None:
+                ok = False
+            else:
+                bound = int(folded)
+                if bound < 1:
+                    self.err("DAL5051", f"the bound of a 'while' must be at least 1 (it is {bound})", s.bound.pos)
+                    ok = False
+                elif bound > 64:
+                    self.err("DAL5050", f"a loop may run at most 64 times (this bound is {bound}); loops are for small fixed ranges", s.bound.pos)
+                    ok = False
+        self.loop_depth += 1
+        try:
+            body = self.block(s.body, sc)
+        finally:
+            self.loop_depth -= 1
+        return ir.While(c, bound, body) if ok else None
 
     def unary(self, e: S.UnaryExpr, sc: Scope) -> ir.Expr:
         x = self.ex(e.operand, sc)

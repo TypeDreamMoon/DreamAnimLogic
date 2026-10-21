@@ -166,7 +166,7 @@ class Lowerer:
                     return True
                 if isinstance(s, S.IfStmt) and (walk(s.then) or walk(s.orelse)):
                     return True
-                if isinstance(s, S.ForStmt) and walk(s.body):
+                if isinstance(s, (S.ForStmt, S.WhileStmt)) and walk(s.body):
                     return True
             return False
 
@@ -355,6 +355,8 @@ class Lowerer:
             return replace(s, cond=self.rewrite_expr(s.cond), then=self.rewrite_stmts(s.then), orelse=self.rewrite_stmts(s.orelse))
         if isinstance(s, S.ForStmt):
             return replace(s, lo=self.rewrite_expr(s.lo), hi=self.rewrite_expr(s.hi), body=self.rewrite_stmts(s.body))
+        if isinstance(s, S.WhileStmt):
+            return replace(s, cond=self.rewrite_expr(s.cond), bound=self.rewrite_expr(s.bound), body=self.rewrite_stmts(s.body))
         if isinstance(s, S.ReturnStmt) and s.value is not None:
             return replace(s, value=self.rewrite_expr(s.value))
         if isinstance(s, S.CmdStmt):
