@@ -75,6 +75,9 @@ tests/                            python -I -m unittest discover -s tests
   oracles/                        independent hand-written ports (ALS lean, melee, lock-on); they do not import dal
   cpp_stub/ cpp_driver.py         stand-in engine headers + build/run helper for the C++ tests
   golden/                         golden C++ output
+Unreal/
+  DalLive/                        UE plugin: hot reload of .dal in the editor (editor-Python interpreter + a thin C++ component)
+  TestHost/                       generator of the test project + PIE harness: generated C++ vs DalLive, frame by frame
 ```
 
 ## Command line
@@ -84,6 +87,7 @@ Run from the repository root (or with the folder that contains `dal/` on `PYTHON
 
 ```
 python -m dal compile examples/als_lean.dal --py out/py --cpp out/cpp --module MYGAME_API
+python -m dal compile examples/hero_gait.dal --cpp out/cpp --bag      # also U<Logic>Bag, the property-bag AnimInstance for DalLive
 python -m dal check   examples/als_lean.dal
 python -m dal verify  examples/melee_combo.dal --frames 500 --seed 7   # interpreter vs generated Python
 python -m dal dump-ir examples/als_lean.dal
@@ -98,6 +102,8 @@ python -m dal host                                                      # the ho
 * `--parent-class UMyBase --parent-include MyBase.h` changes the C++ base class (default `UAnimInstance`, or
   `UActorComponent` for `logic X : actor;`).
 * `--standins FILE` provides the Python stand-ins of `extern fn`s (default: `<source>_standins.py`).
+* `--bag` (anim logic): also write `U<Logic>Bag` into `<Logic>.h`, a `UAnimInstance` with the same params / inputs / states
+  and none of the logic -- the parent class of an Animation Blueprint while DalLive interprets the program.
 * Exit code 0 = ok, 1 = compile errors (`file:line:col: error DALnnnn: message` plus the source line and a
   caret), 2 = usage error.
 
@@ -194,6 +200,16 @@ of one module.
 `extern fn` declarations call hand-written C++ (`cpp "Ns::Fn" include "Header.h"`); see
 `examples/AlsLeanLibrary.h` for the pattern. The functions must be pure and thread safe.
 
+## Hot reload in the Unreal editor (`Unreal/DalLive`)
+
+Edit a `.dal` file, see the change in PIE a quarter of a second later, without UBT or Live Coding. The plugin runs the program
+with `dal.interp` in the editor's Python through a thin C++ component (`UDalInterpHost`, same tick group and order as the
+generated one), swaps a changed file in while keeping the state whose name and type still match, reports compile errors
+(log, Message Log, toast) and keeps running the last good version. `logic X : actor;` is interpreted on the component;
+`logic X;` writes the AnimInstance's properties by name (use `--bag`). Verified in PIE (UE 5.8.2) frame by frame against the
+generated C++; cost 86 us per tick for the three-hit combo (3.7 us compiled). `Unreal/DalLive/README.md` has the use, the
+rules and the numbers, `Unreal/TestHost/README.md` the test project.
+
 ## Vendoring (DreamVEd and DreamAnim)
 
 Both consumers carry **the same version of the package folder**:
@@ -214,7 +230,7 @@ identical apart from the version in the banner).
 python -I -m unittest discover -s tests
 ```
 
-295 tests, about 1 minute (the C++ compile tests are most of it). Python 3.11+ syntax; also run under Blender 5.2's embedded Python 3.13.
+379 tests when DalLive was added (about 1.5 minutes; the C++ compile tests are most of it). Python 3.11+ syntax; also run under Blender 5.2's embedded Python 3.13.
 
 | File | What it checks |
 |---|---|
@@ -232,19 +248,20 @@ python -I -m unittest discover -s tests
 | `test_cpp_v1.py` | golden C++ text of the two actor examples and an anim instance with host traffic; invariants of the component (tick order, queues, delegates, input binding, executors) |
 | `test_cpp_compile.py` | compiles the generated C++ (MSVC `/W4 /WX`, or g++/clang++) against stand-in engine headers (`tests/cpp_stub`) and compares states **and the host effects** (CMC writes, montage calls ...) with the Python backend, for the v0 examples, both actor examples, every host command, traces / targets and an anim instance with events; skipped when no compiler is found |
 | `test_cli.py` | `python -m dal` |
+| `test_cpp_bag.py` | the property bag (`--bag`): same UPROPERTYs as the main class, no logic, off by default (other output byte-identical) |
+| `test_live_session.py` | DalLive's pure-Python half with the mock hosts: which state survives a swap, compile errors keep the last good program, debounce, runtime faults, anim commands one update late, param overrides, compiler lookup |
 
 Regenerate golden files with `UPDATE_GOLDEN=1 python -I -m unittest discover -s tests -p test_cpp.py` (and
 `-p test_cpp_v1.py`) and review the diff. `DAL_CL=<path to cl.exe>` selects a specific MSVC for `test_cpp_compile.py`.
 
 ## What is not verified
 
-* The generated C++ has **not** been compiled inside Unreal Engine. `test_cpp_compile.py` proves it is
-  well-formed C++20 and behaves like the Python backend against stand-in headers written from the UE 5.8 sources;
-  engine-specific facts still need the first real build: UHT acceptance of the `UPROPERTY` / `UFUNCTION` set (private
-  `UFUNCTION`s with a `const FBranchingPointNotifyPayload&` parameter as delegate targets), `AddUniqueDynamic` on
-  `OnPlayMontageNotifyBegin/End`, the `BindAction` overload for `void(const FInputActionValue&)` with a private member,
-  `FVector3f` / `FQuat4f` conversions from the double-precision engine types, `SCENE_QUERY_STAT` inside a component,
-  module dependencies.
+* The generated C++ was compiled in UE 5.8.2 and run in PIE (2026-10-21, `Unreal/TestHost`): `melee_combo`, `lockon_camera` and
+  `hero_gait` behave like the interpreter frame by frame, which settles what the stand-in headers could not: UHT accepts the
+  private delegate targets with a `const FBranchingPointNotifyPayload&` parameter, `AddUniqueDynamic` works on
+  `OnPlayMontageNotifyBegin/End`, the `BindAction` overload, `SCENE_QUERY_STAT` in a component and the `FVector3f` / `FQuat4f`
+  conversions all compile and behave. Not covered by those runs: several logics with same-named enums in one module, the custom
+  `AnimNotify_<Name>()` functions of anim logic, a cooked / packaged build.
 * Float precision: the Python backend computes in double, the C++ backend in `float`. Programs with hard
   thresholds can differ by a frame at the boundary.
 * `to_rotator()` uses an exact `asin`; UE's float `FQuat::Rotator()` uses `FMath::FastAsin` (error up to
