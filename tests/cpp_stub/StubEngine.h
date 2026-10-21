@@ -764,6 +764,20 @@ private:
 	static std::string KeyOf(const F& Func) { return std::string(reinterpret_cast<const char*>(&Func), sizeof(F)); }
 };
 
+class UAnimInstance;
+
+// the proxy of an animation instance: PostUpdate is the hook that runs on the game thread after the graph updated
+struct FAnimInstanceProxy
+{
+	FAnimInstanceProxy() = default;
+	explicit FAnimInstanceProxy(UAnimInstance*) {}
+	virtual ~FAnimInstanceProxy() = default;
+
+protected:
+	virtual void PostUpdate(UAnimInstance*) const {}
+	friend class UAnimInstance;
+};
+
 class UAnimInstance : public UObject
 {
 public:
@@ -804,6 +818,14 @@ public:
 	virtual void NativeUpdateAnimation(float) {}
 	virtual void NativeThreadSafeUpdateAnimation(float) {}
 	virtual void NativeUninitializeAnimation() {}
+
+	// what the engine does after the animation graph evaluated: the proxy's PostUpdate runs on the game thread
+	virtual FAnimInstanceProxy* CreateAnimInstanceProxy() { return new FAnimInstanceProxy(this); }
+	void StubPostUpdate()
+	{
+		std::unique_ptr<FAnimInstanceProxy> Proxy(CreateAnimInstanceProxy());
+		Proxy->PostUpdate(this);
+	}
 
 	float Montage_Play(UAnimMontage* MontageToPlay, float InPlayRate = 1.0f)
 	{

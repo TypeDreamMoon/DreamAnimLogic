@@ -115,6 +115,8 @@ def make_system_driver(modules: dict[str, ir.Module], frames: list[dict], schedu
         for n in modules:
             for call in f.get("calls", {}).get(n, []):
                 L.append("\t\t" + cd.entry_call(modules[n], f"L_{n}", call))
+            if gens[n].post:                                              # the graph has updated: the proxy's PostUpdate (post_update, post_flush)
+                L.append(f"\t\tL_{n}.StubPostUpdate();")
             L.append(f'\t\tPcmds("{n}");')
         L.append(f'\t\tstd::printf("FRAME {k}\\n");')
         for n, m in modules.items():

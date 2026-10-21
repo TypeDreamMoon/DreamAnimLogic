@@ -441,6 +441,7 @@ class Checker:
             if isinstance(d, S.MethodDecl):
                 self.check_method(d)
         self.check_updates([d for d in decls if isinstance(d, S.UpdateDecl)], logics[0] if logics else None)
+        self.check_post_update([d for d in decls if isinstance(d, S.PostUpdateDecl)], logics[0] if logics else None)
         for d in decls:
             self.focus(d)
             if isinstance(d, S.EntryDecl):
@@ -452,7 +453,7 @@ class Checker:
                 if h is not None:
                     m.handlers.append(h)
         self.source = self.main_source
-        if not m.is_library and m.update is None and not m.entries and not m.handlers and m.linked is None:
+        if not m.is_library and m.update is None and not m.entries and not m.handlers and m.linked is None and m.post_update is None:
             self.warn("DAL5091", "the logic has no 'update', no 'entry' and no 'on' handler; it never changes anything", Pos(1, 1, 2))
 
         self.order_functions()
@@ -609,6 +610,33 @@ class Checker:
         for phase, d in slotted:
             self.focus(d)
             m.updates.append(self.check_update(d, phase))
+
+    def check_post_update(self, posts: list[S.PostUpdateDecl], logic: S.LogicDecl | None) -> None:
+        """`post_update { ... }` (anim logic): runs on the game thread after the animation graph updated, with the inputs of the frame's
+        update; `logic X : anim post_flush;` moves the flush of the queued commands behind it."""
+        m = self.module
+        if logic is not None and logic.post_flush:
+            m.post_flush = True
+        for i, d in enumerate(posts):
+            self.focus(d)
+            if self.kind != "anim":
+                self.err("DAL5065", "post_update belongs to an animation logic (logic Name;): it runs after the animation graph updated; an actor logic has tick slots (update ... in after_anim)", d.pos)
+                continue
+            if i > 0:
+                self.err("DAL3079", "only one 'post_update' is allowed", d.pos)
+                continue
+            sc = Scope("update")
+            if d.dt_name is not None:
+                if not self.valid_ident(d.dt_name, d.dt_pos or d.pos, "the delta-time parameter"):
+                    pass
+                elif d.dt_name in self.globals:
+                    self.err("DAL3005", f"'{d.dt_name}' hides the {self.globals[d.dt_name].kind} of the same name", d.dt_pos or d.pos)
+                sc.declare(d.dt_name, Local(FLOAT, False))
+            m.post_update = ir.UpdateDef(d.dt_name or "dt", self.block(d.body, sc), [], "post_update")
+        if (m.post_update is not None or m.post_flush) and "post_update" in self.globals:
+            sym = self.globals["post_update"]
+            self.source = self.main_source
+            self.err("DAL3004", f"'post_update' cannot be the name of a {sym.kind} in a logic that has a post_update block or post_flush: it is the generated method the host calls", sym.pos)
 
     # ---- tags -------------------------------------------------------------------------------------------------
     def declare_tags(self, d: S.TagsDecl) -> None:

@@ -324,7 +324,7 @@ class Lowerer:
     BUFFER_MEMBERS = ("pending", "empty", "remaining")
 
     def rewrite_decl(self, d: S.Decl) -> S.Decl:
-        if isinstance(d, (S.FnDecl, S.MethodDecl)):
+        if isinstance(d, (S.FnDecl, S.MethodDecl, S.PostUpdateDecl)):
             return replace(d, body=self.rewrite_stmts(d.body))
         if isinstance(d, S.EntryDecl):
             return replace(d, body=self.rewrite_stmts(d.body))

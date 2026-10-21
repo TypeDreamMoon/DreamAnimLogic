@@ -612,6 +612,8 @@ class CppGen:
         self.hook_handlers = [h for h in module.handlers if h.event in HOOK_EVENTS]
         self.notify_handlers = [h for h in module.handlers if h.params and isinstance(h.params[0][1], StructType) and h.params[0][1].is_notify]
         self.sink = bool(self.hook_handlers or self.notify_handlers)     # the class receives events through DalHost::FEventRouter (hooks, declared notifies)
+        self.post = module.kind == "anim" and (module.post_update is not None or module.post_flush)   # a proxy hook runs post_update (and flushes the commands)
+        self.post_flush = module.kind == "anim" and module.post_flush
         self.declared_notifies = {n.name for n in module.notifies}
         self.begin_handlers = [k for k, h in enumerate(module.handlers) if h.event == "begin_play"]
         self.end_handlers = [k for k, h in enumerate(module.handlers) if h.event == "end_play"]
@@ -851,7 +853,7 @@ class CppGen:
                     "return DalMesh != nullptr ? DalMesh->GetAnimInstance() : nullptr;"]))
             else:
                 out.append(Method("UAnimInstance*", "DalGetAnimInstance", body=["return this;"]))
-        if self.montage_cmds:
+        if self.montage_cmds and m.montages:                # (the lookup of a declared montage's asset; montage_stop_all needs none)
             out.append(Method("UAnimMontage*", "DalMontageAsset", "const int32 DalMontage", body=self.montage_asset_body()))
         if self.bind_ended or self.bind_blend:
             out.append(Method("int32", "DalMontageIndex", "const UAnimMontage* DalMontage", body=self.montage_index_body()))
@@ -881,6 +883,18 @@ class CppGen:
             out.append(Method("void", "DalReceiveEvent", "const DalHost::FEvent& DalEvent", def_params="const DalHost::FEvent& DalEvent",
                               body=self.receive_body(), override=True, access="public",
                               doc="Called through DalHost::FEventRouter::Post: the hooks of the character and the notify classes of the program."))
+        # ---- post_update
+        if self.post:
+            u = m.post_update
+            body: list[str] = []
+            if u is not None:
+                if u.dt_name:
+                    body.append(f"[[maybe_unused]] const float {u.dt_name} = Dal_DeltaSeconds;")
+                body.extend(self.stmts(u.body, 0))
+            if cmds and self.post_flush:
+                body.append("DalFlushCommands();")
+            out.append(Method("void", "DalPostUpdate", "", body or ["// (no post_update block)"], access="public",
+                              doc="Game thread, after the animation graph updated: the post_update block" + (", then the commands of the frame run." if self.post_flush else ".")))
         # ---- commands
         if cmds:
             out.append(Method("void", "DalEnqueue", "const DalHost::FCommand& DalCommand", doc="Queue a host command; it runs on the game thread after the update.", body=[
@@ -1818,6 +1832,8 @@ class CppGen:
                 or any(enum_cast(f.ty) or enum_cast(getattr(f.ty, "elem", None)) for s in [*m.structs, *self.notify_structs(None)] if s.origin is None for f in s.fields)
                 or self.uses("movement_mode") or self.world_queries):
             L.append('#include "Engine/EngineTypes.h"')
+        if self.post:
+            L.append('#include "Animation/AnimInstanceProxy.h"')
         if self.bind_begin or self.bind_end or any(n.origin is None for n in m.notifies):
             L.append('#include "Animation/AnimNotifies/AnimNotify.h"')
         if any(n.origin is None and n.state for n in m.notifies):
@@ -1866,6 +1882,22 @@ class CppGen:
             if nd.origin is None:
                 L.extend(self.notify_decl(nd))
                 L.append("")
+        if self.post:
+            L.append(f"/** The animation instance proxy of {self.cls}: its PostUpdate runs {self.cls}::DalPostUpdate (game thread, after the animation graph updated). */")
+            L.append("USTRUCT()")
+            L.append(f"struct {self.api}F{m.name}Proxy : public FAnimInstanceProxy")
+            L.append("{")
+            L.append(f"{T}GENERATED_BODY()")
+            L.append("")
+            L.append("public:")
+            L.append(f"{T}F{m.name}Proxy() = default;")
+            L.append("")
+            L.append(f"{T}explicit F{m.name}Proxy(UAnimInstance* AnimationInstance);")
+            L.append("")
+            L.append("protected:")
+            L.append(f"{T}virtual void PostUpdate(UAnimInstance* AnimationInstance) const override;")
+            L.append("};")
+            L.append("")
         if self.phased:
             L.append(f"class {self.cls};")
             L.append("")
@@ -1947,6 +1979,8 @@ class CppGen:
             L.append(f"{T}virtual void NativeThreadSafeUpdateAnimation(float DeltaSeconds) override;")
             if self.end_handlers or self.sink:
                 L.append(f"{T}virtual void NativeUninitializeAnimation() override;")
+            if self.post:
+                L.append(f"{T}virtual FAnimInstanceProxy* CreateAnimInstanceProxy() override;")
         L.append("")
         L.append(f"{T}/** Restore every input and state to its declared default. */")
         L.append(f"{T}void DalResetState();")
@@ -2085,6 +2119,8 @@ class CppGen:
                 add("Components/SkeletalMeshComponent.h")
         if self.bind_begin:
             add("Animation/AnimTypes.h")
+        if self.post:
+            add("Animation/AnimInstanceProxy.h")
         if any(n.origin is None for n in m.notifies):
             add("GameFramework/Actor.h")
             add("Components/SkeletalMeshComponent.h")
@@ -2362,10 +2398,14 @@ class CppGen:
             if m.linked is not None:
                 upd += [f"{T}if (!Parent.IsValid())", f"{T}{{", f"{T}{T}DalResolveParent();", f"{T}}}", ""]
             if traffic:
-                upd.append(f"{T}// Game thread: run what the previous update asked for, gather the host values and the events;")
-                upd.append(f"{T}// the worker thread only reads this object.")
-                if self.has_cmds:
-                    upd.append(f"{T}DalFlushCommands();")
+                if self.post_flush:
+                    upd.append(f"{T}// Game thread: gather the host values and the events; the worker thread only reads this object.")
+                    upd.append(f"{T}// (The commands of the frame run in DalPostUpdate, after the animation graph updated.)")
+                else:
+                    upd.append(f"{T}// Game thread: run what the previous update asked for, gather the host values and the events;")
+                    upd.append(f"{T}// the worker thread only reads this object.")
+                    if self.has_cmds:
+                        upd.append(f"{T}DalFlushCommands();")
                 upd.append(f"{T}DalSampleInputs();")
                 if self.queue_target:
                     upd.append(f"{T}DalDrainPeerCalls();")
@@ -2382,6 +2422,13 @@ class CppGen:
                            f"{T}Super::NativeThreadSafeUpdateAnimation(DeltaSeconds);", "",
                            f"{T}Dal_DeltaSeconds = DeltaSeconds;",
                            f"{T}DalUpdate(DeltaSeconds);", "}"])
+            if self.post:
+                blocks.append([f"F{m.name}Proxy::F{m.name}Proxy(UAnimInstance* AnimationInstance) : FAnimInstanceProxy(AnimationInstance)", "{", "}"])
+                blocks.append([f"void F{m.name}Proxy::PostUpdate(UAnimInstance* AnimationInstance) const", "{",
+                               f"{T}FAnimInstanceProxy::PostUpdate(AnimationInstance);", "",
+                               f"{T}// UAnimInstance::PostUpdateAnimation() cannot be overridden, so the proxy's hook is where the game thread resumes after the graph update.",
+                               f"{T}if ({cls}* DalLogic = Cast<{cls}>(AnimationInstance))", f"{T}{{", f"{T}{T}DalLogic->DalPostUpdate();", f"{T}}}", "}"])
+                blocks.append([f"FAnimInstanceProxy* {cls}::CreateAnimInstanceProxy()", "{", f"{T}return new F{m.name}Proxy(this);", "}"])
             if self.end_handlers or self.sink:
                 ep = [f"void {cls}::NativeUninitializeAnimation()", "{"]
                 if self.end_handlers:

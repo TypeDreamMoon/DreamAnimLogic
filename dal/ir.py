@@ -433,6 +433,8 @@ class Module:
     funcs: list[FnDef] = field(default_factory=list)          # topologically ordered: callees first
     externs: list[ExternDef] = field(default_factory=list)
     updates: list[UpdateDef] = field(default_factory=list)      # one per tick slot, in slot order
+    post_update: "UpdateDef | None" = None                      # anim logic: the block that runs after the graph update (game thread)
+    post_flush: bool = False                                    # anim logic: its commands run right after the post_update of the same frame
     methods: list[MethodDef] = field(default_factory=list)      # methods and views, in source order
     peers: list[PeerDef] = field(default_factory=list)
     phases_explicit: bool = False                               # a tick slot was written (`in after_movement`)
@@ -503,6 +505,8 @@ class Module:
         for u in self.updates:
             yield ("update.pre", u.pre)
             yield ("update", u.body)
+        if self.post_update is not None:
+            yield ("post_update", self.post_update.body)
         for x in self.methods:
             yield (("view " if x.is_view else "method ") + x.name, x.body)
         for e in self.entries:
@@ -672,7 +676,7 @@ def dump_stmts(stmts: list[Stmt], indent: int = 1) -> list[str]:
 
 
 def dump(m: Module) -> str:
-    out = [f"library {m.name}" if m.is_library else f"logic {m.name}" + (f" : {m.kind}" if m.kind != "anim" else "")]
+    out = [f"library {m.name}" if m.is_library else f"logic {m.name}" + (f" : {m.kind}" if m.kind != "anim" else "") + (" post_flush" if m.post_flush else "")]
     for lib in m.libs:
         out.append(f"use {lib.filename!r}")
     for en in m.enums:
@@ -721,6 +725,9 @@ def dump(m: Module) -> str:
             out.append("  pre:")
             out.extend(dump_stmts(u.pre, 2))
         out.extend(dump_stmts(u.body))
+    if m.post_update is not None:
+        out.append(f"post_update({m.post_update.dt_name})")
+        out.extend(dump_stmts(m.post_update.body))
     if m.linked is not None:
         out.append(f"linked({m.linked.parent}): " + ", ".join(x.name for x in m.linked.entries))
     for e in m.entries:

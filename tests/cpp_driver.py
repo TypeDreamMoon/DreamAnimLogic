@@ -600,6 +600,8 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
             L.append(f"\t\tObj.NativeThreadSafeUpdateAnimation({dt}f);")
         for call in f.get("calls", []):
             L.append("\t\t" + entry_call(module, "Obj", call))
+        if gen.post:
+            L.append("\t\tObj.StubPostUpdate();")                  # the animation graph has updated: the proxy's PostUpdate
         if f.get("end_play"):
             L.append("\t\tObj.EndPlay(EEndPlayReason::Destroyed);" if actor else "\t\tObj.NativeUninitializeAnimation();")
         L.append(f'\t\tstd::printf("FRAME {n}\\n");')
@@ -608,7 +610,7 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
                 L.append("\t\t" + _print_value(path, ty))
         L.append("\t\tPcmds();")
         L.append("\t}")
-    if not actor and has_cmds:
+    if not actor and has_cmds and not gen.post_flush:
         # on an anim instance the commands of the last update run at the start of the next one
         L.append("\tStubLog::Lines().clear();")
         L.append("\tObj.NativeUpdateAnimation(0.0f);")

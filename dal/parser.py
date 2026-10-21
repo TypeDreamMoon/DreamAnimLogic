@@ -140,11 +140,21 @@ class Parser:
             return self.parse_tags()
         if t.kind == "IDENT" and t.text in ("notify", "notify_state") and self.peek().kind == "IDENT":
             return self.parse_notify()
+        if t.kind == "IDENT" and t.text == "post_update" and (self.peek().is_op("{") or self.peek().is_op("(")):
+            return self.parse_post_update()
         raise self.error(
             "DAL2001",
             "expected a declaration (use, logic, enum, struct, settings, tags, notify, notify_state, const, param, input, state, fn, method, view, peer, extern, update, entry, "
             f"on, timer, window, buffer, combo, montage, action), found {self.describe(t)}",
         )
+
+    def parse_post_update(self) -> S.PostUpdateDecl:
+        """`post_update { ... }` or `post_update(dt) { ... }`."""
+        kw = self.advance()
+        dt_name = dt_pos = None
+        if self.tok.is_op("("):
+            dt_name, dt_pos = self.parse_dt_param("post_update")
+        return S.PostUpdateDecl(kw.pos, dt_name, dt_pos, self.parse_block())
 
     def parse_notify(self) -> S.NotifyDecl:
         """`notify Name [branching] [cpp "ClassName"] { Member: type [= default]; ... }` (also `notify_state`)."""
@@ -295,8 +305,14 @@ class Parser:
             self.advance()
             kind, kind_pos = k.text, k.pos
         linked, linked_pos = None, None
-        if self.is_word("linked"):
+        post_flush, post_flush_pos = False, None
+        while self.is_word("linked") or self.is_word("post_flush"):          # the options of an animation logic, in either order
             lk = self.advance()
+            if lk.text == "post_flush":
+                if kind != "anim":
+                    raise self.error("DAL2025", "only an animation logic can flush its commands after the post_update: logic Name : anim post_flush;", lk.pos)
+                post_flush, post_flush_pos = True, lk.pos
+                continue
             if kind != "anim":
                 raise self.error("DAL2024", "only an animation logic can be linked: logic Name : anim linked(MainLogic);", lk.pos)
             self.expect_op("(", "after 'linked'")
@@ -305,7 +321,7 @@ class Parser:
             linked, linked_pos = parent.text, parent.pos
         phase, phase_pos = self.parse_phase()
         self.expect_op(";", "after the logic name")
-        return S.LogicDecl(kw.pos, name.text, kind, kind_pos, phase, phase_pos, linked, linked_pos, name_pos=name.pos)
+        return S.LogicDecl(kw.pos, name.text, kind, kind_pos, phase, phase_pos, linked, linked_pos, post_flush, post_flush_pos, name_pos=name.pos)
 
     def parse_phase(self) -> tuple[str | None, Pos | None]:
         """Optional `in pre_movement | after_movement | after_anim`."""

@@ -313,6 +313,7 @@ def run_interpreter(module: ir.Module, frames: list[dict], **params) -> list[dic
         it.update(f["dt"])
         for name, args in call_items(f):
             it.call_entry(name, **args)
+        it.post_update()                                  # the graph has updated: the game thread's post_update (and the flush behind it)
         if f.get("end_play"):
             it.end_play()
         out.append(_snapshot(it, host))
@@ -330,6 +331,8 @@ def run_python(module: ir.Module, frames: list[dict], source: str | None = None,
         obj.update(f["dt"])
         for name, args in call_items(f):
             obj.call_entry(name, **args)
+        if hasattr(obj, "post_update"):
+            obj.post_update()
         if f.get("end_play") and hasattr(obj, "end_play"):
             obj.end_play()
         out.append(_snapshot(obj, host))
@@ -443,6 +446,8 @@ def run_system(modules: dict[str, ir.Module], frames: list[dict], backend: str =
             for item in f.get("calls", {}).get(n, []):
                 name, args = (item, {}) if isinstance(item, str) else (item[0], dict(item[1]) if len(item) > 1 else {})
                 objs[n].call_entry(name, **args)
+            if modules[n].kind == "anim" and hasattr(objs[n], "post_update"):
+                objs[n].post_update()
         snap = {}
         for n in modules:
             snap[n] = _snapshot(objs[n], hosts[n])

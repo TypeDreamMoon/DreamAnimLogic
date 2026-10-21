@@ -495,6 +495,14 @@ class Interpreter:
             self._dispatch(events)
         if u is not None:
             self._run(u.body, {u.dt_name: self._dt})
+        if not m.post_flush:                                     # a post_flush logic hands its commands over after the post_update
+            self.flush()
+
+    def post_update(self) -> None:
+        """The post_update block (anim logic: game thread, after the graph updated); the queued commands go to the host after it."""
+        m = self.module
+        if m.post_update is not None:
+            self._run(m.post_update.body, {m.post_update.dt_name: self._dt})
         self.flush()
 
     def _run(self, body: list, env: dict) -> None:
@@ -539,7 +547,8 @@ class Interpreter:
                     self.ev.run_block(e.body, env)
                 except _ReturnValue:
                     pass
-                self.flush()
+                if not self.module.post_flush:
+                    self.flush()
                 return
         if self.module.linked is not None:
             for e in self.module.linked.entries:

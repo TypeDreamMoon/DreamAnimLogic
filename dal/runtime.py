@@ -1432,6 +1432,7 @@ class LogicBase:
     DAL_METHODS: tuple = ()       # pub methods: other logics (and hosts) may call them
     DAL_VIEWS: tuple = ()         # pub views
     DAL_PHASES: tuple = ()        # tick slots of the logic (empty: one update)
+    DAL_POST_FLUSH = False        # anim logic with `post_flush`: update() and the entries leave the commands queued; post_update() hands them over
 
     def __init__(self, host, params: dict, peers: dict | None = None):
         from .hostapi import HostV1

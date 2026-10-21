@@ -493,6 +493,8 @@ class PyGen:
                     vt = h.params[0][1].name
                 L.append(f"{INDENT*2}({h.event!r}, {h.name!r}, {h.phase!r}, '_h{k}', {vt!r}),")
             L.append(f"{INDENT})")
+        if m.post_flush:
+            L.append(f"{INDENT}DAL_POST_FLUSH = True")
         if m.peers:
             L.append(f"{INDENT}DAL_PEERS = (" + "".join(f"({p.name!r}, {p.logic!r}), " for p in m.peers) + ")")
         pub_methods = [x for x in m.methods if x.pub and not x.is_view]
@@ -614,7 +616,7 @@ class PyGen:
                 out.append(f"{pad}self._dispatch(events)")
             if u is not None:
                 out.extend(self.stmts(u.body, depth))
-            if m.uses_commands:
+            if m.uses_commands and not m.post_flush:
                 out.append(f"{pad}self._flush()")
             return out
 
@@ -668,6 +670,19 @@ class PyGen:
             if m.uses_commands:
                 L.append(f"{INDENT*2}self._flush()")
             L.append("")
+        # ---- post_update
+        if m.post_update is not None or m.post_flush:
+            L.append(f"{INDENT}def post_update(self):")
+            L.append(f'{INDENT*2}"""The post_update block (game thread, after the animation graph updated), then the queued commands go to the host."""')
+            if m.post_update is not None and m.post_update.dt_name:
+                L.append(f"{INDENT*2}{m.post_update.dt_name} = self._dt")
+            if m.post_update is not None:
+                L.extend(self.stmts(m.post_update.body, 2))
+            if m.uses_commands:
+                L.append(f"{INDENT*2}self._flush()")
+            elif m.post_update is None:
+                L.append(f"{INDENT*2}pass")
+            L.append("")
         # ---- methods and views
         for x in m.methods:
             name = (x.name if x.pub else ("_v_" if x.is_view else "_m_") + x.name)
@@ -690,7 +705,7 @@ class PyGen:
             if e.dt_name:
                 L.append(f"{INDENT*2}{e.dt_name} = self._dt")
             L.extend(self.stmts(e.body, 2) or [f"{INDENT*2}pass"])
-            if m.uses_commands:
+            if m.uses_commands and not m.post_flush:
                 L.append(f"{INDENT*2}self._flush()")
             L.append("")
         for e in forwarded:
