@@ -44,6 +44,7 @@ class MockHost(HostV1):
         self.primitives: dict[str, dict] = {}    # scripted properties of the scene's shapes: name -> {speed, can_step_up, transform}
         self.bones: dict[str, dict] = {}         # scripted pose: bone name -> {"component": transform, "world": transform}
         self.skeleton: dict[str, dict] = {}      # scripted reference skeleton: bone name -> {"parent": name or None, "translation": (x, y, z)}
+        self.snapshots: list[str] = []           # the names of the pose snapshots taken (snapshot_pose), oldest first
 
     # ---- reads ---------------------------------------------------------------------------------------------------------
     def action(self, name, ty):
@@ -244,6 +245,7 @@ class SimMontage:
     notifies: list = field(default_factory=list)              # (time, notify name[, payload])
     windows: list = field(default_factory=list)               # (start, end, notify state name[, payload])
     blend_out: float = 0.2
+    slot: str = "DefaultSlot"                                 # the slot of its track (stop_montages_with_slot)
 
 
 class _Instance:
@@ -266,8 +268,10 @@ class _Instance:
 
 
 class SimHost(MockHost):
-    def __init__(self, montages: list[SimMontage]) -> None:
+    def __init__(self, montages: list[SimMontage], sequences: dict | None = None) -> None:
+        """``sequences`` maps the name of an animation sequence to its length: play_slot_animation makes a dynamic montage of it."""
         super().__init__()
+        self.sequences = dict(sequences or {})
         self.catalog = {m.name: m for m in montages}
         self.instances: list[_Instance] = []
         self.time = 0.0
@@ -276,6 +280,8 @@ class SimHost(MockHost):
     # ---- commands that change the simulation ---------------------------------------------------------------------------------
     def montage_play(self, name, rate, section):
         self.record("montage_play", (name, rate, section))
+        if name is None or name not in self.catalog:                # an empty montage value, or an asset the simulation does not have
+            return
         for inst in self.instances:
             if inst.state == "playing":
                 self._blend_out(inst, inst.m.blend_out, interrupted=True)
@@ -309,6 +315,42 @@ class SimHost(MockHost):
         for inst in self.instances:
             if inst.m.name == name and inst.state != "done":
                 inst.rate = float(rate)
+
+    def montage_set_position(self, name, position):
+        self.record("montage_set_position", (name, position))
+        inst = self._newest(name, ("playing",))
+        if inst is not None:
+            inst.position = min(max(float(position), 0.0), inst.m.length)
+
+    def montage_stop_source(self, source, blend_out):
+        self.record("montage_stop_source", (source, blend_out))
+        for inst in self.instances:
+            if inst.id == source and inst.state == "playing":
+                self._blend_out(inst, inst.m.blend_out if blend_out < 0 else blend_out, interrupted=True)
+
+    def play_slot_animation(self, sequence, slot, blend_in, blend_out, rate, loops, blend_out_trigger, start_time, blend_out_mode):
+        self.record("play_slot_animation", (sequence, slot, blend_in, blend_out, rate, loops, blend_out_trigger, start_time, blend_out_mode))
+        if sequence is None or sequence not in self.sequences:
+            return
+        for inst in self.instances:                                 # a new montage in a slot takes the slot: the one playing there blends out
+            if inst.state == "playing" and inst.m.slot == slot:
+                self._blend_out(inst, inst.m.blend_out, interrupted=True)
+        m = self.catalog.get(f"{sequence}@{slot}")
+        if m is None:
+            m = self.catalog[f"{sequence}@{slot}"] = SimMontage(sequence, float(self.sequences[sequence]), blend_out=float(blend_out), slot=slot)
+        inst = _Instance(m, float(rate), float(start_time), self._next_id)
+        self._next_id += 1
+        self.instances.append(inst)
+
+    def stop_montages_with_slot(self, slot, blend_out):
+        self.record("stop_montages_with_slot", (slot, blend_out))
+        for inst in self.instances:
+            if inst.state == "playing" and inst.m.slot == slot:
+                self._blend_out(inst, inst.m.blend_out if blend_out < 0 else blend_out, interrupted=True)
+
+    def snapshot_pose(self, name):
+        self.record("snapshot_pose", (name,))
+        self.snapshots.append(name)
 
     # ---- reads from the simulation --------------------------------------------------------------------------------------------
     def _newest(self, name, states):

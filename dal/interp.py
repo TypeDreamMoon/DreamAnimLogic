@@ -15,7 +15,7 @@ from . import ir
 from . import runtime as rt
 from . import values as vals
 from .builtins import BUILTINS, CONSTRUCTORS
-from .hostapi import HOOK_EVENTS, HOST_ITEMS, HostV1
+from .hostapi import COMMANDS, HOOK_EVENTS, HOST_ITEMS, HostV1
 from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, SPRING_MEMBERS, TRANSFORM, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, VOID, SPRING, ArrayType, AssetType, EnumType, MapType, StructType, TagType, Type, zero_value
 
 
@@ -63,8 +63,8 @@ def command_arg(expr: ir.Expr, value):
         return expr.name
     ty = expr.ty
     if isinstance(ty, EnumType):
-        if ty is MOVEMENT_MODE:
-            return rt.MovementMode(int(value))
+        if ty.builtin:
+            return getattr(rt, ty.name)(int(value))                        # MovementMode, MontageBlendMode ...
         return None if int(value) == 0 else ty.members[int(value)]       # a montage section (0 is 'None')
     return value
 
@@ -240,7 +240,8 @@ class Evaluator:
             elif k is ir.Return:
                 raise _ReturnValue(None if s.value is None else vals.copy_value(self.ev(s.value, env)))
             elif k is ir.Command:
-                self.owner.emit_command(s.name, [command_arg(a, self.ev(a, env)) for a in s.args])
+                implicit = [self.owner._source for _x in COMMANDS[s.name].implicit]      # host.montage_stop_source: the montage instance of the notify
+                self.owner.emit_command(s.name, implicit + [command_arg(a, self.ev(a, env)) for a in s.args])
             elif k is ir.ExprStmt:
                 self.ev(s.expr, env)
             elif k is ir.For:
@@ -382,11 +383,27 @@ class Interpreter:
             fn = getattr(self.host, name, None)
             if fn is not None:
                 fn(*args)
+                if name == "snapshot_pose":
+                    self._took_snapshot(args[0])
 
     def take_commands(self) -> list[tuple]:
         """The commands queued since the last flush (and forget them) -- for hosts that execute them themselves."""
         cmds, self._cmds = self._cmds, []
+        for name, args in cmds:
+            if name == "snapshot_pose":
+                self._took_snapshot(args[0])
         return cmds
+
+    def _took_snapshot(self, path: str) -> None:
+        """host.snapshot_pose(State): once the host took the pose, the snapshot state holds its name (what valid() sees)."""
+        head, *rest = path.split(".")
+        if not rest:
+            self.values[head] = path
+            return
+        target = self.values[head]
+        for member in rest[:-1]:
+            target = getattr(target, member)
+        setattr(target, rest[-1], path)
 
     # the generated class names these the same way
     def set_input(self, name: str, value) -> None:

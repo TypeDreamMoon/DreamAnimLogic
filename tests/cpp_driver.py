@@ -211,6 +211,8 @@ def leaves(name, ty):
 def _print_value(name, ty, obj="Obj"):
     """C++ statement printing ``<obj>.name`` as 'name v0 v1 ...' (nan / inf spelled out)."""
     ref = f"{obj}.{name}"
+    if isinstance(ty, AssetType) and ty.by_value:
+        return f'PvS("{name}", {ref}.bIsValid ? {ref}.StubName : std::string());'
     if isinstance(ty, AssetType):
         return f'PvS("{name}", {ref} != nullptr ? {ref}->StubName : std::string());'
     if isinstance(ty, TagType):
@@ -349,6 +351,29 @@ def hook_event(ev, owner: str = "Pawn") -> str:
     return "{ " + " ".join(parts) + " }"
 
 
+def scene_for_commands(module, gen, target: str) -> list[str]:
+    """Driver lines for what the montage commands act on: one active instance per slot of a stop_montages_with_slot, five numbered instances for
+    montage_stop_source, the pose snapshots' names (the stand-in logs them)."""
+    L: list[str] = []
+    slots: list[str] = []
+    for _label, body in module.bodies():
+        for st in ir.walk_stmts(body):
+            if isinstance(st, ir.Command) and st.name == "stop_montages_with_slot" and st.args[0].value not in slots:
+                slots.append(st.args[0].value)
+    for k, slot in enumerate(slots):
+        L += [f"\tUAnimMontage SlotMontage_{k}; SlotMontage_{k}.StubName = \"Slot_{slot}\"; SlotMontage_{k}.SlotAnimTracks.Add(FSlotAnimationTrack{{FName(TEXT(\"{slot}\"))}});",
+              f"\tFAnimMontageInstance SlotInstance_{k}; SlotInstance_{k}.StubId = {100 + k}; SlotInstance_{k}.Montage = &SlotMontage_{k};",
+              f"\t{target}.MontageInstances.Add(&SlotInstance_{k});"]
+    if any(isinstance(st, ir.Command) and st.name == "montage_stop_source" for _label, body in module.bodies() for st in ir.walk_stmts(body)):
+        for ident in range(1, 6):
+            L += [f"\tUAnimMontage SourceMontage_{ident}; SourceMontage_{ident}.StubName = \"Instance_{ident}\";",
+                  f"\tFAnimMontageInstance SourceInstance_{ident}; SourceInstance_{ident}.StubId = {ident}; SourceInstance_{ident}.Montage = &SourceMontage_{ident};",
+                  f"\t{target}.MontageInstances.Add(&SourceInstance_{ident});"]
+    for dotted, member in gen.snapshots:
+        L.append(f"\t{target}.StubSnapshotNames[&{target}.{member}] = \"{dotted}\";")
+    return L
+
+
 def notify_event(module, ev, k: int):
     """(declaration, statement) for an event of a notify class the program declares: the notify object with its properties set, and the call
     the engine makes on it.  An event with a montage instance (4th element) comes through the branching-point entry points."""
@@ -464,6 +489,7 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
     for a in slots:
         L.append(f"\tUInputAction Action_{a};")
         L.append(f"\tObj.DalAction_{a} = &Action_{a};")
+    L += scene_for_commands(module, gen, target)
     for md in module.montages:
         L.append(f"\tUAnimMontage Montage_{md.name};")
         L.append(f'\tMontage_{md.name}.StubName = "{md.name}";')
@@ -518,12 +544,11 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
             L.append(f"\t\tObj.{name} = {_lit(inp.ty, v)};")
         # the scene behind the montage reads, the target search and the traces
         for name, st in f.get("montages", {}).items():
-            if module.find_montage(name) is None:
-                continue
             sec = f'FName(TEXT("{st["section"]}"))' if st.get("section") else "FName()"
             playing = "true" if st.get("playing") else "false"
             active = "true" if st.get("active") else "false"
-            L.append(f"\t\t{target}.StubMontages[&Montage_{name}] = UAnimInstance::FStubMontage{{{playing}, {active}, {_num(st.get('position', 0.0))}f, {sec}}};")
+            key = f"&Montage_{name}" if module.find_montage(name) is not None else f'DalMontage("{name}")'       # a montage value: the asset of that name
+            L.append(f"\t\t{target}.StubMontages[{key}] = UAnimInstance::FStubMontage{{{playing}, {active}, {_num(st.get('position', 0.0))}f, {sec}}};")
         if actor:
             L.append("\t\tWorld.StubActors.clear();")
             for k, (tid, loc) in enumerate(f.get("targets", [])[:8]):

@@ -43,6 +43,9 @@ from .types import (
     HIT,
     INT,
     MOVEMENT_MODE,
+    MONTAGE_ASSET,
+    NAME_T,
+    NONE_T,
     SPRING,
     SPRING3,
     TRANSFORM,
@@ -176,7 +179,7 @@ def cpp_type(ty: Type) -> str:
     if isinstance(ty, TagType):
         return "FGameplayTag"
     if isinstance(ty, AssetType):
-        return f"TObjectPtr<{ty.cpp_class}>"
+        return ty.cpp_class if ty.by_value else f"TObjectPtr<{ty.cpp_class}>"
     if isinstance(ty, MapType):
         return f"TMap<{cpp_prop_type(ty.key)}, {cpp_prop_type(ty.value)}>"
     if isinstance(ty, ArrayType):
@@ -196,7 +199,8 @@ def holds_tags(ty: Type) -> bool:
 
 
 _ASSET_HEADERS = {"sequence": "Animation/AnimSequenceBase.h", "montage": "Animation/AnimMontage.h",
-                  "curve": "Curves/CurveFloat.h", "curve3": "Curves/CurveVector.h", "primitive": "Components/PrimitiveComponent.h"}
+                  "curve": "Curves/CurveFloat.h", "curve3": "Curves/CurveVector.h", "primitive": "Components/PrimitiveComponent.h",
+                  "snapshot": "Animation/PoseSnapshot.h"}
 
 
 def asset_headers(ty: Type, out: list[str]) -> None:
@@ -276,7 +280,9 @@ def cpp_value(ty: Type, v) -> str:
     if isinstance(ty, TagType):
         return cpp_tag_value(ty, v)
     if isinstance(ty, AssetType):
-        return "nullptr"
+        return f"{ty.cpp_class}()" if ty.by_value else "nullptr"
+    if ty is NAME_T:
+        return f'FName(TEXT("{v}"))'
     if isinstance(ty, (MapType, ArrayType)):
         return f"{cpp_type(ty)}()"
     raise ValueError(ty)
@@ -377,7 +383,7 @@ class CppExprGen:
             return f"{query_cpp(e.name)}({', '.join(unparen(self.x(a)) for a in e.args)})"
         if k is ir.Valid:
             if e.x.ty.is_asset:
-                return f"IsValid({unparen(self.x(e.x))})"
+                return f"{self.x(e.x)}.bIsValid" if e.x.ty.by_value else f"IsValid({unparen(self.x(e.x))})"
             return f"{self.x(e.x)}.IsValid()"
         if k is ir.CurveEval:
             fn = "EvalCurve" if e.ty is FLOAT else "EvalCurve3"
@@ -471,6 +477,7 @@ _G_ARM = "if (USpringArmComponent* DalArm = DalPawn->FindComponentByClass<USprin
 _G_CAMERA = "if (UCameraComponent* DalCamera = DalPawn->FindComponentByClass<UCameraComponent>())"
 _G_ANIM = "if (UAnimInstance* DalAnim = DalGetAnimInstance())"
 _G_ASSET = "if (UAnimMontage* DalAsset = DalMontageAsset(DalCommand.Montage))"
+_G_RESOLVED = "if (UAnimMontage* DalAsset = DalResolveMontage(DalCommand))"       # a program that passes `montage` values: the asset of the command or of the declared montage
 
 EXEC: dict[str, tuple[list[str], list[str]]] = {
     "set_max_walk_speed": ([_G_MOVEMENT], ["DalMovement->MaxWalkSpeed = DalCommand.F;"]),
@@ -511,6 +518,58 @@ EXEC: dict[str, tuple[list[str], list[str]]] = {
         "DalSectionName(DalCommand.Montage, DalCommand.SectionB), DalAsset);",
     ]),
     "montage_set_play_rate": ([_G_ANIM, _G_ASSET], ["DalAnim->Montage_SetPlayRate(DalAsset, DalCommand.F);"]),
+    "montage_set_position": ([_G_ANIM, _G_ASSET], ["DalAnim->Montage_SetPosition(DalAsset, DalCommand.F);"]),
+    "montage_stop_source": ([_G_ANIM, "if (FAnimMontageInstance* DalInstance = DalAnim->GetMontageInstanceForID(DalCommand.Instance))",
+                             "if (const UAnimMontage* DalMontage = DalInstance->Montage.Get())"], [
+        "FMontageBlendSettings DalBlendOut(DalMontage->BlendOut);",
+        "if (DalCommand.F >= 0.0f)",
+        "{",
+        "\tDalBlendOut.Blend.BlendTime = DalCommand.F;",
+        "}",
+        "DalBlendOut.BlendMode = DalMontage->BlendModeOut;",
+        "DalBlendOut.BlendProfile = DalMontage->BlendProfileOut;",
+        "DalInstance->Stop(DalBlendOut);",
+    ]),
+    "play_slot_animation": ([_G_ANIM, "if (UAnimSequenceBase* DalSequence = DalCommand.Sequence)"], [
+        "if (DalCommand.Mode == static_cast<int32>(EMontageBlendMode::Inertialization))",
+        "{",
+        "\tconst FMontageBlendSettings DalBlendIn(DalCommand.F);",
+        "\tFMontageBlendSettings DalBlendOut(DalCommand.F1);",
+        "\tDalBlendOut.BlendMode = EMontageBlendMode::Inertialization;",
+        "\tDalAnim->PlaySlotAnimationAsDynamicMontage_WithBlendSettings(DalSequence, DalCommand.Name, DalBlendIn, DalBlendOut, DalCommand.F2, DalCommand.Count, DalCommand.F3, DalCommand.F4);",
+        "}",
+        "else",
+        "{",
+        "\tDalAnim->PlaySlotAnimationAsDynamicMontage(DalSequence, DalCommand.Name, DalCommand.F, DalCommand.F1, DalCommand.F2, DalCommand.Count, DalCommand.F3, DalCommand.F4);",
+        "}",
+    ]),
+    "stop_montages_with_slot": ([_G_ANIM], [
+        "for (FAnimMontageInstance* DalInstance : DalAnim->MontageInstances)",
+        "{",
+        "\tconst UAnimMontage* DalMontage = DalInstance != nullptr && DalInstance->IsActive() ? DalInstance->Montage.Get() : nullptr;",
+        "\tif (DalMontage == nullptr)",
+        "\t{",
+        "\t\tcontinue;",
+        "\t}",
+        "\tfor (const FSlotAnimationTrack& DalTrack : DalMontage->SlotAnimTracks)",
+        "\t{",
+        "\t\tif (DalTrack.SlotName != DalCommand.Name)",
+        "\t\t{",
+        "\t\t\tcontinue;",
+        "\t\t}",
+        "\t\tFMontageBlendSettings DalBlendOut(DalMontage->BlendOut);",
+        "\t\tif (DalCommand.F >= 0.0f)",
+        "\t\t{",
+        "\t\t\tDalBlendOut.Blend.BlendTime = DalCommand.F;",
+        "\t\t}",
+        "\t\tDalBlendOut.BlendMode = DalMontage->BlendModeOut;",
+        "\t\tDalBlendOut.BlendProfile = DalMontage->BlendProfileOut;",
+        "\t\tDalInstance->Stop(DalBlendOut);",
+        "\t\tbreak;",
+        "\t}",
+        "}",
+    ]),
+    "snapshot_pose": ([_G_ANIM], []),             # the body is written per program: one FPoseSnapshot property per name (execute_body)
     "set_control_rotation": ([_G_PAWN, _G_CONTROLLER], ["DalController->SetControlRotation(FRotator(DalCommand.R));"]),
     "camera_set_arm_length": ([_G_PAWN, _G_ARM], ["DalArm->TargetArmLength = DalCommand.F;"]),
     "camera_set_socket_offset": ([_G_PAWN, _G_ARM], ["DalArm->SocketOffset = FVector(DalCommand.V);"]),
@@ -600,6 +659,17 @@ class CppGen:
                     used_queries.add(e.name)
         self.cmds = [n for n in COMMANDS if n in used_cmds]
         self.uses_source = "montage_stop_source" in used_cmds        # a command that names the montage instance of the notify being handled
+        # a command whose montage is a `montage` value (settings data) rather than a declared montage
+        self.asset_montages = any(isinstance(s, ir.Command) and s.args and s.args[0].ty is MONTAGE_ASSET and COMMANDS[s.name].params
+                                  and COMMANDS[s.name].params[0] == "montage"
+                                  for _label, body in module.bodies() for s in ir.walk_stmts(body))
+        self.snapshots: list[tuple[str, str]] = []                   # the pose snapshots the program takes: (dotted state path, C++ member path)
+        for _label, body in module.bodies():
+            for s in ir.walk_stmts(body):
+                if isinstance(s, ir.Command) and s.name == "snapshot_pose" and s.place is not None:
+                    dotted = s.args[0].value                          # type: ignore[attr-defined]
+                    if all(dotted != d for d, _c in self.snapshots):
+                        self.snapshots.append((dotted, ".".join((s.place[0], *s.place[1]))))
         self.queries = [n for n in QUERIES if n in used_queries]
         self.world_queries = [n for n in self.queries if n.startswith("trace_") or n in _SCENE_QUERIES]
         # the new members of a hit are filled by every trace of the program, the old trace queries included, but only when the
@@ -631,11 +701,12 @@ class CppGen:
         self.bind_anim = self.bind_begin or self.bind_end or self.bind_ended or self.bind_blend
         self.montage_reads = [i for i in module.inputs if i.host is not None and i.host.item.startswith("montage_")]
         self.section_reads = [i for i in self.montage_reads if i.host.item == "montage_section"]  # type: ignore[union-attr]
-        self.section_cmds = bool({"montage_play", "montage_jump_to_section", "montage_set_next_section"} & set(self.cmds))
+        self.section_cmds = bool({"montage_play", "montage_jump_to_section", "montage_set_next_section"} & set(self.cmds)) and bool(module.montages)
         self.montage_cmds = [c for c in self.cmds if c.startswith("montage_")]
         self.curve_reads = [i for i in module.inputs if i.host is not None and i.host.item == "anim_curve"]
         self.curve_reads = self.curve_reads + [i for i in module.inputs if i.host is not None and i.host.item == "root_motion_mode"]   # reads of the anim instance
-        self.needs_anim = bool(self.montage_reads or self.curve_reads or self.montage_cmds or self.bind_anim)
+        self.needs_anim = bool(self.montage_reads or self.curve_reads or self.montage_cmds or self.bind_anim or self.snapshots
+                               or {"play_slot_animation", "stop_montages_with_slot", "montage_stop_source"} & set(self.cmds) or "montage_is_playing" in self.queries)
         self.arm = bool({"camera_set_arm_length", "camera_set_socket_offset"} & set(self.cmds))
         self.camera = "camera_set_fov" in self.cmds
         self.controller = "set_control_rotation" in self.cmds
@@ -659,6 +730,13 @@ class CppGen:
         if isinstance(e.ty, EnumType):
             return f"static_cast<int32>({unparen(self.ex.x(e))})"
         return unparen(self.ex.x(e))
+
+    def cmd_args(self, s: ir.Command) -> list[str]:
+        """The arguments of the DalHost::Cmd:: constructor: the implicit ones first (the montage instance of the notify being handled), then
+        what the program wrote; a montage value has no section, so the `none` that stands for it is left out."""
+        out = ["DalCurrentInstance" for _x in COMMANDS[s.name].implicit]
+        out += [self.cmd_arg(a) for a in s.args if not (isinstance(a, ir.Lit) and a.ty is NONE_T)]
+        return out
 
     def stmts(self, body: list[ir.Stmt], depth: int) -> list[str]:
         pad = T * depth
@@ -684,7 +762,7 @@ class CppGen:
             elif isinstance(s, ir.Return):
                 out.append(f"{pad}return" + (f" {unparen(self.ex.x(s.value))}" if s.value is not None else "") + ";")
             elif isinstance(s, ir.Command):
-                args = ", ".join(self.cmd_arg(a) for a in s.args)
+                args = ", ".join(self.cmd_args(s))
                 out.append(f"{pad}DalEnqueue(DalHost::Cmd::{cmd_cpp(s.name)}({args}));")
             elif isinstance(s, ir.For):
                 out.append(f"{pad}for (int32 {s.var} = {s.lo}; {s.var} < {s.hi}; ++{s.var})")
@@ -855,6 +933,11 @@ class CppGen:
                 out.append(Method("UAnimInstance*", "DalGetAnimInstance", body=["return this;"]))
         if self.montage_cmds and m.montages:                # (the lookup of a declared montage's asset; montage_stop_all needs none)
             out.append(Method("UAnimMontage*", "DalMontageAsset", "const int32 DalMontage", body=self.montage_asset_body()))
+        if self.asset_montages:
+            out.append(Method("UAnimMontage*", "DalResolveMontage", "const DalHost::FCommand& DalCommand",
+                              doc="The montage a command acts on: a `montage` value, or the asset of the declared montage.",
+                              body=["return DalCommand.MontageAsset != nullptr ? DalCommand.MontageAsset : DalMontageAsset(DalCommand.Montage);"] if m.montages
+                              else ["return DalCommand.MontageAsset;"]))
         if self.bind_ended or self.bind_blend:
             out.append(Method("int32", "DalMontageIndex", "const UAnimMontage* DalMontage", body=self.montage_index_body()))
 
@@ -1204,11 +1287,11 @@ class CppGen:
         return ["DalHost::FEvent DalQueued = DalEvent;",
                 "if (DalQueued.Source != nullptr)",
                 "{",
-                "	DalQueued.Id = DalFindNotifyId(DalQueued.Name);",
-                "	if (DalQueued.Id == INDEX_NONE)",
-                "	{",
-                "		return;",
-                "	}",
+                "\tDalQueued.Id = DalFindNotifyId(DalQueued.Name);",
+                "\tif (DalQueued.Id == INDEX_NONE)",
+                "\t{",
+                "\t\treturn;",
+                "\t}",
                 "}",
                 "DalPostEvent(DalQueued);"]
 
@@ -1225,17 +1308,20 @@ class CppGen:
             if h.event in HOOK_EVENTS:
                 args = {"movement_mode_changed": "static_cast<EMovementMode>(DalEvent.ModeA), static_cast<EMovementMode>(DalEvent.ModeB)",
                         "landed": "DalEvent.Hit"}.get(h.event, "") if h.params else ""
-                out += [f"	// on {h.event}", f"	if (DalEvent.Kind == DalHost::EEventKind::{kinds[h.event]})", "	{", f"		DalHandler_{k}({args});", "	}"]
+                out += [f"\t// on {h.event}", f"\tif (DalEvent.Kind == DalHost::EEventKind::{kinds[h.event]})", "\t{", f"\t\tDalHandler_{k}({args});", "\t}"]
                 continue
             what = f"on {h.event} {h.name}" + (f" {h.phase}" if h.phase else "")
             kind = kinds[h.event]
             if h in self.notify_handlers:
                 nstruct = h.params[0][1]
-                out += [f"	// {what}", f"	if (DalEvent.Kind == DalHost::EEventKind::{kind} && DalEvent.Id == Dal_NotifyId_{h.name})", "	{",
-                        f"		if (const {nstruct.cpp_type}* DalPayload = Cast<{nstruct.cpp_type}>(DalEvent.Source))", "		{"]
+                out += [f"\t// {what}", f"\tif (DalEvent.Kind == DalHost::EEventKind::{kind} && DalEvent.Id == Dal_NotifyId_{h.name})", "\t{",
+                        f"\t\tif (const {nstruct.cpp_type}* DalPayload = Cast<{nstruct.cpp_type}>(DalEvent.Source))", "\t\t{"]
                 if self.uses_source:
-                    out.append("			DalCurrentInstance = DalEvent.MontageInstance;")
-                out += [f"			DalHandler_{k}(DalPayload);", "		}", "	}"]
+                    out.append("\t\t\tDalCurrentInstance = DalEvent.MontageInstance;")
+                out.append(f"\t\t\tDalHandler_{k}(DalPayload);")
+                if self.uses_source:
+                    out.append("\t\t\tDalCurrentInstance = INDEX_NONE;")
+                out += ["\t\t}", "\t}"]
                 continue
             if h.event in ("notify", "notify_begin", "notify_end", "notify_tick"):
                 ident = f"Dal_NotifyId_{h.name}"
@@ -1260,6 +1346,14 @@ class CppGen:
         out = ["switch (DalCommand.Kind)", "{"]
         for c in self.cmds:
             guards, body = EXEC[c]
+            if self.asset_montages:
+                guards = [_G_RESOLVED if g == _G_ASSET else g for g in guards]
+            if c == "montage_play" and not self.m.montages:
+                body = body[:1]                                  # only montage values: no sections to jump to
+            if c == "snapshot_pose":
+                body = []
+                for k, (dotted, member) in enumerate(self.snapshots):
+                    body += [("if" if k == 0 else "else if") + f" (DalCommand.Name == FName(TEXT(\"{dotted}\")))", "{", f"\tDalAnim->SnapshotPose({member});", "}"]
             out.append(f"case DalHost::ECommand::{cmd_cpp(c)}:")
             out.extend(_guarded(guards, body, 1))
             out.append("\tbreak;")
@@ -1366,6 +1460,11 @@ class CppGen:
                 "\treturn false;",
                 "}",
                 "return DalHit.Normal.Z >= UE_KINDA_SMALL_NUMBER && DalHit.Normal.Z >= DalMovement->GetWalkableFloorZ();"]))
+        if "montage_is_playing" in q:
+            out.append(Method("bool", "DalMontageIsPlaying", "const UAnimMontage* DalMontage",
+                              doc="host.montage_is_playing: is the montage (an asset value) playing on the animation instance.",
+                              body=["const UAnimInstance* DalAnim = DalGetAnimInstance();",
+                                    "return DalAnim != nullptr && DalMontage != nullptr && DalAnim->Montage_IsPlaying(DalMontage);"]))
         if "primitive_valid" in q:
             out.append(Method("bool", "DalPrimitiveValid", "const UPrimitiveComponent* DalPrimitive", body=["return IsValid(DalPrimitive);"]))
         if "primitive_speed" in q:
@@ -2060,6 +2159,9 @@ class CppGen:
             if any(q.startswith("target_") for q in self.queries):
                 L.append(f"{T}TArray<TWeakObjectPtr<AActor>> DalTargets;")
                 L.append(f"{T}bool bDalTargetsFresh = false;")
+        if self.uses_source:
+            L.append("")
+            L.append(f"{T}int32 DalCurrentInstance = INDEX_NONE;            // the montage instance that raised the notify whose handler is running")
         if self.queue_target:
             L.append("")
             L.append(f"{T}FCriticalSection DalPeerLock;                    // guards the queue of calls from actor logics")

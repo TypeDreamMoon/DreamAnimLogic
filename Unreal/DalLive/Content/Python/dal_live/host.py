@@ -118,14 +118,32 @@ class UeHost(HostV1):
     def _get_cam(self):
         return self._cached("cam", self.comp.get_camera)
 
-    def _montage(self, name: str):
+    def _montage(self, name):
+        """The montage asset of a declared montage (the component's Montages map) or of a ``montage`` value: its object path (settings data)."""
+        if name is None:
+            return None
         asset = self._assets.get(name)
         if asset is None:
             asset = self.comp.get_montage_asset(name)
+            if asset is None and name.startswith("/"):
+                asset = unreal.load_asset(name)
             if asset is None:
                 self._warn_once("montage:" + name, f"{self.comp.get_name()}: no montage asset assigned for '{name}' (Montages map)")
             else:
                 self._assets[name] = asset
+        return asset
+
+    def _sequence(self, name):
+        """The animation sequence of a ``sequence`` value (its object path)."""
+        if name is None:
+            return None
+        asset = self._assets.get("seq:" + name)
+        if asset is None and name.startswith("/"):
+            asset = unreal.load_asset(name)
+            if asset is not None:
+                self._assets["seq:" + name] = asset
+        if asset is None:
+            self._warn_once("sequence:" + name, f"{self.comp.get_name()}: no animation sequence '{name}' (an object path)")
         return asset
 
     # ---- program changes ---------------------------------------------------------------------------------------------
@@ -539,6 +557,23 @@ class UeHost(HostV1):
         if anim is not None and asset is not None:
             anim.montage_set_play_rate(asset, float(rate))
 
+    def montage_set_position(self, name, position):
+        """AnimInstance->Montage_SetPosition(Montage, Position)"""
+        anim, asset = self._get_anim(), self._montage(name)
+        if anim is not None and asset is not None:
+            anim.montage_set_position(asset, float(position))
+
+    def play_slot_animation(self, sequence, slot, blend_in, blend_out, rate, loops, blend_out_trigger, start_time, blend_out_mode):
+        """AnimInstance->PlaySlotAnimationAsDynamicMontage(Sequence, Slot, BlendIn, BlendOut, Rate, Loops, BlendOutTriggerTime, StartTime).
+        An inertialization blend out (blend_out_mode 1) needs the ..._WithBlendSettings variant, which Python cannot call: the standard blend plays."""
+        anim, asset = self._get_anim(), self._sequence(sequence)
+        if anim is not None and asset is not None:
+            anim.play_slot_animation_as_dynamic_montage(asset, slot, float(blend_in), float(blend_out), float(rate), int(loops),
+                                                        float(blend_out_trigger), float(start_time))
+
+    # Not in the editor session (no Python API reaches them; the commands do nothing here, the generated C++ and the Blender host have them):
+    # montage_stop_source (the montage instance of a notify), stop_montages_with_slot (FAnimMontageInstance tracks), snapshot_pose (FPoseSnapshot).
+
     # ---- commands: controller / camera ---------------------------------------------------------------------------------------------------
 
     def set_control_rotation(self, rotation):
@@ -573,5 +608,6 @@ for _name in ("time", "velocity", "acceleration", "max_acceleration", "max_braki
     setattr(UeHost, _name, property(_retrying(UeHost.__dict__[_name].fget)))
 for _name in (*COMMANDS, "action", "notify", "montage_playing", "montage_active", "montage_position", "montage_section",
               "trace_line", "trace_sphere", "target_count", "target_id", "target_location", "target_index"):
-    setattr(UeHost, _name, _retrying(UeHost.__dict__[_name]))
+    if _name in UeHost.__dict__:                      # a command this host does not implement stays the do-nothing method of HostV1
+        setattr(UeHost, _name, _retrying(UeHost.__dict__[_name]))
 del _name

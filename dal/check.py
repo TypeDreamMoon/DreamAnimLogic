@@ -52,9 +52,12 @@ from .types import (
     TRANSFORM_MEMBERS,
     INT,
     MONTAGE,
+    MONTAGE_ASSET,
     MOVEMENT_MODE,
+    NAME_T,
     QUAT,
     ROTATOR,
+    SNAPSHOT,
     VEC2,
     VEC3,
     EnumType,
@@ -102,6 +105,7 @@ class Scope:
         self.ctx = ctx
         self.ret = ret
         self.fn_name = fn_name
+        self.notify_handler = False         # the handler of a declared branching notify: host.montage_stop_source names the montage instance that raised it
         self.frames: list[dict[str, Local]] = [{}]
 
     def push(self) -> None:
@@ -740,6 +744,8 @@ class Checker:
     def struct_member_ok(self, st: StructType, ty: Type) -> bool:
         if ty is HIT or ty is MONTAGE or ty in SPRING_MEMBERS:
             return False
+        if ty is SNAPSHOT:
+            return st.kind == "struct" and not st.is_notify          # a snapshot is state data: not settings data, not a notify's payload
         if isinstance(ty, AssetType):
             return st.kind == "settings" or not ty.settings_only
         if isinstance(ty, (MapType, ArrayType)):
@@ -929,7 +935,7 @@ class Checker:
         self.user_enums.append(et)
         self.globals[d.name].obj = et
 
-    def storable(self, ty: Type, pos: Pos, what: str, settings_ok: bool = False) -> Type:
+    def storable(self, ty: Type, pos: Pos, what: str, settings_ok: bool = False, snapshot_ok: bool = False) -> Type:
         """A hit result cannot live in state, inputs, params or constants (Unreal cannot reflect it); neither can curves, tables and lists,
         and a settings value (a read-only data asset) only comes from a param."""
         if ty is HIT:
@@ -940,6 +946,9 @@ class Checker:
             return ERROR
         if (isinstance(ty, AssetType) and ty.settings_only) or isinstance(ty, (MapType, ArrayType)):
             self.err("DAL4058", f"{what} cannot have type {ty}: curves, tables and lists belong in a settings type (read them from the param)", pos)
+            return ERROR
+        if ty is SNAPSHOT and not snapshot_ok:
+            self.err("DAL4062", f"{what} cannot have type snapshot: a pose snapshot is a state (or a member of a struct state) that host.snapshot_pose(State) fills", pos)
             return ERROR
         if isinstance(ty, StructType) and ty.is_settings and not settings_ok:
             self.err("DAL4058", f"{what} cannot have type {ty}: a settings value is a read-only data asset, it comes from a param (or from a member of another settings)", pos)
@@ -1010,7 +1019,7 @@ class Checker:
 
     def declare_state(self, d: S.StateDecl) -> None:
         ok = self.declare_global(d.name, "state", d.name_pos or d.pos, what="a state name")
-        ty = self.storable(self.resolve_type(d.type_name, d.type_pos), d.type_pos, "a state")
+        ty = self.storable(self.resolve_type(d.type_name, d.type_pos), d.type_pos, "a state", snapshot_ok=True)
         value = self.const_value(d.init, ty, d.pos, f"state '{d.name}'")
         if ok and ty is not ERROR:
             self.module.states.append(ir.StateDef(d.name, ty, value))
@@ -1560,6 +1569,8 @@ class Checker:
             return self.cond(e, sc)
         if isinstance(e, S.HostCallExpr):
             return self.host_query(e, sc)
+        if isinstance(e, S.StringLit):
+            return self.bad("DAL4061", "a string is only the slot name argument of a host command: host.stop_montages_with_slot(\"Transition\")", e.pos)
         raise AssertionError(e)
 
     def name_ref(self, e: S.NameRef, sc: Scope) -> ir.Expr:
@@ -1821,6 +1832,8 @@ class Checker:
                                     f"and also the name of the {self.globals[n].kind}; rename the {self.globals[n].kind}", pos)
                 continue
             sc.declare(n, Local(t, False))
+        declared = self.notifies.get(d.name) if d.event in ("notify", "notify_begin", "notify_end", "notify_tick") else None
+        sc.notify_handler = declared is not None and declared.branching       # only a branching notify knows its montage instance
         body = self.block(d.body, sc)
         return ir.HandlerDef(d.event, d.name, d.phase, params, body)
 
@@ -1871,41 +1884,102 @@ class Checker:
             return None
         args: list[ir.Expr] = []
         montage: ir.MontageDef | None = None
+        asset_montage = False                        # the montage is a `montage` value (settings data), not a declared montage
         ok = True
+        if "source" in cmd.implicit and not sc.notify_handler:
+            self.err("DAL5066", f"host.{s.name}() names the montage instance that raised a notify: use it in the handler of a declared `branching` notify "
+                                f"(notify_state Name branching {{ ... }}; the engine tells only a branching point which montage instance it comes from)", pos)
+            return None
+        if s.name == "snapshot_pose" and self.kind != "anim":
+            self.err("DAL5067", "host.snapshot_pose() takes the pose of the animation instance: it belongs to an animation logic (logic Name;)", pos)
+            return None
+        place: tuple | None = None
         for i, spec in enumerate(cmd.params):
             if i >= n:
                 default = cmd.defaults[i - cmd.min_args]
                 if spec == "section":
                     if montage is not None:
                         args.append(ir.EnumLit(montage.enum, "None"))
+                    elif asset_montage:
+                        args.append(ir.Lit(NONE_T, None))           # a montage value has no sections: the host is told there is none
                 elif isinstance(default, bool):
                     args.append(ir.Lit(BOOL, default))
+                elif isinstance(spec, EnumType):
+                    args.append(ir.EnumLit(spec, default))
+                elif spec is INT:
+                    args.append(ir.Lit(INT, int(default)))
                 else:
                     args.append(ir.Lit(spec, float(default)))
                 continue
             a = s.args[i]
             if spec == "montage":
                 sym = self.globals.get(a.name) if isinstance(a, S.NameRef) else None
-                if sym is None or sym.kind != "montage":
-                    self.err("DAL4024", f"argument {i + 1} of host.{s.name}() must be a declared montage (montage Name;)", a.pos)
+                if sym is not None and sym.kind == "montage":
+                    montage = sym.obj    # type: ignore[assignment]
+                    args.append(ir.MontageRef(MONTAGE, a.name))
+                    continue
+                v = self.ex(a, sc)
+                if v.ty is ERROR:
+                    ok = False
+                elif v.ty is MONTAGE_ASSET:
+                    asset_montage = True
+                    args.append(v)
+                else:
+                    self.err("DAL4024", f"argument {i + 1} of host.{s.name}() must be a declared montage (montage Name;) or a montage value (a settings member), not {v.ty}", a.pos)
+                    ok = False
+            elif spec == "section":
+                if asset_montage:
+                    self.err("DAL4027", f"argument {i + 1} of host.{s.name}(): a montage value has no sections known when the program is compiled "
+                                        f"(only a declared montage has); play it and move it with host.montage_set_position()", a.pos)
+                    self.ex(a, sc)
                     ok = False
                     continue
-                montage = sym.obj    # type: ignore[assignment]
-                args.append(ir.MontageRef(MONTAGE, a.name))
-            elif spec == "section":
                 v = self.ex(a, sc)
                 if montage is not None and v.ty is not ERROR and v.ty is not montage.enum:
                     self.err("DAL4025", f"argument {i + 1} of host.{s.name}() must be a section of montage {montage.name} "
                                         f"(e.g. {montage.name}.{montage.sections[0] if montage.sections else 'Section'}), not {v.ty}", a.pos)
                     ok = False
                 args.append(v)
+            elif spec == "place":
+                v = self.ex(a, sc)
+                if v.ty is ERROR:
+                    ok = False
+                    continue
+                found = self.state_place(v)
+                if v.ty is not SNAPSHOT or found is None:
+                    got = f"a {v.ty}" if v.ty is not SNAPSHOT else "a local, input or parameter"
+                    self.err("DAL4062", f"argument {i + 1} of host.{s.name}() is the snapshot to fill: a state of type snapshot or a snapshot member of a struct state "
+                                        f"(host.snapshot_pose(RagdollPose);), not {got}", a.pos)
+                    ok = False
+                    continue
+                place = found
+                args.append(ir.Lit(NAME_T, ".".join((found[0], *found[1]))))
+            elif spec == "name":
+                if not isinstance(a, S.StringLit):
+                    self.err("DAL4061", f"argument {i + 1} of host.{s.name}() is a name in quotes, e.g. host.{s.name}(\"Name\")", a.pos)
+                    self.ex(a, sc)
+                    ok = False
+                    continue
+                if not a.value or any(ord(c) < 32 or c in '"\\' for c in a.value):
+                    self.err("DAL3067", f"'{a.value}' is not a usable slot name (printable characters, no quotes or backslashes, not empty)", a.pos)
+                    ok = False
+                    continue
+                args.append(ir.Lit(NAME_T, a.value))
             else:
                 v = self.ex(a, sc)
                 v = self.assignable(spec, v, a.pos, f"argument {i + 1} of host.{s.name}()")
                 args.append(v)
         if not ok:
             return None
-        return ir.Command(s.name, args)
+        return ir.Command(s.name, args, place)
+
+    def state_place(self, e: ir.Expr) -> tuple | None:
+        """``(state, (member, ...))`` when ``e`` is a state or a member of a struct state (the places a command can fill), else None."""
+        path: list[str] = []
+        while isinstance(e, ir.Member) and isinstance(e.x.ty, StructType):
+            path.insert(0, e.comps)
+            e = e.x
+        return (e.name, tuple(path)) if isinstance(e, ir.StateRef) else None
 
     def host_query(self, e: S.HostCallExpr, sc: Scope) -> ir.Expr:
         args = [self.ex(a, sc) for a in e.args]
@@ -2029,10 +2103,12 @@ class Checker:
                 return ir.Binary(BOOL, op, a, b)
             if ta.is_tags and ta is tb:
                 return ir.Binary(BOOL, op, a, b)
-            if isinstance(ta, AssetType) and not ta.settings_only and (tb is ta or tb is NONE_T):
+            if isinstance(ta, AssetType) and not ta.settings_only and not ta.by_value and (tb is ta or tb is NONE_T):
                 return ir.Binary(BOOL, op, a, b if tb is ta else ir.Lit(ta, None))
-            if isinstance(tb, AssetType) and not tb.settings_only and ta is NONE_T:
+            if isinstance(tb, AssetType) and not tb.settings_only and not tb.by_value and ta is NONE_T:
                 return ir.Binary(BOOL, op, ir.Lit(tb, None), b)
+            if ta is tb and ta is SNAPSHOT:
+                return self.bad("DAL4001", f"snapshot values cannot be compared with '{op}'; ask valid(snapshot)", op_pos)
             if ta is tb and ta in (VEC2, VEC3, ROTATOR, QUAT):
                 return self.bad("DAL4001", f"{ta} values cannot be compared with '{op}'; compare lengths or components, e.g. is_nearly_zero(length(a - b))", op_pos)
             if ta is tb and ta is TRANSFORM:

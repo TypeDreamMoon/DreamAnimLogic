@@ -23,6 +23,8 @@
 class AActor;
 class UObject;
 class UPrimitiveComponent;
+class UAnimMontage;
+class UAnimSequenceBase;
 
 #define DAL_HOST_VERSION 2
 
@@ -190,6 +192,12 @@ namespace DalHost
 		CameraSetArmLength,
 		CameraSetSocketOffset,
 		CameraSetFov,
+		// v4
+		MontageSetPosition,
+		MontageStopSource,
+		PlaySlotAnimation,
+		StopMontagesWithSlot,
+		SnapshotPose,
 	};
 
 	struct FCommand
@@ -204,6 +212,16 @@ namespace DalHost
 		bool B1 = false;
 		FVector3f V = FVector3f(0.0f, 0.0f, 0.0f);
 		FRotator3f R = FRotator3f(0.0f, 0.0f, 0.0f);
+		// v4
+		FName Name;                            // slot name, or the dotted path of the snapshot state
+		int32 Count = 0;                       // play_slot_animation: loops
+		int32 Instance = INDEX_NONE;           // montage_stop_source: the montage instance that raised the notify
+		float F1 = 0.0f;                       // play_slot_animation: blend out time, rate, blend out trigger time, start time
+		float F2 = 0.0f;
+		float F3 = 0.0f;
+		float F4 = 0.0f;
+		UAnimMontage* MontageAsset = nullptr;  // a `montage` value as the command's montage (instead of the index of a declared one)
+		UAnimSequenceBase* Sequence = nullptr; // play_slot_animation: the sequence
 	};
 
 	/** Constructors of the commands, one per `host.<name>(...)` statement. */
@@ -331,6 +349,86 @@ namespace DalHost
 			FCommand C = Make(ECommand::MontageSetPlayRate);
 			C.Montage = Montage;
 			C.F = Rate;
+			return C;
+		}
+
+		// v4: the montage is a `montage` value (it has no sections known to the program)
+		inline FCommand MontagePlay(UAnimMontage* Asset, float Rate)
+		{
+			FCommand C = Make(ECommand::MontagePlay);
+			C.MontageAsset = Asset;
+			C.F = Rate;
+			return C;
+		}
+
+		inline FCommand MontageStop(UAnimMontage* Asset, float BlendOut)
+		{
+			FCommand C = Make(ECommand::MontageStop);
+			C.MontageAsset = Asset;
+			C.F = BlendOut;
+			return C;
+		}
+
+		inline FCommand MontageSetPlayRate(UAnimMontage* Asset, float Rate)
+		{
+			FCommand C = Make(ECommand::MontageSetPlayRate);
+			C.MontageAsset = Asset;
+			C.F = Rate;
+			return C;
+		}
+
+		inline FCommand MontageSetPosition(int32 Montage, float Position)
+		{
+			FCommand C = Make(ECommand::MontageSetPosition);
+			C.Montage = Montage;
+			C.F = Position;
+			return C;
+		}
+
+		inline FCommand MontageSetPosition(UAnimMontage* Asset, float Position)
+		{
+			FCommand C = Make(ECommand::MontageSetPosition);
+			C.MontageAsset = Asset;
+			C.F = Position;
+			return C;
+		}
+
+		inline FCommand MontageStopSource(int32 Instance, float BlendOut)
+		{
+			FCommand C = Make(ECommand::MontageStopSource);
+			C.Instance = Instance;
+			C.F = BlendOut;
+			return C;
+		}
+
+		inline FCommand PlaySlotAnimation(UAnimSequenceBase* Sequence, const FName& Slot, float BlendIn, float BlendOut, float Rate, int32 Loops,
+		                                  float BlendOutTriggerTime, float StartTime, int32 BlendOutMode)
+		{
+			FCommand C = Make(ECommand::PlaySlotAnimation);
+			C.Sequence = Sequence;
+			C.Name = Slot;
+			C.F = BlendIn;
+			C.F1 = BlendOut;
+			C.F2 = Rate;
+			C.Count = Loops;
+			C.F3 = BlendOutTriggerTime;
+			C.F4 = StartTime;
+			C.Mode = BlendOutMode;
+			return C;
+		}
+
+		inline FCommand StopMontagesWithSlot(const FName& Slot, float BlendOut)
+		{
+			FCommand C = Make(ECommand::StopMontagesWithSlot);
+			C.Name = Slot;
+			C.F = BlendOut;
+			return C;
+		}
+
+		inline FCommand SnapshotPose(const FName& Name)
+		{
+			FCommand C = Make(ECommand::SnapshotPose);
+			C.Name = Name;
 			return C;
 		}
 	} // namespace Cmd

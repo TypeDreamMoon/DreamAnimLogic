@@ -289,6 +289,13 @@ class Channel(IntEnum):
     GameTraceChannel18 = 31
 
 
+class MontageBlendMode(IntEnum):
+    """How a dynamic montage blends out; same order as UE ``EMontageBlendMode``."""
+
+    Standard = 0
+    Inertialization = 1
+
+
 class BlendOption(IntEnum):
     """The easing options of ``blend_alpha``; same order as UE ``EAlphaBlendOption``."""
 
@@ -1570,11 +1577,27 @@ class LogicBase:
             fn = getattr(self.host, name, None)
             if fn is not None:
                 fn(*args)
+                if name == "snapshot_pose":
+                    self._took_snapshot(args[0])
 
     def take_commands(self) -> list:
         """The commands queued since the last flush (and forget them) -- for hosts that execute them themselves."""
         cmds, self._cmds = self._cmds, []
+        for name, args in cmds:
+            if name == "snapshot_pose":
+                self._took_snapshot(args[0])
         return cmds
+
+    def _took_snapshot(self, path: str) -> None:
+        """host.snapshot_pose(State): once the host took the pose, the snapshot state holds its name (what valid() sees)."""
+        head, *rest = path.split(".")
+        if not rest:
+            setattr(self, head, path)
+            return
+        target = getattr(self, head)
+        for member in rest[:-1]:
+            target = getattr(target, member)
+        setattr(target, rest[-1], path)
 
     def call_entry(self, name: str, /, *args, **named) -> None:
         """Call an entry the way a graph does: by name, with the parameters by position or by name (missing ones take their defaults)."""

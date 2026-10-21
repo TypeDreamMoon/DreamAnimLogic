@@ -36,11 +36,31 @@ update(dt) {
     host.montage_jump_to_section(Swing, Swing.Windup);
     host.montage_set_next_section(Swing, Swing.Windup, Swing.Strike);
     host.montage_set_play_rate(Swing, F);
+    host.montage_set_position(Swing, F);
+    host.stop_montages_with_slot("Slot");
+    host.stop_montages_with_slot("Slot", 0.1);
     host.set_control_rotation(R);
     host.camera_set_arm_length(F);
     host.camera_set_socket_offset(V);
     host.camera_set_fov(F);
     N += 1;
+}
+"""
+
+# the commands an actor logic cannot issue (they belong to an animation instance), with the asset values they take
+ANIM_V4_COMMANDS = """
+settings Moves { Attack: montage; Turn: sequence; }
+notify_state EarlyOut branching { Duration: float = 0.25; }
+logic AnimCommands : anim post_flush;
+param Cfg: Moves;
+input Go: float;
+state Pose: snapshot;
+on notify_begin EarlyOut { host.montage_stop_source(payload.Duration); }
+update(dt) {
+    host.montage_play(Cfg.Attack, Go);
+    host.play_slot_animation(Cfg.Turn, "Transition");
+    host.play_slot_animation(Cfg.Turn, "Plain", 0.1, 0.2, Go, 2, -1.0, 0.0, MontageBlendMode.Inertialization);
+    host.snapshot_pose(Pose);
 }
 """
 

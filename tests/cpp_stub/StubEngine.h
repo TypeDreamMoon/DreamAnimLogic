@@ -713,10 +713,65 @@ struct FBranchingPointNotifyPayload
 	bool bReachedEnd = false;
 };
 
+enum class EAlphaBlendOption : uint8;          // (defined with FAlphaBlend below)
+enum class EMontageBlendMode : uint8
+{
+	Standard,
+	Inertialization,
+};
+
+// the blend of a montage (UE: FAlphaBlend): its time and easing
+struct FStubBlend
+{
+	float BlendTime = 0.25f;
+	EAlphaBlendOption Option = static_cast<EAlphaBlendOption>(0);
+	float GetBlendTime() const { return BlendTime; }
+	EAlphaBlendOption GetBlendOption() const { return Option; }
+};
+
+struct FMontageBlendSettings
+{
+	FStubBlend Blend;
+	EMontageBlendMode BlendMode = EMontageBlendMode::Standard;
+	void* BlendProfile = nullptr;
+	FMontageBlendSettings() = default;
+	explicit FMontageBlendSettings(float InBlendTime) { Blend.BlendTime = InBlendTime; }
+	explicit FMontageBlendSettings(const FStubBlend& In) : Blend(In) {}
+};
+
+struct FSlotAnimationTrack
+{
+	FName SlotName;
+};
+
 class UAnimMontage : public UAnimSequenceBase
 {
 public:
 	float GetDefaultBlendOutTime() const { return 0.25f; }
+	FStubBlend BlendIn;
+	FStubBlend BlendOut;
+	EMontageBlendMode BlendModeOut = EMontageBlendMode::Standard;
+	void* BlendProfileOut = nullptr;
+	TArray<FSlotAnimationTrack> SlotAnimTracks;
+};
+
+// a playing montage: the stub only logs its Stop
+struct FAnimMontageInstance
+{
+	int32 StubId = 0;
+	TObjectPtr<UAnimMontage> Montage;
+	bool bStubActive = true;
+	bool IsActive() const { return bStubActive; }
+	void Stop(const FMontageBlendSettings& BlendOut, bool /*bInterrupt*/ = true)
+	{
+		StubLog::Emit("montage_instance_stop", {Montage.Ptr->StubName, BlendOut.Blend.BlendTime, static_cast<int>(BlendOut.BlendMode)});
+	}
+};
+
+struct FPoseSnapshot
+{
+	std::string StubName;                 // set by the test driver: what the engine would have taken the pose for
+	bool bIsValid = false;
 };
 
 // DECLARE_DYNAMIC_MULTICAST_DELEGATE_*: AddUniqueDynamic / RemoveDynamic are macros in UE with this call shape.
@@ -789,6 +844,16 @@ public:
 	TStubMulticast<FName, const FBranchingPointNotifyPayload&> OnPlayMontageNotifyBegin;
 	TStubMulticast<FName, const FBranchingPointNotifyPayload&> OnPlayMontageNotifyEnd;
 
+	TArray<FAnimMontageInstance*> MontageInstances;
+	FAnimMontageInstance* GetMontageInstanceForID(int32 MontageInstanceID)
+	{
+		for (FAnimMontageInstance* Instance : MontageInstances)
+		{
+			if (Instance != nullptr && Instance->StubId == MontageInstanceID) { return Instance; }
+		}
+		return nullptr;
+	}
+
 	// scripted montage state behind Montage_IsPlaying & co (the stub plays nothing)
 	struct FStubMontage
 	{
@@ -848,6 +913,32 @@ public:
 	void Montage_SetPlayRate(const UAnimMontage* Montage, float NewPlayRate = 1.0f)
 	{
 		StubLog::Emit("montage_set_play_rate", {Montage->StubName, NewPlayRate});
+	}
+	void Montage_SetPosition(const UAnimMontage* Montage, float NewPosition)
+	{
+		StubLog::Emit("montage_set_position", {Montage->StubName, NewPosition});
+	}
+	UAnimMontage* PlaySlotAnimationAsDynamicMontage(UAnimSequenceBase* Asset, FName SlotNodeName, float BlendInTime = 0.25f, float BlendOutTime = 0.25f,
+	                                                float InPlayRate = 1.f, int32 LoopCount = 1, float BlendOutTriggerTime = -1.f, float InTimeToStartMontageAt = 0.f)
+	{
+		StubLog::Emit("play_slot_animation", {Asset->StubName, SlotNodeName, BlendInTime, BlendOutTime, InPlayRate, LoopCount, BlendOutTriggerTime, InTimeToStartMontageAt, 0});
+		return nullptr;
+	}
+	UAnimMontage* PlaySlotAnimationAsDynamicMontage_WithBlendSettings(UAnimSequenceBase* Asset, FName SlotNodeName, const FMontageBlendSettings& BlendInSettings,
+	                                                                  const FMontageBlendSettings& BlendOutSettings, float InPlayRate = 1.f, int32 LoopCount = 1,
+	                                                                  float BlendOutTriggerTime = -1.f, float InTimeToStartMontageAt = 0.f)
+	{
+		StubLog::Emit("play_slot_animation", {Asset->StubName, SlotNodeName, BlendInSettings.Blend.BlendTime, BlendOutSettings.Blend.BlendTime, InPlayRate, LoopCount,
+		                                      BlendOutTriggerTime, InTimeToStartMontageAt, static_cast<int>(BlendOutSettings.BlendMode)});
+		return nullptr;
+	}
+	// the test driver names the snapshot places (their addresses): what the engine would have taken the pose for
+	std::map<const FPoseSnapshot*, std::string> StubSnapshotNames;
+	void SnapshotPose(FPoseSnapshot& Snapshot)
+	{
+		Snapshot.bIsValid = true;
+		Snapshot.StubName = StubSnapshotNames[&Snapshot];
+		StubLog::Emit("snapshot_pose", {Snapshot.StubName});
 	}
 	bool Montage_IsActive(const UAnimMontage* Montage) const { return State(Montage).Active; }
 	bool Montage_IsPlaying(const UAnimMontage* Montage) const { return State(Montage).Playing; }

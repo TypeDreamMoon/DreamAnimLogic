@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from . import runtime as rt
-from .types import BOOL, CHANNEL, CHANNEL_SET, FLOAT, HIT, INT, MOVEMENT_MODE, PRIMITIVE, QUAT, ROOT_MOTION_MODE, ROTATOR, TRANSFORM, VEC2, VEC3, Type
+from .types import BOOL, CHANNEL, CHANNEL_SET, FLOAT, HIT, INT, MONTAGE_ASSET, MONTAGE_BLEND_MODE, MOVEMENT_MODE, PRIMITIVE, QUAT, ROOT_MOTION_MODE, ROTATOR, SEQUENCE, TRANSFORM, VEC2, VEC3, Type
 
 
 # ---- reads ---------------------------------------------------------------------------------------------------
@@ -136,9 +136,14 @@ HOST_ITEMS: dict[str, HostItem] = {
 class Command:
     """``host.<name>(...)`` statement.
 
-    ``params`` are types, or the markers ``"montage"`` (a declared montage) and ``"section"`` (a section of the
-    montage in the first argument). The first ``required`` parameters must be written; the rest take
-    ``defaults`` (``None`` for a section means no section).
+    ``params`` are types, or the markers ``"montage"`` (a declared montage, or -- v4 -- a ``montage`` asset value), ``"section"``
+    (a section of the declared montage in the first argument) and ``"name"`` (a string literal: a slot name) and ``"place"`` (a snapshot state). The first
+    ``required`` parameters must be written; the rest take ``defaults`` (``None`` for a section means no section; an enum
+    parameter's default is a member name).  ``implicit`` are values the generated code puts in front of the written ones when it
+    calls the host (``"source"``: the montage instance that raised the notify the handler is running for), so the host method
+    has ``len(implicit) + len(params)`` parameters.  A ``sparse`` command does not send the optional parameters the program
+    left out (the host method gives them defaults): how a parameter was added to a command without changing programs that
+    do not use it.
     """
 
     name: str
@@ -147,14 +152,16 @@ class Command:
     defaults: tuple = ()
     doc: str = ""
     ue: str = ""
+    implicit: tuple = ()
+    sparse: bool = False
 
     @property
     def min_args(self) -> int:
         return len(self.params) if self.required is None else self.required
 
 
-def _c(name, params=(), required=None, defaults=(), doc="", ue=""):
-    return Command(name, tuple(params), required, tuple(defaults), doc, ue)
+def _c(name, params=(), required=None, defaults=(), doc="", ue="", implicit=(), sparse=False):
+    return Command(name, tuple(params), required, tuple(defaults), doc, ue, tuple(implicit), sparse)
 
 
 COMMANDS: dict[str, Command] = {
@@ -191,6 +198,23 @@ COMMANDS: dict[str, Command] = {
         _c("montage_set_next_section", ["montage", "section", "section"],
            ue="AnimInstance->Montage_SetNextSection(From, To, Montage)"),
         _c("montage_set_play_rate", ["montage", FLOAT], ue="AnimInstance->Montage_SetPlayRate(Montage, Rate)"),
+        # v4: dynamic montages, slots, notify sources, pose snapshots.  The montage of these may also be a `montage` asset value.
+        _c("montage_set_position", ["montage", FLOAT], doc="move a playing montage to a position (seconds)", ue="AnimInstance->Montage_SetPosition(Montage, Position)"),
+        _c("montage_stop_source", [FLOAT], 0, (-1.0,), implicit=("source",),
+           doc="in an `on notify...` handler of a declared notify: blend out the montage instance that raised the notify; a negative time uses the montage's own blend out",
+           ue="AnimInstance->GetMontageInstanceForID(Source)->Stop(FMontageBlendSettings(Montage->BlendOut, BlendTime))"),
+        _c("play_slot_animation", [SEQUENCE, "name", FLOAT, FLOAT, FLOAT, INT, FLOAT, FLOAT, MONTAGE_BLEND_MODE], 2,
+           (0.25, 0.25, 1.0, 1, -1.0, 0.0, "Standard"),
+           doc="play an animation sequence as a dynamic montage in a slot: host.play_slot_animation(Sequence, \"Transition\", blend_in, blend_out, rate, loops, "
+               "blend_out_trigger_time, start_time, blend_out_mode)",
+           ue="AnimInstance->PlaySlotAnimationAsDynamicMontage(Sequence, Slot, BlendIn, BlendOut, Rate, Loops, BlendOutTriggerTime, StartTime) "
+              "(with an inertialization blend out: ..._WithBlendSettings)"),
+        _c("stop_montages_with_slot", ["name", FLOAT], 1, (-1.0,),
+           doc="blend out every active montage that has a track in the slot; a negative time uses each montage's own blend out",
+           ue="every FAnimMontageInstance of AnimInstance->MontageInstances whose montage has a slot track named Slot: Stop(blend settings)"),
+        _c("snapshot_pose", ["place"], doc="save the current pose into a snapshot state (a state of type snapshot, or a snapshot member of a struct state); "
+                                           "the host gets the dotted path of the place; valid(State) is true from the next update (animation logic)",
+           ue="AnimInstance->SnapshotPose(<the FPoseSnapshot state or member>)"),
         # controller / camera (v2)
         _c("set_control_rotation", [ROTATOR], ue="Controller->SetControlRotation(Rotation)"),
         _c("camera_set_arm_length", [FLOAT], ue="SpringArm->TargetArmLength = v"),
@@ -237,6 +261,7 @@ QUERIES: dict[str, Query] = {
         Query("primitive_speed", (PRIMITIVE,), FLOAT, "speed of the component", "Component->GetComponentVelocity().Size()", True),
         Query("primitive_can_step_up", (PRIMITIVE,), BOOL, "can the character step onto the component", "Component->CanCharacterStepUp(Pawn)", True),
         Query("primitive_transform", (PRIMITIVE,), TRANSFORM, "world transform of the component", "Component->GetComponentTransform()", True),
+        Query("montage_is_playing", (MONTAGE_ASSET,), BOOL, "is the montage (an asset value) playing", "AnimInstance->Montage_IsPlaying(Montage)", True),
         Query("target_count", (), INT, "number of targetable actors", "actors with the tag DalTargetTag (DalTarget), collected once per tick"),
         Query("target_id", (INT,), INT, "stable id of the i-th target", "AActor::GetUniqueID()"),
         Query("target_location", (INT,), VEC3, "location of the i-th target", "Actor->GetActorLocation()"),
@@ -528,6 +553,31 @@ class HostV1(HostV0):
     def montage_set_play_rate(self, name: str, rate: float) -> None:
         """manager.set_play_rate(rate, montage)"""
 
+    def montage_set_position(self, name: str, position: float) -> None:
+        """MontageManager: set the position of the newest instance of the montage (``MontageInstance.position = position``).
+        ``name`` is a declared montage's name or, for a ``montage`` asset value, the asset's name (None: nothing to do)."""
+
+    def montage_stop_source(self, source, blend_out: float) -> None:
+        """MontageManager: blend out the montage instance ``source`` (the value the notify event carried as its 4th element) with
+        ``blend_out`` seconds (negative: the montage's own blend out); an unknown or finished instance is ignored."""
+
+    def play_slot_animation(self, sequence, slot: str, blend_in: float, blend_out: float, rate: float, loops: int,
+                            blend_out_trigger: float, start_time: float, blend_out_mode) -> None:
+        """A dynamic montage of the animation sequence ``sequence`` (an asset name, None: nothing to do) in the slot: ``Montage.from_sequence``
+        + ``manager.play(..., play_rate=rate, blend_in=blend_in)``; ``blend_out_mode`` is a ``MontageBlendMode``."""
+
+    def stop_montages_with_slot(self, slot: str, blend_out: float) -> None:
+        """MontageManager.stop_with_slot(slot, blend_out): every active montage with a track in the slot blends out."""
+
+    def snapshot_pose(self, name: str) -> None:
+        """SavePoseSnapshot(name): the pose the animation instance evaluated last is kept under the name ``name``, the dotted path of the
+        snapshot state (``"RagdollingState.FinalRagdollPose"``) for the graph's PoseSnapshot node; the generated code then holds the name in
+        the state (valid() reads true from the next update on)."""
+
+    def montage_is_playing(self, name) -> bool:
+        """manager.is_playing(montage) for a montage asset value (the asset's name); the same as ``montage_playing`` for a declared montage"""
+        return bool(self.montage_playing(name)) if name is not None else False
+
     # ---- commands: controller / camera --------------------------------------------------------------------------------
     def set_control_rotation(self, rotation) -> None:
         """session.controller.control_rotation = Rot(pitch, yaw, roll)"""
@@ -559,6 +609,8 @@ def protocol_markdown() -> str:
     out += ["", "## Commands (`host.name(args);`, executed after the update)", "", "| command | arguments | Unreal |", "|---|---|---|"]
     for c in COMMANDS.values():
         params = ", ".join(_param_text(p) + ("?" if i >= c.min_args else "") for i, p in enumerate(c.params))
+        if c.implicit:
+            params = ", ".join(f"[{x}]" for x in c.implicit) + (", " + params if params else "")       # [source]: given to the host, not written
         out.append(f"| `{c.name}` | {params or '-'} | `{c.ue}` |")
     out += ["", "## Queries (`host.name(args)` expressions; actor logic, an animation instance only the thread-safe ones marked †)", "",
             "| query | arguments | result | Unreal |", "|---|---|---|---|"]

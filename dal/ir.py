@@ -235,6 +235,7 @@ class Command(Stmt):
     """host.montage_play(...): queued; the host runs it after the update.  ``args`` is the full canonical list."""
     name: str
     args: list[Expr]
+    place: tuple | None = None       # host.snapshot_pose(place): (state name, member path) of the snapshot the command fills
 
 
 @dataclass
@@ -666,7 +667,7 @@ def dump_stmts(stmts: list[Stmt], indent: int = 1) -> list[str]:
         elif isinstance(s, Return):
             out.append(f"{pad}return" + (f" {dump_expr(s.value)}" if s.value is not None else ""))
         elif isinstance(s, Command):
-            out.append(f"{pad}host.{s.name}({', '.join(dump_expr(a) for a in s.args)})")
+            out.append(f"{pad}host.{s.name}({', '.join(dump_expr(a) for a in s.args)})" + (f"  -> {'.'.join((s.place[0], *s.place[1]))}" if s.place else ""))
         elif isinstance(s, ExprStmt):
             out.append(f"{pad}{dump_expr(s.expr)}")
         elif isinstance(s, For):

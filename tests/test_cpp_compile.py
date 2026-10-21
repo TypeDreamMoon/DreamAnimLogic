@@ -82,7 +82,15 @@ def py_effects(calls):
         return toks
 
     for name, args in calls:
-        if name == "montage_play":
+        if name in ("montage_play", "montage_stop", "montage_set_play_rate", "montage_set_position", "play_slot_animation") and args[0] is None:
+            continue                                  # an empty montage / sequence value: the engine has nothing to act on
+        if name == "montage_stop_source" and args[0] is None:
+            continue                                  # no montage instance raised the notify
+        if name == "stop_montages_with_slot":         # the stand-in scene has one active montage per slot: its Stop is the effect
+            out.append(("montage_instance_stop", f"Slot_{args[0]}", STUB_BLEND_OUT if args[1] < 0 else float(args[1]), 0.0))
+        elif name == "montage_stop_source":
+            out.append(("montage_instance_stop", f"Instance_{args[0]}", STUB_BLEND_OUT if args[1] < 0 else float(args[1]), 0.0))
+        elif name == "montage_play":
             out.append(("montage_play", args[0], float(args[1])))
             if args[2]:
                 out.append(("montage_jump_to_section", args[0], args[2]))

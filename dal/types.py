@@ -115,10 +115,11 @@ class AssetType(Type):
 
     is_asset = True
 
-    def __init__(self, name: str, settings_only: bool = False, cpp_class: str = ""):
+    def __init__(self, name: str, settings_only: bool = False, cpp_class: str = "", by_value: bool = False):
         Type.__init__(self, name)
         self.settings_only = settings_only
         self.cpp_class = cpp_class
+        self.by_value = by_value               # the C++ value is a struct (FPoseSnapshot), not an object pointer: no comparison, only valid() and none
 
 
 SEQUENCE = AssetType("sequence", False, "UAnimSequenceBase")
@@ -126,7 +127,10 @@ MONTAGE_ASSET = AssetType("montage", False, "UAnimMontage")
 CURVE = AssetType("curve", True, "UCurveFloat")
 CURVE3 = AssetType("curve3", True, "UCurveVector")
 PRIMITIVE = AssetType("primitive", False, "UPrimitiveComponent")      # an opaque handle of a component a trace hit
-ASSET_TYPES: dict[str, AssetType] = {t.name: t for t in (SEQUENCE, MONTAGE_ASSET, CURVE, CURVE3, PRIMITIVE)}
+# v4: a pose snapshot (FPoseSnapshot).  A value of the state or of a struct of the state, filled by host.snapshot_pose(place); the Python value is the
+# dotted path of the place the host took it for (None: not taken), valid() tells.  It is never in settings, params, inputs or entry parameters.
+SNAPSHOT = AssetType("snapshot", False, "FPoseSnapshot", by_value=True)
+ASSET_TYPES: dict[str, AssetType] = {t.name: t for t in (SEQUENCE, MONTAGE_ASSET, CURVE, CURVE3, PRIMITIVE, SNAPSHOT)}
 
 # the type of `none` before the context gives it one
 NONE_T = Type("none")
@@ -266,7 +270,13 @@ CHANNEL_MEMBERS = (["WorldStatic", "WorldDynamic", "Pawn", "Visibility", "Camera
                    + [f"EngineTraceChannel{i}" for i in range(1, 7)] + [f"GameTraceChannel{i}" for i in range(1, 19)])
 CHANNEL = EnumType("Channel", CHANNEL_MEMBERS, builtin=True, cpp_type="ECollisionChannel", cpp_prop_type="TEnumAsByte<ECollisionChannel>",
                    cpp_members={m: f"ECC_{m}" for m in CHANNEL_MEMBERS})
-BUILTIN_ENUMS: dict[str, EnumType] = {"MovementMode": MOVEMENT_MODE, "BlendOption": BLEND_OPTION, "Channel": CHANNEL, "RootMotionMode": ROOT_MOTION_MODE}
+# how a dynamic montage blends out: EMontageBlendMode (an enum class)
+MONTAGE_BLEND_MODE = EnumType("MontageBlendMode", ["Standard", "Inertialization"], builtin=True, cpp_type="EMontageBlendMode", cpp_prop_type="EMontageBlendMode")
+BUILTIN_ENUMS: dict[str, EnumType] = {"MovementMode": MOVEMENT_MODE, "BlendOption": BLEND_OPTION, "Channel": CHANNEL, "RootMotionMode": ROOT_MOTION_MODE,
+                                      "MontageBlendMode": MONTAGE_BLEND_MODE}
+
+# the type of a string literal: only the name of a slot in a host command (a compile-time name, never a value)
+NAME_T = Type("name")
 CHANNEL_SET = ArrayType.of(CHANNEL)         # `channel_set`: the channels that block a query (the same type as array<Channel>)
 
 

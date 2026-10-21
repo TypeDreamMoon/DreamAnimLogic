@@ -26,6 +26,7 @@ class Parser:
         self.source = source
         self.tokens = tokenize(source)
         self.i = 0
+        self.allow_strings = False
 
     # ---- token helpers -----------------------------------------------------
 
@@ -690,7 +691,11 @@ class Parser:
         if name.kind != "IDENT":
             raise self.error("DAL2001", f"expected a host command name after 'host.', found {self.describe(name)}")
         self.advance()
-        args = self.parse_args()
+        self.allow_strings = True                  # the names of slots are strings (the checker says where they belong)
+        try:
+            args = self.parse_args()
+        finally:
+            self.allow_strings = False
         self.expect_op(";", "after the host command")
         return S.CmdStmt(kw.pos, name.text, args, name.pos)
 
@@ -1085,7 +1090,10 @@ class Parser:
             self.expect_op(")", "to close the parenthesis")
             return inner
         if t.kind == "STRING":
-            raise self.error("DAL2004", "strings are only allowed in host bindings and extern attributes")
+            if self.allow_strings:
+                self.advance()
+                return S.StringLit(t.pos, str(t.value))
+            raise self.error("DAL2004", "strings are only allowed in host bindings, extern attributes and as the slot name of a host command")
         raise self.error("DAL2004", f"expected an expression, found {self.describe(t)}")
 
 

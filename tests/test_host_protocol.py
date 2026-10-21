@@ -24,7 +24,7 @@ class ProtocolTests(unittest.TestCase):
         for name, cmd in COMMANDS.items():
             fn = getattr(HostV1, name, None)
             self.assertIsNotNone(fn, f"HostV1.{name}")
-            self.assertEqual(arity(fn) - 1, len(cmd.params), name)         # canonical argument list: defaults are filled in
+            self.assertEqual(arity(fn) - 1, len(cmd.implicit) + len(cmd.params), name)         # canonical argument list: defaults are filled in
             self.assertTrue(inspect.getdoc(fn), f"{name} must say which DreamVEd call implements it")
 
     def test_every_query_is_a_host_method_with_the_declared_arity(self):

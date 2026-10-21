@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from . import ir
 from .builtins import BUILTIN_CONSTS, BUILTINS
-from .hostapi import HOOK_EVENTS, HOST_ITEMS
-from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, SPRING, SPRING3, SPRING_MEMBERS, TRANSFORM, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, VOID, ArrayType, AssetType, EnumType, MapType, StructType, TagType, Type, py_member_name, zero_value
+from .hostapi import COMMANDS, HOOK_EVENTS, HOST_ITEMS
+from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, NAME_T, NONE_T, SPRING, SPRING3, SPRING_MEMBERS, TRANSFORM, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, VOID, ArrayType, AssetType, EnumType, MapType, StructType, TagType, Type, py_member_name, zero_value
 
 INDENT = "    "
 
@@ -59,6 +59,10 @@ def py_value(ty: Type, v) -> str:
         return f"{ty.name}(" + ", ".join(f"{f.name}={py_value(f.ty, getattr(v, f.name))}" for f in ty.fields if not f.derived) + ")"
     if isinstance(ty, AssetType):
         return "None" if v is None else repr(str(v))
+    if ty is NAME_T:
+        return repr(str(v))
+    if ty is NONE_T:
+        return "None"
     if isinstance(ty, MapType):
         return "{" + ", ".join(f"{py_value(ty.key, k)}: {py_value(ty.value, x)}" for k, x in v.items()) + "}"
     if isinstance(ty, ArrayType):
@@ -213,8 +217,8 @@ class PyGen:
             return repr(e.name)
         ty = e.ty
         if isinstance(ty, EnumType):
-            if ty is MOVEMENT_MODE:
-                return f"_rt.MovementMode({self.x(e)})"
+            if ty.builtin:
+                return f"_rt.{ty.name}({self.x(e)})"                        # MovementMode, MontageBlendMode ...
             if isinstance(e, ir.EnumLit):
                 return repr(None if e.member == "None" else e.member)
             return f"_rt.section_name(_SEC_{ty.name}, {self.x(e)})"
@@ -273,7 +277,8 @@ class PyGen:
             elif isinstance(s, ir.Return):
                 out.append(f"{pad}return" + (f" {self.val(s.value)}" if s.value is not None else ""))
             elif isinstance(s, ir.Command):
-                out.append(f"{pad}self._cmd({', '.join([repr(s.name)] + [self.cmd_arg(a) for a in s.args])})")
+                implicit = ["self._source" for _x in COMMANDS[s.name].implicit]               # host.montage_stop_source: the montage instance of the notify
+                out.append(f"{pad}self._cmd({', '.join([repr(s.name)] + implicit + [self.cmd_arg(a) for a in s.args])})")
             elif isinstance(s, ir.For):
                 out.append(f"{pad}for {s.var} in range({s.lo}, {s.hi}):")
                 out.extend(self.stmts(s.body, depth + 1) or [f"{pad}{INDENT}pass"])

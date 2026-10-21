@@ -35,6 +35,12 @@ class NameRef(Expr):
 
 
 @dataclass
+class StringLit(Expr):
+    """"Transition": the name of a slot, allowed only as an argument of a host command."""
+    value: str
+
+
+@dataclass
 class MemberRef(Expr):
     base: Expr
     field: str

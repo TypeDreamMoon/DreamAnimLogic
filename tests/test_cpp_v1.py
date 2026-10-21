@@ -14,7 +14,7 @@ from _bootstrap import EXAMPLES, TESTS
 
 import dal
 from dal.cppbackend import CppOptions, generate_cpp
-from v1_sources import ALL_COMMANDS, ANIM_V1, PROBE
+from v1_sources import ALL_COMMANDS, ANIM_V1, ANIM_V4_COMMANDS, PROBE
 
 GOLDEN = os.path.join(TESTS, "golden")
 UPDATE = os.environ.get("UPDATE_GOLDEN") == "1"
@@ -258,8 +258,10 @@ class CoverageTests(unittest.TestCase):
         from dal.hostapi import COMMANDS
         from dal.cppbackend import cmd_cpp
 
+        anim = generate_cpp(dal.check_source(ANIM_V4_COMMANDS, "anim_commands.dal").module)       # the commands only an animation instance issues
+        execute_anim = body(anim["AnimCommands.cpp"], "void UAnimCommands::DalExecuteCommand")
         for name in COMMANDS:
-            self.assertIn(f"case DalHost::ECommand::{cmd_cpp(name)}:", execute)
+            self.assertTrue(f"case DalHost::ECommand::{cmd_cpp(name)}:" in execute or f"case DalHost::ECommand::{cmd_cpp(name)}:" in execute_anim, name)
 
     def test_the_probe_program_generates_every_query(self):
         files = generate_cpp(dal.check_source(PROBE, "probe.dal").module)
