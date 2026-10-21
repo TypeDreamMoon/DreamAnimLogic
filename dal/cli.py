@@ -84,7 +84,18 @@ def cmd_verify(args) -> int:
     if module.is_library:
         print(f"{module.name}: a library has no logic to run; it checks and compiles")
         return 0
-    diffs = verify(module, args.frames, args.seed, args.tol)
+    params: dict = {}
+    for item in args.param or []:
+        name, sep, path = item.partition("=")
+        if not sep or not name or not path:
+            print(f"--param expects NAME=FILE.json, not '{item}'", file=sys.stderr)
+            return 1
+        params[name] = path
+    if args.pack:
+        from .settings import PackResolver
+
+        params["resolver"] = PackResolver(args.pack)
+    diffs = verify(module, args.frames, args.seed, args.tol, **params)
     if not diffs:
         print(f"{module.name}: interpreter and generated Python agree over {args.frames} frames (seed {args.seed})")
         return 0
@@ -137,6 +148,8 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--frames", type=int, default=300)
     v.add_argument("--seed", type=int, default=1)
     v.add_argument("--tol", type=float, default=0.0, help="relative tolerance (0 = exact)")
+    v.add_argument("--param", action="append", metavar="NAME=FILE", help="data file (JSON) for a settings param; repeatable")
+    v.add_argument("--pack", metavar="DIR", help="asset pack folder: settings find their curves in DIR/curves")
     v.set_defaults(func=cmd_verify)
 
     h = sub.add_parser("host", help="print the host protocol (reads, commands, queries, events) as Markdown")

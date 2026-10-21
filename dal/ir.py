@@ -120,6 +120,31 @@ class Valid(Expr):
 
 
 @dataclass
+class CurveEval(Expr):
+    """curve.eval(x) / curve3.eval(x): a float, or a vec3 for a vector curve; an unset curve gives zero."""
+    curve: Expr
+    x: Expr
+
+
+@dataclass
+class Index(Expr):
+    """table[key] / items[i]: a missing key (or an index out of range) gives the default value of the element type."""
+    base: Expr
+    index: Expr
+
+
+@dataclass
+class MapHas(Expr):
+    table: Expr
+    key: Expr
+
+
+@dataclass
+class ArrayLen(Expr):
+    items: Expr
+
+
+@dataclass
 class MakeStruct(Expr):
     """Name(member: value, ...): a struct value; members that are not listed keep their declared defaults."""
     fields: list[tuple[str, Expr]]
@@ -460,6 +485,14 @@ class Module:
 def children(e: Expr) -> list[Expr]:
     if isinstance(e, (Unary, ToFloat, Member, Valid)):
         return [e.x]
+    if isinstance(e, CurveEval):
+        return [e.curve, e.x]
+    if isinstance(e, Index):
+        return [e.base, e.index]
+    if isinstance(e, MapHas):
+        return [e.table, e.key]
+    if isinstance(e, ArrayLen):
+        return [e.items]
     if isinstance(e, Binary):
         return [e.a, e.b]
     if isinstance(e, Cond):
@@ -551,6 +584,14 @@ def dump_expr(e: Expr) -> str:
         return f"extern:{e.name}({', '.join(dump_expr(a) for a in e.args)})"
     if isinstance(e, Valid):
         return f"valid({dump_expr(e.x)})"
+    if isinstance(e, CurveEval):
+        return f"{dump_expr(e.curve)}.eval({dump_expr(e.x)})"
+    if isinstance(e, Index):
+        return f"{dump_expr(e.base)}[{dump_expr(e.index)}]"
+    if isinstance(e, MapHas):
+        return f"{dump_expr(e.table)}.has({dump_expr(e.key)})"
+    if isinstance(e, ArrayLen):
+        return f"{dump_expr(e.items)}.len"
     if isinstance(e, CallMethod):
         return f"method:{e.name}({', '.join(dump_expr(a) for a in e.args)})"
     if isinstance(e, CallView):
@@ -604,7 +645,7 @@ def dump(m: Module) -> str:
     for ts in m.tagsets:
         out.append(f"tags {ts.name} = {ts.prefix!r} {{{', '.join(ts.members)}}}")
     for st in m.structs:
-        out.append(f"{st.kind} {st.name} {{" + "; ".join(f"{f.name}: {f.ty}" for f in st.fields) + "}")
+        out.append(f"{st.kind} {st.name} {{" + "; ".join(("derived " if f.derived else "") + f"{f.name}: {f.ty}" for f in st.fields) + "}")
     for mt in m.montages:
         out.append(f"montage {mt.name} {{{', '.join(mt.sections)}}}")
     for a in m.actions:

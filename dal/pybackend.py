@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from . import ir
 from .builtins import BUILTIN_CONSTS, BUILTINS
-from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, VOID, EnumType, StructType, TagType, Type, py_member_name, zero_value
+from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, VOID, ArrayType, AssetType, EnumType, MapType, StructType, TagType, Type, py_member_name, zero_value
 
 INDENT = "    "
 
@@ -50,7 +50,13 @@ def py_value(ty: Type, v) -> str:
     if isinstance(ty, TagType):
         return repr(str(v))
     if isinstance(ty, StructType):
-        return f"{ty.name}(" + ", ".join(f"{f.name}={py_value(f.ty, getattr(v, f.name))}" for f in ty.fields) + ")"
+        return f"{ty.name}(" + ", ".join(f"{f.name}={py_value(f.ty, getattr(v, f.name))}" for f in ty.fields if not f.derived) + ")"
+    if isinstance(ty, AssetType):
+        return "None" if v is None else repr(str(v))
+    if isinstance(ty, MapType):
+        return "{" + ", ".join(f"{py_value(ty.key, k)}: {py_value(ty.value, x)}" for k, x in v.items()) + "}"
+    if isinstance(ty, ArrayType):
+        return "(" + "".join(py_value(ty.elem, x) + ", " for x in v) + ")"
     raise ValueError(f"cannot emit a {ty} constant")
 
 
@@ -93,12 +99,15 @@ def unparen(s: str) -> str:
 class PyGen:
     def __init__(self, m: ir.Module):
         self.m = m
+        self.self_locals = False          # in the body of _derive the members of the settings are attributes of self
 
     # ---- value semantics of structs -------------------------------------------------------
     @staticmethod
     def is_place(e: ir.Expr) -> bool:
         """An expression that names storage (so its struct value must be copied before it is stored)."""
         if isinstance(e, (ir.StateRef, ir.InputRef, ir.ParamRef, ir.LocalRef, ir.ConstRef)):
+            return True
+        if isinstance(e, ir.Index):
             return True
         return isinstance(e, ir.Member) and PyGen.is_place(e.x)
 
@@ -123,7 +132,7 @@ class PyGen:
         if k in (ir.ParamRef, ir.InputRef, ir.StateRef):
             return f"self.{e.name}"
         if k is ir.LocalRef:
-            return e.name
+            return ("self." + e.name) if self.self_locals else e.name
         if k is ir.ToFloat:
             return f"float({self.x(e.x)})"
         if k is ir.Unary:
@@ -138,6 +147,17 @@ class PyGen:
             return f"({self.x(e.a)} if {self.x(e.c)} else {self.x(e.b)})"
         if k is ir.Valid:
             return f"bool({self.x(e.x)})"
+        if k is ir.CurveEval:
+            fn = "curve_eval" if e.ty is FLOAT else "curve3_eval"
+            return f"_rt.{fn}({unparen(self.x(e.curve))}, {unparen(self.x(e.x))})"
+        if k is ir.Index:
+            default = f"lambda: {py_value(e.ty, zero_value(e.ty))}" if isinstance(e.ty, StructType) else py_value(e.ty, zero_value(e.ty))
+            fn = "map_get" if isinstance(e.base.ty, MapType) else "array_get"
+            return f"_rt.{fn}({unparen(self.x(e.base))}, {unparen(self.x(e.index))}, {default})"
+        if k is ir.MapHas:
+            return f"({unparen(self.x(e.key))} in {unparen(self.x(e.table))})"
+        if k is ir.ArrayLen:
+            return f"len({unparen(self.x(e.items))})"
         if k is ir.CallMethod or k is ir.CallView:
             x = self.m.find_method(e.name)
             name = e.name if x.pub else ("_v_" if x.is_view else "_m_") + e.name       # type: ignore[union-attr]
@@ -270,18 +290,20 @@ class PyGen:
 
     # ---- struct classes ---------------------------------------------------------------------
     def struct_class(self, st: StructType) -> list[str]:
+        settings = st.is_settings
         L = ["", f"class {st.name}(_rt.Struct):"]
         names = [f.name for f in st.fields]
         slots = "".join(repr(n) + ", " for n in names)
         L.append(f"{INDENT}__slots__ = ({slots})")
         L.append(f"{INDENT}_FIELDS = __slots__")
         L.append(f'{INDENT}_TYPE_NAME = "{st.name}"')
-        if st.is_settings:
+        if settings:
             L.append(f"{INDENT}_IMMUTABLE = True")
-        if names:
-            conv = "".join(f"({f.name!r}, {py_coercer(f.ty)}), " for f in st.fields)
+        plain = [f for f in st.fields if not f.derived]
+        if plain:
+            conv = "".join(f"({f.name!r}, {py_coercer(f.ty)}), " for f in plain)
             L.append(f"{INDENT}_SPEC = ({conv})")
-        factories = [f for f in st.fields if isinstance(f.ty, StructType) and not f.ty.is_settings]
+        factories = [f for f in plain if isinstance(f.ty, StructType)]
         if factories:
             # a nested struct is made on demand; the factory is a lambda so that its body sees the module-level class
             # names, not the constructor parameter of the same name
@@ -291,20 +313,43 @@ class PyGen:
         L.append("")
         params = ["self"]
         body: list[str] = []
-        for f in st.fields:
-            if isinstance(f.ty, StructType) and not f.ty.is_settings:
+        for f in plain:
+            if isinstance(f.ty, StructType):
                 params.append(f"{f.name}=None")
                 body.append(f"{INDENT*2}self.{f.name} = self._new_{f.name}() if {f.name} is None else {f.name}")
+            elif isinstance(f.ty, (MapType, ArrayType)):
+                params.append(f"{f.name}=None")
+                empty = "{}" if isinstance(f.ty, MapType) else "()"
+                body.append(f"{INDENT*2}self.{f.name} = {empty} if {f.name} is None else {f.name}")
             else:
                 params.append(f"{f.name}={py_value(f.ty, f.default) if f.default is not None else 'None'}")
                 body.append(f"{INDENT*2}self.{f.name} = {f.name}")
+        derived = [f for f in st.fields if f.derived]
+        for f in derived:
+            body.append(f"{INDENT*2}self.{f.name} = {py_value(f.ty, zero_value(f.ty))}")
+        if derived:
+            body.append(f"{INDENT*2}self._derive()")
         L.append(f"{INDENT}def __init__({', '.join(params)}):")
         L.extend(body or [f"{INDENT*2}pass"])
-        if not st.is_settings:
+        if derived:
+            L.append("")
+            L.append(f"{INDENT}def _derive(self):")
+            L.append(f'{INDENT*2}"""The derived members, computed from the others."""')
+            self.self_locals = True
+            for f in derived:
+                L.append(f"{INDENT*2}self.{f.name} = {unparen(self.x(f.expr))}")
+            self.self_locals = False
+        if not settings:
             L.append("")
             L.append(f"{INDENT}def copy(self):")
             args = ", ".join(f"self.{f.name}.copy()" if isinstance(f.ty, StructType) and not f.ty.is_settings else f"self.{f.name}" for f in st.fields)
             L.append(f"{INDENT*2}return {st.name}({args})")
+        else:
+            L.append("")
+            L.append(f"{INDENT}@classmethod")
+            L.append(f"{INDENT}def load(cls, source=None, resolver=None, report=None):")
+            L.append(f'{INDENT*2}"""An instance from a JSON file, a dict (see dal.settings) or None (the declared defaults)."""')
+            L.append(f"{INDENT*2}return _settings.load(DAL_SCHEMA, DAL_CLASSES, {st.name!r}, source, resolver, report)")
         L.append("")
         return L
 
@@ -320,6 +365,8 @@ class PyGen:
         L.append(f'"""DAL {"library" if m.is_library else "logic"} {m.name}: Python backend."""')
         L.append("")
         L.append("from dal import runtime as _rt")
+        if any(st.is_settings for st in m.structs):
+            L.append("from dal import settings as _settings")
         L.append("")
 
         for en in m.enums:
@@ -333,6 +380,13 @@ class PyGen:
             L.extend(self.tag_class(ts))
         for st in m.structs:
             L.extend(self.struct_class(st))
+        if any(st.is_settings for st in m.structs):
+            from .settings import schema_of
+
+            L.append("")
+            L.append("DAL_SCHEMA = " + repr(schema_of(m.structs)))
+            L.append("DAL_CLASSES = {" + ", ".join(f"{st.name!r}: {st.name}" for st in m.structs) + "}")
+            L.append("")
 
         if m.standin_source:
             L.append("")

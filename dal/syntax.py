@@ -71,6 +71,13 @@ class CondExpr(Expr):
 
 
 @dataclass
+class IndexExpr(Expr):
+    """Settings.RotationModes[Mode]: an element of a map or an array."""
+    base: Expr
+    index: Expr
+
+
+@dataclass
 class MemberCallExpr(Expr):
     """Peer.Method(args), curve.eval(x), map.has(key): a call on a value that is not a plain name."""
     base: Expr
@@ -398,9 +405,11 @@ class FieldDecl:
 
 @dataclass
 class StructDecl(Decl):
-    """struct AlsFootState { bValid: bool; Left: AlsFootSide; ThighAxis: vec3 = vec3(0.0, 0.0, -1.0); }"""
+    """struct AlsFootState { bValid: bool; Left: AlsFootSide; ThighAxis: vec3 = vec3(0.0, 0.0, -1.0); }
+    settings AlsGeneral { LeanHalfLife: float = 0.2; derived Cos: float = cos(deg_to_rad(Angle)); }  (kind = 'settings')"""
     name: str
     fields: list[FieldDecl]
+    kind: str = "struct"
 
 
 @dataclass

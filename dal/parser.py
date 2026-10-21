@@ -131,13 +131,15 @@ class Parser:
             return self.parse_method(pub=False)
         if t.kind == "IDENT" and t.text == "peer" and self.peek().kind == "IDENT":
             return self.parse_peer()
+        if t.kind == "IDENT" and t.text == "settings" and self.peek().kind == "IDENT":
+            return self.parse_settings()
         if t.kind == "IDENT" and t.text == "struct":
             return self.parse_struct()
         if t.kind == "IDENT" and t.text == "tags" and self.peek().kind == "IDENT":
             return self.parse_tags()
         raise self.error(
             "DAL2001",
-            "expected a declaration (use, logic, enum, struct, tags, const, param, input, state, fn, method, view, peer, extern, update, entry, "
+            "expected a declaration (use, logic, enum, struct, settings, tags, const, param, input, state, fn, method, view, peer, extern, update, entry, "
             f"on, timer, window, buffer, combo, montage, action), found {self.describe(t)}",
         )
 
@@ -158,7 +160,7 @@ class Parser:
             if self.tok.kind == "EOF":
                 raise self.error("DAL2001", f"expected '}}' to close the {what}, found end of file")
             derived = False
-            if allow_derived and self.is_word("derived") and self.peek().kind == "IDENT":
+            if self.is_word("derived") and self.peek().kind == "IDENT":       # only settings may have them: the checker says so
                 self.advance()
                 derived = True
             f = self.ident("a member name")
@@ -217,6 +219,12 @@ class Parser:
         self.expect_op("}", "to close the tag set")
         return S.TagsDecl(kw.pos, name.text, str(s.value), s.pos, members, name_pos=name.pos)
 
+    def parse_settings(self) -> S.StructDecl:
+        kw = self.advance()      # settings
+        name = self.ident("a settings name")
+        fields = self.parse_fields("settings", allow_derived=True)
+        return S.StructDecl(kw.pos, name.text, fields, "settings", name_pos=name.pos)
+
     def parse_struct(self) -> S.StructDecl:
         kw = self.advance()      # struct (a reserved word, so it is never a name)
         name = self.ident("a struct name")
@@ -225,9 +233,27 @@ class Parser:
 
     def parse_type_name(self) -> tuple[str, Pos]:
         t = self.tok
+        if t.is_kw("montage"):              # the asset type `montage` (the declaration keyword is a different use)
+            self.advance()
+            return "montage", t.pos
         if t.kind != "IDENT":
             raise self.error("DAL2001", f"expected a type name, found {self.describe(t)}")
         self.advance()
+        if t.text in ("map", "array") and self.tok.is_op("<"):
+            self.advance()
+            args: list[str] = []
+            while True:
+                a, _p = self.parse_type_name()
+                args.append(a)
+                if self.tok.is_op(",") and t.text == "map" and len(args) < 2:
+                    self.advance()
+                    continue
+                break
+            need = 2 if t.text == "map" else 1
+            if len(args) != need:
+                raise self.error("DAL2001", f"{t.text}<...> takes {need} type argument(s) ({'map<Key, Value>' if need == 2 else 'array<Element>'})", t.pos)
+            self.expect_op(">", f"to close {t.text}<...>")
+            return f"{t.text}<{','.join(args)}>", t.pos
         return t.text, t.pos
 
     def parse_logic(self) -> S.LogicDecl:
@@ -862,6 +888,12 @@ class Parser:
                     raise self.error("DAL2001", f"expected a member name after '.', found {self.describe(f)}")
                 self.advance()
                 expr = S.MemberRef(expr.pos, expr, f.text, f.pos)
+                continue
+            if t.is_op("["):
+                self.advance()
+                index = self.parse_expr()
+                self.expect_op("]", "to close the index")
+                expr = S.IndexExpr(expr.pos, expr, index)
                 continue
             if t.is_op("("):
                 if isinstance(expr, S.NameRef):

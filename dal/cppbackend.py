@@ -47,7 +47,10 @@ from .types import (
     ROTATOR,
     VEC2,
     VEC3,
+    ArrayType,
+    AssetType,
     EnumType,
+    MapType,
     StructType,
     TagType,
     Type,
@@ -157,7 +160,68 @@ def cpp_type(ty: Type) -> str:
         return ty.cpp_type
     if isinstance(ty, TagType):
         return "FGameplayTag"
+    if isinstance(ty, AssetType):
+        return f"TObjectPtr<{ty.cpp_class}>"
+    if isinstance(ty, MapType):
+        return f"TMap<{cpp_type(ty.key)}, {cpp_type(ty.value)}>"
+    if isinstance(ty, ArrayType):
+        return f"TArray<{cpp_type(ty.elem)}>"
     raise ValueError(ty)
+
+
+def holds_tags(ty: Type) -> bool:
+    """A tag, or a table / list that has tags in its keys, values or elements."""
+    if isinstance(ty, TagType):
+        return True
+    if isinstance(ty, MapType):
+        return holds_tags(ty.key) or holds_tags(ty.value)
+    if isinstance(ty, ArrayType):
+        return holds_tags(ty.elem)
+    return False
+
+
+_ASSET_HEADERS = {"sequence": "Animation/AnimSequenceBase.h", "montage": "Animation/AnimMontage.h",
+                  "curve": "Curves/CurveFloat.h", "curve3": "Curves/CurveVector.h"}
+
+
+def asset_headers(ty: Type, out: list[str]) -> None:
+    """The engine headers that declare the asset classes named by a (member) type."""
+    if isinstance(ty, AssetType):
+        if _ASSET_HEADERS[ty.name] not in out:
+            out.append(_ASSET_HEADERS[ty.name])
+    elif isinstance(ty, MapType):
+        asset_headers(ty.key, out)
+        asset_headers(ty.value, out)
+    elif isinstance(ty, ArrayType):
+        asset_headers(ty.elem, out)
+
+
+def needs_recompute(ty: Type) -> bool:
+    """The settings type has derived members (itself, or in a settings type it holds)."""
+    if isinstance(ty, MapType):
+        return needs_recompute(ty.value)
+    if isinstance(ty, ArrayType):
+        return needs_recompute(ty.elem)
+    if isinstance(ty, StructType) and ty.is_settings:
+        return any(f.derived or needs_recompute(f.ty) for f in ty.fields)
+    return False
+
+
+def is_by_ref(ty: Type) -> bool:
+    """Settings values and their tables / lists are passed and bound by reference (they are data, often large)."""
+    return (isinstance(ty, StructType) and ty.is_settings) or isinstance(ty, (MapType, ArrayType))
+
+
+def cpp_param(ty: Type, name: str, unused: bool = False) -> str:
+    """One parameter of a function or method."""
+    mark = "[[maybe_unused]] " if unused else ""
+    if is_by_ref(ty):
+        return f"{mark}const {cpp_type(ty)}& {name}"
+    return f"{mark}{'const ' if unused else ''}{cpp_type(ty)} {name}"
+
+
+def cpp_params(params, unused: bool = False) -> str:
+    return ", ".join(cpp_param(t, n, unused) for n, t in params)
 
 
 def cpp_prop_type(ty: Type) -> str:
@@ -185,6 +249,10 @@ def cpp_value(ty: Type, v) -> str:
         return cpp_struct_value(ty, v)
     if isinstance(ty, TagType):
         return cpp_tag_value(ty, v)
+    if isinstance(ty, AssetType):
+        return "nullptr"
+    if isinstance(ty, (MapType, ArrayType)):
+        return f"{cpp_type(ty)}()"
     raise ValueError(ty)
 
 
@@ -210,7 +278,8 @@ def cpp_struct_value(ty: StructType, v, var: str = "Dal_S") -> str:
     defaults, otherwise an immediately-invoked lambda that sets the members that do."""
     from . import values
 
-    diffs = [f for f in ty.fields if not _plain_equal(getattr(v, f.name), values.member_default(f))]
+    diffs = [f for f in ty.fields
+             if not f.derived and not isinstance(f.ty, (AssetType, MapType, ArrayType)) and not _plain_equal(getattr(v, f.name), values.member_default(f))]
     if not diffs:
         return f"{ty.cpp_type}()"
     sets = " ".join(f"{var}.{f.name} = {cpp_value(f.ty, getattr(v, f.name))};" for f in diffs)
@@ -245,6 +314,8 @@ class CppExprGen:
         if k in (ir.ParamRef, ir.InputRef, ir.StateRef):
             if e.ty is MOVEMENT_MODE:
                 return f"static_cast<EMovementMode>({e.name})"
+            if k is ir.ParamRef and isinstance(e.ty, StructType) and e.ty.asset_root:
+                return f"DalSettings_{e.name}()"                    # the data asset (or the class defaults when none is assigned)
             return e.name
         if k is ir.LocalRef:
             return e.name
@@ -277,7 +348,19 @@ class CppExprGen:
         if k is ir.HostQuery:
             return f"{query_cpp(e.name)}({', '.join(unparen(self.x(a)) for a in e.args)})"
         if k is ir.Valid:
+            if e.x.ty.is_asset:
+                return f"IsValid({unparen(self.x(e.x))})"
             return f"{self.x(e.x)}.IsValid()"
+        if k is ir.CurveEval:
+            fn = "EvalCurve" if e.ty is FLOAT else "EvalCurve3"
+            return f"DalData::{fn}({unparen(self.x(e.curve))}, {unparen(self.x(e.x))})"
+        if k is ir.Index:
+            fn = "MapGet" if isinstance(e.base.ty, MapType) else "ArrayGet"
+            return f"DalData::{fn}({unparen(self.x(e.base))}, {unparen(self.x(e.index))}, {self.default_ref(e.ty)})"
+        if k is ir.MapHas:
+            return f"{self.x(e.table)}.Contains({unparen(self.x(e.key))})"
+        if k is ir.ArrayLen:
+            return f"{self.x(e.items)}.Num()"
         if k is ir.CallMethod or k is ir.CallView:
             return f"{self.method_name(e.name)}({', '.join(unparen(self.x(a)) for a in e.args)})"
         if k is ir.CallPeer:
@@ -288,6 +371,14 @@ class CppExprGen:
         if k is ir.MakeStruct:
             return self.make_struct(e)
         raise AssertionError(k)
+
+    def default_ref(self, ty: Type) -> str:
+        """What a missing table entry / list element reads as, as an expression of the element type."""
+        if isinstance(ty, StructType):
+            return f"DalData::DefaultOf<{ty.cpp_type}>()"
+        if isinstance(ty, AssetType):
+            return f"{cpp_type(ty)}()"
+        return cpp_value(ty, zero_value(ty))
 
     def method_name(self, name: str) -> str:
         """C++ name of a method or view: the DAL name when it is pub, a private Dal... name otherwise."""
@@ -514,7 +605,10 @@ class CppGen:
         for s in body:
             if isinstance(s, ir.Let):
                 const = "" if s.mutable else "const "
-                out.append(f"{pad}{const}{cpp_type(s.ty)} {s.name} = {unparen(self.ex.x(s.init))};")
+                if is_by_ref(s.ty):
+                    out.append(f"{pad}const {cpp_type(s.ty)}& {s.name} = {unparen(self.ex.x(s.init))};")
+                else:
+                    out.append(f"{pad}{const}{cpp_type(s.ty)} {s.name} = {unparen(self.ex.x(s.init))};")
             elif isinstance(s, ir.Assign):
                 out.append(f"{pad}{s.name} = {unparen(self.ex.x(s.value))};")
             elif isinstance(s, ir.ExprStmt):
@@ -676,8 +770,8 @@ class CppGen:
                 "DalEventQueue.Reset();"]))
             out.append(Method("void", "DalDispatchEvents", doc="Run the handlers for the events taken at the start of the update, oldest first.", body=self.dispatch_body()))
             for k, h in enumerate(m.handlers):
-                params = ", ".join(f"{cpp_type(t)} {n}" for n, t in h.params)
-                dparams = ", ".join(f"[[maybe_unused]] const {cpp_type(t)} {n}" for n, t in h.params)
+                params = cpp_params(h.params)
+                dparams = cpp_params(h.params, True)
                 out.append(Method("void", f"DalHandler_{k}", params, def_params=dparams, body=self.stmts(h.body, 0),
                                   doc="on " + h.event + " " + h.name + (f" {h.phase}" if h.phase else "")))
         elif m.handlers:
@@ -859,8 +953,8 @@ class CppGen:
         out: list[Method] = []
         for x in self.m.methods:
             name = self.ex.method_name(x.name)
-            params = ", ".join(f"{cpp_type(t)} {n}" for n, t in x.params)
-            dparams = ", ".join(f"[[maybe_unused]] const {cpp_type(t)} {n}" for n, t in x.params)
+            params = cpp_params(x.params)
+            dparams = cpp_params(x.params, True)
             ret = cpp_type(x.ret) if x.ret is not None else "void"
             spec = ""
             if x.pub:
@@ -1132,14 +1226,90 @@ class CppGen:
         m = self.m
         if any(t.origin == origin or any_origin for t in m.tagsets):
             return True
-        return any(isinstance(f.ty, TagType) for s in m.structs if s.origin == origin or any_origin for f in s.fields)
+        return any(holds_tags(f.ty) for s in m.structs if s.origin == origin or any_origin for f in s.fields)
+
+    @property
+    def uses_data(self) -> bool:
+        """The program has settings types (own or from a library): DalData.h is part of the output."""
+        return any(st.is_settings for st in self.m.structs)
+
+    def data_includes(self, origin: str | None, skip: tuple[str, ...] = ()) -> list[str]:
+        """DalMath.h / DalData.h and the engine headers for the settings and asset values declared in this file."""
+        inc: list[str] = []
+        own = [st for st in self.m.structs if st.origin == origin]
+        settings = [st for st in own if st.is_settings]
+        if settings:
+            inc += ["DalMath.h", "DalData.h"]
+            if any(st.asset_root for st in settings):
+                inc.append("Engine/DataAsset.h")
+        for st in own:
+            for f in st.fields:
+                asset_headers(f.ty, inc)
+        if origin is None:
+            for d in [*self.m.params, *self.m.inputs, *self.m.states]:
+                asset_headers(d.ty, inc)
+        return [x for x in inc if x not in skip]
 
     def struct_decl(self, st: StructType) -> list[str]:
+        if st.is_settings:
+            return self.settings_decl(st)
         out = ["USTRUCT(BlueprintType)", f"struct {st.cpp_type}", "{", f"{T}GENERATED_BODY()"]
         for f in st.fields:
             out.append("")
             out.append(f'{T}UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "DAL")')
             out.append(f"{T}{cpp_prop_type(f.ty)} {f.name} = {cpp_value(f.ty, f.default)};")
+        out.append("};")
+        return out
+
+    def settings_decl(self, st: StructType) -> list[str]:
+        """A settings type: a USTRUCT inside another settings type, a UDataAsset at the top (no other settings type holds it)."""
+        from . import values
+
+        root = st.asset_root
+        recompute = needs_recompute(st)
+        inst = values.default_of(st) if any(f.derived for f in st.fields) else None
+        if root:
+            out = ["UCLASS(BlueprintType)", f"class {self.api}{st.cpp_type} : public UDataAsset", "{", f"{T}GENERATED_BODY()", "", "public:"]
+            if recompute:
+                out += [f"{T}{st.cpp_type}()", f"{T}{{", f"{T}{T}DalRecomputeDerived();", f"{T}}}", ""]
+        else:
+            out = ["USTRUCT(BlueprintType)", f"struct {st.cpp_type}", "{", f"{T}GENERATED_BODY()", ""]
+        for k, f in enumerate(st.fields):
+            if k:
+                out.append("")
+            if f.derived:
+                out.append(f'{T}UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "DAL", Transient)')
+                init = f" = {cpp_value(f.ty, getattr(inst, f.name))}"
+            else:
+                out.append(f'{T}UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "DAL")')
+                init = "" if isinstance(f.ty, (MapType, ArrayType, AssetType)) else f" = {cpp_value(f.ty, f.default)}"
+            out.append(f"{T}{cpp_prop_type(f.ty)} {f.name}{init};")
+        if recompute:
+            out.append("")
+            out.append(f"{T}/** Computes the derived members from the others: call it after the data was loaded or edited. */")
+            out.append(f"{T}void DalRecomputeDerived()")
+            out.append(f"{T}{{")
+            for f in st.fields:
+                if not f.derived and needs_recompute(f.ty):
+                    if isinstance(f.ty, StructType):
+                        out.append(f"{T}{T}{f.name}.DalRecomputeDerived();")
+                    elif isinstance(f.ty, MapType):
+                        out += [f"{T}{T}for (auto& Pair : {f.name})", f"{T}{T}{{", f"{T}{T}{T}Pair.Value.DalRecomputeDerived();", f"{T}{T}}}"]
+                    else:
+                        out += [f"{T}{T}for (auto& Item : {f.name})", f"{T}{T}{{", f"{T}{T}{T}Item.DalRecomputeDerived();", f"{T}{T}}}"]
+            for f in st.fields:
+                if f.derived:
+                    out.append(f"{T}{T}{f.name} = {unparen(self.ex.x(f.expr))};")
+            out.append(f"{T}}}")
+            if root:
+                out += ["",
+                        f"{T}virtual void PostLoad() override",
+                        f"{T}{{", f"{T}{T}UDataAsset::PostLoad();", f"{T}{T}DalRecomputeDerived();", f"{T}}}",
+                        "",
+                        "#if WITH_EDITOR",
+                        f"{T}virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override",
+                        f"{T}{{", f"{T}{T}UDataAsset::PostEditChangeProperty(PropertyChangedEvent);", f"{T}{T}DalRecomputeDerived();", f"{T}}}",
+                        "#endif"]
         out.append("};")
         return out
 
@@ -1156,7 +1326,7 @@ class CppGen:
                 f"{T}{decl} {cpp_type(c.ty)} Dal_K_{c.name} = {cpp_value(c.ty, c.value)};"]
 
     def fn_decl(self, f: ir.FnDef, inline: bool) -> list[str]:
-        params = ", ".join(f"{cpp_type(t)} {n}" for n, t in f.params)
+        params = cpp_params(f.params)
         head = "inline" if inline else "[[maybe_unused]]"
         out = [f"{T}{head} {cpp_type(f.ret)} Dal_Fn_{f.name}({params})", f"{T}{{"]
         out.extend(self.stmts(f.body, 2))
@@ -1189,6 +1359,8 @@ class CppGen:
             L.append('#include "GameplayTagContainer.h"')
         if own_tags:
             L.append('#include "NativeGameplayTags.h"')
+        for inc in self.data_includes(origin, skip=("DalMath.h",)):
+            L.append(f'#include "{inc}"')
         for inc in self.lib_includes(origin):
             L.append(f'#include "{inc}"')
         deps = next((lib.deps for lib in m.libs if lib.key == origin), [lib.key for lib in m.libs])
@@ -1245,7 +1417,10 @@ class CppGen:
             L.append(f"{T}// ---- params: tunable in the editor, read-only for the logic ----")
             for p in m.params:
                 L.append(f'{T}UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "DAL|Param")')
-                L.append(f"{T}{cpp_prop_type(p.ty)} {p.name} = {cpp_value(p.ty, p.default)};")
+                if isinstance(p.ty, StructType) and p.ty.asset_root:
+                    L.append(f"{T}TObjectPtr<{p.ty.cpp_type}> {p.name};")
+                else:
+                    L.append(f"{T}{cpp_prop_type(p.ty)} {p.name} = {cpp_value(p.ty, p.default)};")
                 L.append("")
         if m.inputs:
             L.append(f"{T}// ---- inputs: filled from the host each frame (or set by game code when free) ----")
@@ -1305,6 +1480,8 @@ class CppGen:
             L.append('#include "GameplayTagContainer.h"')
         if any(t.origin is None for t in m.tagsets):
             L.append('#include "NativeGameplayTags.h"')
+        for inc in self.data_includes(None):
+            L.append(f'#include "{inc}"')
         if (any(i.ty is MOVEMENT_MODE for i in [*m.params, *m.inputs, *m.states]) or self.uses("movement_mode")
                 or any(q.startswith("trace_") for q in self.queries)):
             L.append('#include "Engine/EngineTypes.h"')
@@ -1374,6 +1551,11 @@ class CppGen:
             L.append(f"{T}{self.cls}();")
             L.append("")
         L.extend(self.property_lines())
+        for p in m.params:
+            if isinstance(p.ty, StructType) and p.ty.asset_root:
+                L.append(f"{T}/** The settings asset assigned to {p.name}; the class defaults when there is none. */")
+                L.append(f"{T}const {p.ty.cpp_type}& DalSettings_{p.name}() const {{ return {p.name} != nullptr ? *{p.name} : *GetDefault<{p.ty.cpp_type}>(); }}")
+                L.append("")
         slots = self.action_slots()
         if slots:
             if self.bind_input:
@@ -1438,7 +1620,7 @@ class CppGen:
         if self.queue_target:
             for x in m.methods:
                 if x.pub and not x.is_view:
-                    params = ", ".join(f"{cpp_type(t)} {n}" for n, t in x.params)
+                    params = cpp_params(x.params)
                     L.append(f"{T}/** Called by an actor logic: {x.name} runs at the start of the next animation update. */")
                     L.append(f"{T}void DalQueue_{x.name}({params});")
                     L.append("")
@@ -1681,6 +1863,8 @@ class CppGen:
         L.append(f'#include "{m.name}.h"')
         L.append("")
         L.append('#include "DalMath.h"')
+        if self.uses_data:
+            L.append('#include "DalData.h"')
         for inc in self.source_includes():
             L.append(f'#include "{inc}"')
         L.append("")
@@ -1902,7 +2086,7 @@ class CppGen:
         if self.queue_target:
             for x in m.methods:
                 if x.pub and not x.is_view:
-                    params = ", ".join(f"{cpp_type(t)} {n}" for n, t in x.params)
+                    params = cpp_params(x.params)
                     caps = ", ".join(["this"] + [n for n, _t in x.params])
                     args = ", ".join(n for n, _t in x.params)
                     blocks.append([f"void {cls}::DalQueue_{x.name}({params})", "{",
@@ -2067,6 +2251,8 @@ def generate_cpp(module: ir.Module, options: CppOptions | None = None) -> dict[s
     for lib in module.libs:
         files.update(g.lib_files(lib.key, lib.stem, lib.filename, lib.sha256))
     files["DalMath.h"] = read("DalMath.h")
+    if g.uses_data:
+        files["DalData.h"] = read("DalData.h")
     if g.hosth:
         files["DalHost.h"] = read("DalHost.h")
     return files

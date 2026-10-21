@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from . import runtime as rt
 from .types import (
+    ArrayType,
+    AssetType,
+    MapType,
     BOOL,
     FLOAT,
     INT,
@@ -30,12 +33,29 @@ def struct_class(ty: StructType) -> type:
         return cls
     names = tuple(f.name for f in ty.fields)
 
+    derived = [f for f in ty.fields if f.derived]
+
+    def _derive(self):
+        """Compute the ``derived`` members of a settings value from the others."""
+        from .interp import Evaluator
+
+        env = {f.name: getattr(self, f.name) for f in ty.fields if not f.derived}
+        ev = Evaluator()
+        for f in derived:
+            if f.expr is None:                # not checked yet: the checker rebuilds the defaults once it is
+                continue
+            v = ev.ev(f.expr, env)
+            setattr(self, f.name, v)
+            env[f.name] = v
+
     def __init__(self, **kw):
         for f in ty.fields:
             setattr(self, f.name, kw[f.name] if f.name in kw else member_default(f))
+        if derived:
+            self._derive()
 
     ns = {"__slots__": names, "_FIELDS": names, "_TYPE": ty, "_TYPE_NAME": ty.name, "_IMMUTABLE": ty.is_settings,
-          "__init__": __init__}
+          "__init__": __init__, "_derive": _derive}
     cls = type(ty.name, (rt.Struct,), ns)
     ty._pyclass = cls
     return cls
@@ -89,9 +109,17 @@ def coerce(ty: Type, v):
         return int(v)
     if isinstance(ty, TagType):
         return "" if v is None else str(v)
+    if isinstance(ty, AssetType):
+        return v if (v is None or isinstance(v, str) or not isinstance(v, (int, float, bool))) else str(v)
+    if isinstance(ty, (MapType, ArrayType)):
+        return v
     if isinstance(ty, StructType):
         if isinstance(v, rt.Struct) and v._TYPE_NAME == ty.name:
             return copy_value(v)
+        if ty.is_settings and not isinstance(v, rt.Struct):
+            from . import settings
+
+            return settings.load_ir(ty, v)
         if isinstance(v, rt.Struct):
             items = {n: getattr(v, n) for n in v._FIELDS}
         elif isinstance(v, dict):

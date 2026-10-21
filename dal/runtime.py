@@ -227,6 +227,33 @@ def path_get(v, path):
     return v
 
 
+def curve_eval(curve, x):
+    """curve.eval(x): 0 for a curve that is not set."""
+    return 0.0 if curve is None else curve.eval(x)
+
+
+def curve3_eval(curve, x):
+    return VEC3_ZERO if curve is None else curve.eval(x)
+
+
+_MISSING = object()
+
+
+def map_get(table, key, default):
+    """table[key]: a missing key gives the default (called when it is a factory)."""
+    v = table.get(key, _MISSING)
+    if v is _MISSING:
+        return default() if callable(default) else default
+    return v
+
+
+def array_get(items, index, default):
+    """items[index]: out of range gives the default."""
+    if 0 <= index < len(items):
+        return items[index]
+    return default() if callable(default) else default
+
+
 def as_tag(v):
     return "" if v is None else str(v)
 
@@ -923,6 +950,8 @@ class Struct:
             return v if cls._IMMUTABLE else v.copy()
         if v is None:
             return cls()
+        if cls._IMMUTABLE and not isinstance(v, Struct):
+            return cls.load(v)               # settings: the data conventions of dal.settings (files, names, tables)
         items = {n: getattr(v, n) for n in v._FIELDS} if isinstance(v, Struct) else v
         return cls(**{n: conv(items[n]) for n, conv in cls._SPEC if n in items})
 
@@ -1004,6 +1033,8 @@ class LogicBase:
     def __init__(self, host, params: dict, peers: dict | None = None):
         from .hostapi import HostV1
 
+        params = dict(params)
+        self.resolver = params.pop("resolver", None)         # where settings find their curves (dal.settings.AssetResolver)
         self.host = host if host is not None else HostV1()
         self.overrides: dict = {}
         self.peers: dict = dict(peers) if peers else {}     # peer name -> the other logic (a generated class or an Interpreter)
@@ -1034,7 +1065,12 @@ class LogicBase:
 
     def _coerce(self, type_name: str, value):
         conv = self.DAL_TYPES.get(type_name)
-        return conv(value) if conv is not None else coerce_by_name(type_name, value)
+        if conv is None:
+            return coerce_by_name(type_name, value)
+        cls = getattr(conv, "__self__", None)
+        if getattr(cls, "_IMMUTABLE", False) and not isinstance(value, Struct):
+            return cls.load(value, self.resolver)             # a settings class reads files, dicts and names
+        return conv(value)
 
     def sample_inputs(self) -> None:
         self._sample()

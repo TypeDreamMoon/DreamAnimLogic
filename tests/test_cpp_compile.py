@@ -36,6 +36,8 @@ def f32(x):
 def close(a, b, rel):
     if isinstance(a, tuple):
         return len(a) == len(b) and all(close(x, y, rel) for x, y in zip(a, b))
+    if a is None or b is None:
+        return a is b
     if isinstance(a, (bool, int, str)):
         return a == b
     if math.isnan(a) or math.isnan(b):
@@ -144,7 +146,7 @@ class CppCompileTests(unittest.TestCase):
             self.fail(f"C++ failed:\n{str(e)[:4000]}")
         if COMPILER[0] == "msvc":
             self.assertNotIn("warning", output.lower(), output)
-        py = harness.run_python(module, frames)
+        py = harness.run_python(module, frames, **(kwargs.get("params") or {}))
         states = [f for f in cpp if not f.get("__final__")]
         problems = compare(py, states, tolerances or {}, default)
         self.assertEqual(problems[:5], [], f"{len(problems)} mismatches")

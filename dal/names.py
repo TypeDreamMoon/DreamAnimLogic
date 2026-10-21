@@ -55,7 +55,7 @@ ACTOR_COMPONENT_MEMBERS = frozenset(
 # Attributes of the generated Python class (and its LogicBase) that a DAL name must not hide.
 PY_CLASS_API = frozenset(
     ("reset snapshot overrides set_input sample_inputs call_entry values host update update_phase begin_play end_play "
-     "peers connect unresolved variables dal_get dal_call dal_enqueue take_commands post_event").split()
+     "peers connect unresolved variables dal_get dal_call dal_enqueue take_commands post_event resolver report").split()
 )
 
 RESERVED_PREFIXES = ("Dal_", "DAL_", "DalHost_", "DalNotify_", "DalAction_", "DalMontage_", "AnimNotify_", "Montage_", "Native", "Blueprint")

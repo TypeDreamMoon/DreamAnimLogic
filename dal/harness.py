@@ -32,7 +32,7 @@ from .hostapi import HOST_ITEMS
 from .mockhost import MockHost
 from .interp import Interpreter
 from .pybackend import generate_python, load_class
-from .types import BOOL, FLOAT, INT, QUAT, ROTATOR, VEC2, VEC3, EnumType, StructType, TagType, Type
+from .types import BOOL, FLOAT, INT, QUAT, ROTATOR, VEC2, VEC3, ArrayType, AssetType, EnumType, MapType, StructType, TagType, Type
 
 
 class ScriptedHost(MockHost):
@@ -87,6 +87,50 @@ def _rand_value(rng: random.Random, ty: Type, scale: float = 10.0):
     if isinstance(ty, StructType):
         return {f.name: _rand_value(rng, f.ty, scale) for f in ty.fields if not f.derived and not f.ty.is_asset and f.ty.name not in ("curve", "curve3")}
     raise ValueError(ty)
+
+
+def random_settings(ty: StructType, seed: int = 1, scale: float = 100.0, polyline: bool = False) -> dict:
+    """Random data for a settings type, in the layout ``dal.settings`` reads: every member present (some left out at random),
+    tables with a random subset of their keys, lists of 0-4 elements, inline curves and made-up asset names.
+
+    ``polyline`` keeps curves to linear / constant keys with constant extrapolation (what the stand-in engine can evaluate)."""
+    rng = random.Random(seed)
+    return _rand_settings_value(rng, ty, scale, polyline)
+
+
+def _rand_curve_channel(rng: random.Random, scale: float, polyline: bool) -> dict:
+    times = sorted({round(rng.uniform(-0.2, 1.2) * scale, 3) for _ in range(rng.randint(0, 4))})
+    kinds = ["constant", "linear"] if polyline else ["constant", "linear", "cubic"]
+    keys = [{"t": t, "v": rng.uniform(-5, 5), "interp": rng.choice(kinds), "arrive": rng.uniform(-1, 1), "leave": rng.uniform(-1, 1)} for t in times]
+    extrap = ["constant"] if polyline else ["constant", "linear", "cycle", "cycle_offset", "oscillate"]
+    return {"keys": keys, "pre": rng.choice(extrap), "post": rng.choice(extrap)}
+
+
+def _rand_settings_value(rng: random.Random, ty: Type, scale: float, polyline: bool):
+    if isinstance(ty, StructType):
+        out: dict = {}
+        for f in ty.fields:
+            if f.derived or rng.random() < 0.1:
+                continue                                       # derived members are recomputed; a missing one keeps its default
+            out[f.name] = _rand_settings_value(rng, f.ty, scale, polyline)
+        return out
+    if isinstance(ty, MapType):
+        keys = [ty.key.full_name(m) for m in ty.key.members if m != "None"] if isinstance(ty.key, TagType) else             [m for m in ty.key.members] if isinstance(ty.key, EnumType) else [str(i) for i in range(-2, 4)]
+        return {k: _rand_settings_value(rng, ty.value, scale, polyline) for k in keys if rng.random() < 0.7}
+    if isinstance(ty, ArrayType):
+        return [_rand_settings_value(rng, ty.elem, scale, polyline) for _ in range(rng.randint(0, 4))]
+    if isinstance(ty, AssetType):
+        if ty.name in ("curve", "curve3"):
+            n = 1 if ty.name == "curve" else 3
+            if rng.random() < 0.15:
+                return None
+            return {"class": "CurveFloat" if n == 1 else "CurveVector", "channels": [_rand_curve_channel(rng, scale, polyline) for _ in range(n)]}
+        return None if rng.random() < 0.3 else f"A_{ty.name}_{rng.randint(1, 4)}"
+    if isinstance(ty, EnumType):
+        return ty.members[rng.randrange(len(ty.members))]
+    if isinstance(ty, TagType):
+        return ty.full_name(rng.choice(ty.members + ["None"])) or None
+    return _rand_value(rng, ty, scale)
 
 
 def _rand_quat(rng: random.Random):

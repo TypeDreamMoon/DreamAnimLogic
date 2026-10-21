@@ -515,7 +515,12 @@ struct FAnimNotifyEvent
 };
 
 class USkeletalMeshComponent;
-class UAnimSequenceBase;
+
+class UAnimSequenceBase : public UObject
+{
+public:
+	std::string StubName;
+};
 
 struct FBranchingPointNotifyPayload
 {
@@ -526,10 +531,9 @@ struct FBranchingPointNotifyPayload
 	bool bReachedEnd = false;
 };
 
-class UAnimMontage : public UObject
+class UAnimMontage : public UAnimSequenceBase
 {
 public:
-	std::string StubName;
 	float GetDefaultBlendOutTime() const { return 0.25f; }
 };
 
@@ -700,3 +704,71 @@ bool IsValid(const T* Object)
 {
 	return Object != nullptr;
 }
+
+template <class T>
+bool IsValid(const TObjectPtr<T>& Object)
+{
+	return Object.Ptr != nullptr;
+}
+
+// ---- data assets and curves ----------------------------------------------------------------------------------------
+// UDataAsset with the two hooks generated settings classes override; UCurveFloat / UCurveVector with the evaluation calls
+// DalData.h makes.  The stand-in curve is a polyline: linear or constant keys, constant extrapolation (enough to check
+// the generated code; FRichCurve's cubic and cycle modes are evaluated by dal/curve.py and by the engine).
+struct FPropertyChangedEvent
+{
+};
+
+class UDataAsset : public UObject
+{
+public:
+	virtual void PostLoad() {}
+	virtual void PostEditChangeProperty(FPropertyChangedEvent&) {}
+};
+
+template <class T>
+const T* GetDefault()
+{
+	static const T ClassDefaultObject{};
+	return &ClassDefaultObject;
+}
+
+struct FStubCurveKey
+{
+	float Time = 0.0f;
+	float Value = 0.0f;
+	bool bConstant = false;       // the value holds until the next key
+};
+
+class UCurveFloat : public UObject
+{
+public:
+	std::vector<FStubCurveKey> StubKeys;      // sorted by time
+	float GetFloatValue(float InTime) const
+	{
+		if (StubKeys.empty()) { return 0.0f; }
+		if (InTime <= StubKeys.front().Time) { return StubKeys.front().Value; }
+		if (InTime >= StubKeys.back().Time) { return StubKeys.back().Value; }
+		for (size_t I = 0; I + 1 < StubKeys.size(); ++I)
+		{
+			const FStubCurveKey& A = StubKeys[I];
+			const FStubCurveKey& B = StubKeys[I + 1];
+			if (InTime < B.Time)
+			{
+				if (A.bConstant) { return A.Value; }
+				return A.Value + (B.Value - A.Value) * ((InTime - A.Time) / (B.Time - A.Time));
+			}
+		}
+		return StubKeys.back().Value;
+	}
+};
+
+class UCurveVector : public UObject
+{
+public:
+	UCurveFloat StubCurves[3];
+	FVector GetVectorValue(float InTime) const
+	{
+		return FVector(StubCurves[0].GetFloatValue(InTime), StubCurves[1].GetFloatValue(InTime), StubCurves[2].GetFloatValue(InTime));
+	}
+};

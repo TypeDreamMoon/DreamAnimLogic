@@ -36,6 +36,7 @@ class Type:
     is_struct = False       # a struct or settings value (named members)
     is_tags = False         # a gameplay tag value
     is_asset = False        # an opaque asset reference (sequence, montage, curve ...)
+    is_container = False    # a map or an array (settings only)
 
 
 FLOAT = Type("float")
@@ -97,6 +98,49 @@ class EnumType(Type):
         return self.members.index(member)
 
 
+class AssetType(Type):
+    """An asset reference: ``sequence`` and ``montage`` can be stored anywhere, ``curve`` / ``curve3`` only in settings.
+    The Python value is the asset's name (or None), the C++ value an object pointer."""
+
+    is_asset = True
+
+    def __init__(self, name: str, settings_only: bool = False, cpp_class: str = ""):
+        Type.__init__(self, name)
+        self.settings_only = settings_only
+        self.cpp_class = cpp_class
+
+
+SEQUENCE = AssetType("sequence", False, "UAnimSequenceBase")
+MONTAGE_ASSET = AssetType("montage", False, "UAnimMontage")
+CURVE = AssetType("curve", True, "UCurveFloat")
+CURVE3 = AssetType("curve3", True, "UCurveVector")
+ASSET_TYPES: dict[str, AssetType] = {t.name: t for t in (SEQUENCE, MONTAGE_ASSET, CURVE, CURVE3)}
+
+# the type of `none` before the context gives it one
+NONE_T = Type("none")
+
+
+class MapType(Type):
+    """map<K, V>: a read-only table inside a settings type (keys: tags, enums, ints)."""
+
+    is_container = True
+
+    def __init__(self, key: Type, value: Type):
+        Type.__init__(self, f"map<{key.name},{value.name}>")
+        self.key = key
+        self.value = value
+
+
+class ArrayType(Type):
+    """array<T>: a read-only list inside a settings type."""
+
+    is_container = True
+
+    def __init__(self, elem: Type):
+        Type.__init__(self, f"array<{elem.name}>")
+        self.elem = elem
+
+
 @dataclass
 class FieldDef:
     """A member of a struct or settings type.  ``default`` is a runtime value (never None for a stored member
@@ -123,6 +167,7 @@ class StructType(Type):
         self.fields: list[FieldDef] = []
         self.origin: str | None = None
         self.cpp_type = "F" + name
+        self.asset_root = False           # a settings type no other settings type holds: a UDataAsset in C++ (U<Name>)
         self.defaults_ready = False
 
     @property
@@ -203,6 +248,12 @@ def zero_value(ty: Type):
         return rt.Hit(False, rt.Vec3(0.0, 0.0, 0.0), rt.Vec3(0.0, 0.0, 0.0), 0.0, 1.0)
     if isinstance(ty, TagType):
         return ""
+    if isinstance(ty, AssetType):
+        return None
+    if isinstance(ty, MapType):
+        return {}
+    if isinstance(ty, ArrayType):
+        return ()
     if isinstance(ty, StructType):
         from . import values
 

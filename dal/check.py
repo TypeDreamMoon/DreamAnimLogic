@@ -32,6 +32,13 @@ from .libs import LIBRARY_DECLS
 from .names import CPP_KEYWORDS, PY_RESERVED, reserved_reason
 from .types import (
     VOID,
+    ASSET_TYPES,
+    ArrayType,
+    AssetType,
+    CURVE,
+    CURVE3,
+    MapType,
+    NONE_T,
     BASIC_TYPES,
     BOOL,
     BUILTIN_ENUMS,
@@ -148,6 +155,7 @@ class Checker:
         self.struct_decls: dict[str, S.StructDecl] = {}
         self.folding: set[str] = set()
         self.struct_cached: set[str] = set()              # struct types reused from another compilation unit (already complete)
+        self.allow_settings_param = False                 # the next name read is the base of a member access
         self.interface_only = False                       # stop after the declarations (the checker run for a peer's interface)
         self.method_sigs: dict[str, MethodSig] = {}
         self.method_calls: dict[str, list[str]] = {}      # call graph of methods and views (recursion check)
@@ -206,7 +214,45 @@ class Checker:
         return True
 
     # ---- types ----------------------------------------------------------------------------------
+    def split_type_args(self, text: str) -> list[str]:
+        """`A,map<B,C>` -> ['A', 'map<B,C>']"""
+        out, depth, cur = [], 0, ""
+        for ch in text:
+            if ch == "<":
+                depth += 1
+            elif ch == ">":
+                depth -= 1
+            if ch == "," and depth == 0:
+                out.append(cur)
+                cur = ""
+            else:
+                cur += ch
+        out.append(cur)
+        return out
+
     def resolve_type(self, name: str, pos: Pos) -> Type:
+        if name.startswith("map<") and name.endswith(">"):
+            key_name, value_name = self.split_type_args(name[4:-1])
+            key, value = self.resolve_type(key_name, pos), self.resolve_type(value_name, pos)
+            if key is ERROR or value is ERROR:
+                return ERROR
+            if not (key.is_tags or key.is_enum or key is INT):
+                self.err("DAL4052", f"a table is keyed by a tag set, an enum or int, not {key}", pos)
+                return ERROR
+            if value is HIT or value is MONTAGE or isinstance(value, (MapType, ArrayType)):
+                self.err("DAL4052", f"a table cannot hold {value}", pos)
+                return ERROR
+            return MapType(key, value)
+        if name.startswith("array<") and name.endswith(">"):
+            elem = self.resolve_type(name[6:-1], pos)
+            if elem is ERROR:
+                return ERROR
+            if elem is HIT or elem is MONTAGE or isinstance(elem, (MapType, ArrayType)):
+                self.err("DAL4052", f"a list cannot hold {elem}", pos)
+                return ERROR
+            return ArrayType(elem)
+        if name in ASSET_TYPES:
+            return ASSET_TYPES[name]
         if name in BASIC_TYPES:
             return BASIC_TYPES[name]
         if name in self.enums:
@@ -225,9 +271,13 @@ class Checker:
             return e
         if e.ty is target:
             return e
+        if e.ty is NONE_T and isinstance(target, AssetType) and not target.settings_only:
+            return ir.Lit(target, None)
         if target is FLOAT and e.ty is INT:
             return self.widen(e)
         hint = ""
+        if e.ty is NONE_T:
+            hint = "; 'none' is the empty value of a sequence or montage"
         if target is INT and e.ty is FLOAT:
             hint = "; use to_int(), floor_to_int(), round_to_int() or ceil_to_int()"
         self.err("DAL4002", f"cannot use a value of type {e.ty} as {what} of type {target}{hint}", pos)
@@ -322,6 +372,11 @@ class Checker:
                 self.declare_extern(d)
         for d in decls:
             self.focus(d)
+            if isinstance(d, S.StructDecl):
+                self.check_derived(d)
+        self.refresh_settings_defaults()
+        for d in decls:
+            self.focus(d)
             if isinstance(d, S.PeerDecl):
                 self.declare_peer(d)
         for d in decls:
@@ -396,7 +451,7 @@ class Checker:
         if d.ret_name is not None:
             ret = self.resolve_type(d.ret_name, d.ret_pos or d.pos)
             if ret is not ERROR:
-                ret = self.storable(ret, d.ret_pos or d.pos, "a result")
+                ret = self.storable(ret, d.ret_pos or d.pos, "a result", settings_ok=True)
         if ok and params is not None:
             self.method_sigs[d.name] = MethodSig(params, ret, d.pub, d.is_view, d.pos, d)
 
@@ -568,7 +623,7 @@ class Checker:
             return
         origin = self.origin_of(d)
         cached = self.ctx.types.get((origin, d.name)) if (self.ctx is not None and origin is not None) else None
-        st = cached if cached is not None else StructType(d.name, "struct")
+        st = cached if cached is not None else StructType(d.name, d.kind)
         st.origin = origin
         self.structs[d.name] = st
         self.struct_decls[d.name] = d
@@ -581,6 +636,10 @@ class Checker:
     def struct_member_ok(self, st: StructType, ty: Type) -> bool:
         if ty is HIT or ty is MONTAGE:
             return False
+        if isinstance(ty, AssetType):
+            return st.kind == "settings" or not ty.settings_only
+        if isinstance(ty, (MapType, ArrayType)):
+            return st.kind == "settings"
         if isinstance(ty, StructType):
             return st.kind == "settings" or ty.kind == "struct"
         return True
@@ -604,9 +663,13 @@ class Checker:
                 continue
             if ty is not ERROR and not self.struct_member_ok(st, ty):
                 what = "hit results cannot be stored" if ty is HIT else f"a {ty} cannot be a member of a {st.kind}"
-                self.err("DAL4050", f"member '{fd.name}' of {st.kind} {d.name}: {what}", fd.type_pos)
+                self.err("DAL4050" if st.kind == "struct" else "DAL4052", f"member '{fd.name}' of {st.kind} {d.name}: {what}", fd.type_pos)
                 ty = ERROR
-            st.fields.append(FieldDef(fd.name, ty))
+            if fd.derived and st.kind != "settings":
+                self.err("DAL4052", f"'derived' members belong in a settings type; a struct member is plain data", fd.pos)
+            if fd.derived and fd.init is None:
+                self.err("DAL4052", f"derived member '{fd.name}' needs the expression it is computed from: derived {fd.name}: {fd.type_name} = ...;", fd.pos)
+            st.fields.append(FieldDef(fd.name, ty, derived=fd.derived))
 
     def order_structs(self) -> None:
         """Dependencies first (a struct member of struct type needs its type declared before); reports DAL4053 for cycles."""
@@ -614,27 +677,36 @@ class Checker:
         state: dict[str, int] = {}
         reported = False
 
+        def inner(ty: Type) -> StructType | None:
+            """The struct a member holds: itself, or the value type of a table / the element type of a list."""
+            if isinstance(ty, MapType):
+                ty = ty.value
+            elif isinstance(ty, ArrayType):
+                ty = ty.elem
+            return ty if isinstance(ty, StructType) else None
+
         def visit(st: StructType, path: list[str]) -> None:
             nonlocal reported
             if state.get(st.name, 0) == 2:
                 return
             state[st.name] = 1
             for f in st.fields:
-                if not isinstance(f.ty, StructType):
+                sub_st = inner(f.ty)
+                if sub_st is None:
                     continue
-                if state.get(f.ty.name, 0) == 1:
+                if state.get(sub_st.name, 0) == 1:
                     # this member closes a cycle: report it once and cut it, so that no default value is infinite
                     if not reported:
-                        d = self.struct_decls.get(f.ty.name)
+                        d = self.struct_decls.get(sub_st.name)
                         if d is not None:
                             self.focus(d)
                             cycle = (path + [st.name])
-                            cycle = cycle[cycle.index(f.ty.name):] + [f.ty.name]
-                            self.err("DAL4053", f"{f.ty.kind} {f.ty.name} contains itself: " + " -> ".join(cycle), d.name_pos or d.pos)
+                            cycle = cycle[cycle.index(sub_st.name):] + [sub_st.name]
+                            self.err("DAL4053", f"{sub_st.kind} {sub_st.name} contains itself: " + " -> ".join(cycle), d.name_pos or d.pos)
                         reported = True
                     f.ty = ERROR
                 else:
-                    visit(f.ty, path + [st.name])
+                    visit(sub_st, path + [st.name])
             state[st.name] = 2
             order.append(st)
 
@@ -644,6 +716,61 @@ class Checker:
                 if st is not None and self.struct_decls.get(d.name) is d:
                     visit(st, [])
         self.module.structs = order
+        self.find_settings_roots(order, inner)
+
+    def find_settings_roots(self, order: list[StructType], inner) -> None:
+        """A settings type that no other settings type of its file holds is a data asset (`UDataAsset` in C++); the others are
+        plain value types inside one.  A type of a library that is a data asset there cannot be held by a logic's own settings."""
+        held: set[tuple[str | None, str]] = set()
+        for st in order:
+            if st.is_settings:
+                for f in st.fields:
+                    sub_st = inner(f.ty)
+                    if sub_st is not None and sub_st.is_settings and sub_st.origin == st.origin:
+                        held.add((sub_st.origin, sub_st.name))
+        for st in order:
+            if st.is_settings and st.name not in self.struct_cached:
+                st.asset_root = (st.origin, st.name) not in held
+                st.cpp_type = ("U" if st.asset_root else "F") + st.name
+        for st in order:
+            if not st.is_settings or st.name in self.struct_cached:
+                continue
+            for f in st.fields:
+                sub_st = inner(f.ty)
+                if sub_st is not None and sub_st.is_settings and sub_st.asset_root and sub_st.origin != st.origin:
+                    d = self.struct_decls.get(st.name)
+                    if d is not None:
+                        self.focus(d)
+                        self.err("DAL4052", f"member '{f.name}' of settings {st.name}: {sub_st.name} is a data asset of its library (no settings type there holds it); "
+                                            f"hold it in a settings type of the library, or read it through a param", d.name_pos or d.pos)
+                    f.ty = ERROR
+
+    def check_derived(self, d: S.StructDecl) -> None:
+        """The expressions of `derived` members: they see the other members of the settings (and constants), nothing else."""
+        st = self.structs.get(d.name)
+        if st is None or self.struct_decls.get(d.name) is not d or d.name in self.struct_cached:
+            return
+        by_name = {fd.name: fd for fd in d.fields}
+        sc = Scope("derived")
+        for f in st.fields:
+            if not f.derived and f.ty is not ERROR:
+                sc.declare(f.name, Local(f.ty, False))
+        for f in st.fields:
+            fd = by_name.get(f.name)
+            if not f.derived or fd is None or fd.init is None or f.ty is ERROR:
+                continue
+            e = self.ex(fd.init, sc)
+            f.expr = self.assignable(f.ty, e, fd.init.pos, f"derived member '{f.name}'")
+            sc.declare(f.name, Local(f.ty, False))
+
+    def refresh_settings_defaults(self) -> None:
+        """Default instances of nested settings were built before the `derived` expressions were known: build them again."""
+        for st in self.module.structs:
+            if st.name in self.struct_cached:
+                continue
+            for f in st.fields:
+                if isinstance(f.ty, StructType) and f.ty.is_settings and not f.derived and f.default is not None:
+                    f.default = values.default_of(f.ty)
 
     def ensure_defaults(self, st: StructType) -> None:
         """Fold the declared member defaults of a struct (its nested structs first); idempotent."""
@@ -661,8 +788,13 @@ class Checker:
             fd = by_name.get(f.name)
             if f.ty is ERROR or fd is None:
                 continue
+            if f.derived:
+                continue
             if isinstance(f.ty, StructType):
                 self.ensure_defaults(f.ty)
+            if fd.init is not None and (isinstance(f.ty, (MapType, ArrayType)) or f.ty is CURVE or f.ty is CURVE3):
+                self.err("DAL4052", f"member '{f.name}' of {st.kind} {st.name}: a {f.ty} has no initial value in the declaration (it comes from the data)", fd.pos)
+                continue
             f.default = self.const_value(fd.init, f.ty, fd.pos, f"member '{f.name}' of {st.kind} {st.name}")
         st.defaults_ready = True
         self.folding.discard(st.name)
@@ -693,10 +825,17 @@ class Checker:
         self.user_enums.append(et)
         self.globals[d.name].obj = et
 
-    def storable(self, ty: Type, pos: Pos, what: str) -> Type:
-        """A hit result cannot live in state, inputs, params or constants (Unreal cannot reflect it)."""
+    def storable(self, ty: Type, pos: Pos, what: str, settings_ok: bool = False) -> Type:
+        """A hit result cannot live in state, inputs, params or constants (Unreal cannot reflect it); neither can curves, tables and lists,
+        and a settings value (a read-only data asset) only comes from a param."""
         if ty is HIT:
             self.err("DAL4023", f"{what} cannot have type hit: copy the fields you need (blocking, point, normal, distance, time)", pos)
+            return ERROR
+        if (isinstance(ty, AssetType) and ty.settings_only) or isinstance(ty, (MapType, ArrayType)):
+            self.err("DAL4058", f"{what} cannot have type {ty}: curves, tables and lists belong in a settings type (read them from the param)", pos)
+            return ERROR
+        if isinstance(ty, StructType) and ty.is_settings and not settings_ok:
+            self.err("DAL4058", f"{what} cannot have type {ty}: a settings value is a read-only data asset, it comes from a param (or from a member of another settings)", pos)
             return ERROR
         return ty
 
@@ -757,7 +896,7 @@ class Checker:
 
     def declare_param(self, d: S.ParamDecl) -> None:
         ok = self.declare_global(d.name, "param", d.name_pos or d.pos, what="a parameter name")
-        ty = self.storable(self.resolve_type(d.type_name, d.type_pos), d.type_pos, "a param")
+        ty = self.storable(self.resolve_type(d.type_name, d.type_pos), d.type_pos, "a param", settings_ok=True)
         value = self.const_value(d.init, ty, d.pos, f"param '{d.name}'")
         if ok and ty is not ERROR:
             self.module.params.append(ir.ParamDef(d.name, ty, value))
@@ -994,6 +1133,12 @@ class Checker:
         if sc.lookup(s.name) is not None:
             self.err("DAL3005", f"'{s.name}' is already declared in this scope; names cannot be shadowed", name_pos)
             return None
+        if ty is NONE_T:
+            self.err("DAL4002", f"'{s.name}' needs a type: none is the empty value of a sequence or montage; write let {s.name}: sequence = none;", s.init.pos)
+            return None
+        if s.mutable and ((isinstance(ty, StructType) and ty.is_settings) or isinstance(ty, (MapType, ArrayType)) or (isinstance(ty, AssetType) and ty.settings_only)):
+            self.err("DAL5004", f"'{s.name}' cannot be a var: a {ty} is read-only data; declare it with let", name_pos)
+            return None
         sc.declare(s.name, Local(ty, s.mutable))
         return ir.Let(s.name, ty, init, s.mutable)
 
@@ -1154,6 +1299,8 @@ class Checker:
             return self.call(e, sc)
         if isinstance(e, S.MemberCallExpr):
             return self.member_call(e, sc)
+        if isinstance(e, S.IndexExpr):
+            return self.index_expr(e, sc)
         if isinstance(e, S.UnaryExpr):
             return self.unary(e, sc)
         if isinstance(e, S.BinaryExpr):
@@ -1177,6 +1324,8 @@ class Checker:
             c = BUILTIN_CONSTS[name]
             return ir.ConstRef(c.ty, name, c.value)
         sym = self.globals.get(name)
+        if sym is None and name == "none":
+            return ir.Lit(NONE_T, None)
         if sym is None:
             if name in self.pending_consts:
                 return self.bad("DAL3042", f"constant '{name}' is used before it is defined (constants are evaluated in order)", e.pos)
@@ -1195,8 +1344,11 @@ class Checker:
                 return ir.Lit(ERROR, 0)
             return ir.ConstRef(cd.ty, name, cd.value)
         if k in ("param", "input", "state"):
-            if sc.ctx == "const":
-                return self.bad("DAL5002", f"a constant expression cannot read {k} '{name}'", e.pos)
+            base_of_member = self.allow_settings_param
+            self.allow_settings_param = False
+            if sc.ctx in ("const", "derived"):
+                return self.bad("DAL5002", f"a constant expression cannot read {k} '{name}'" if sc.ctx == "const"
+                                else f"a derived member is computed from the other members of its settings and constants, not from {k} '{name}'", e.pos)
             if sc.ctx == "fn":
                 return self.bad(
                     "DAL5011",
@@ -1204,6 +1356,8 @@ class Checker:
                     e.pos,
                 )
             ty = self.var_type(k, name)
+            if k == "param" and isinstance(ty, StructType) and ty.is_settings and not base_of_member:
+                return self.bad("DAL4059", f"settings param '{name}' is read through its members ({name}.Member...); it is a data asset, not a value", e.pos)
             return {"param": ir.ParamRef, "input": ir.InputRef, "state": ir.StateRef}[k](ty, name)
         if k == "enum":
             return self.bad("DAL3030", f"enum '{name}' is a type; write {name}.<Member> to name a value", e.pos)
@@ -1274,10 +1428,16 @@ class Checker:
                     + f" (members: {', '.join(et.members)})",
                     e.field_pos,
                 )
+        self.allow_settings_param = isinstance(base, S.NameRef)
         b = self.ex(base, sc)
+        self.allow_settings_param = False
         if b.ty is ERROR:
             return b
         f = e.field
+        if isinstance(b.ty, ArrayType):
+            if f == "len":
+                return ir.ArrayLen(INT, b)
+            return self.bad("DAL4030", f"a list has no member '{f}' (members: len)", e.field_pos)
         if b.ty is HIT:
             if f in HIT_MEMBERS:
                 return ir.Member(_HIT_TYPES[HIT_MEMBERS[f]], b, f)
@@ -1562,6 +1722,10 @@ class Checker:
                 return ir.Binary(BOOL, op, a, b)
             if ta.is_tags and ta is tb:
                 return ir.Binary(BOOL, op, a, b)
+            if isinstance(ta, AssetType) and not ta.settings_only and (tb is ta or tb is NONE_T):
+                return ir.Binary(BOOL, op, a, b if tb is ta else ir.Lit(ta, None))
+            if isinstance(tb, AssetType) and not tb.settings_only and ta is NONE_T:
+                return ir.Binary(BOOL, op, ir.Lit(tb, None), b)
             if ta is tb and ta in (VEC2, VEC3, ROTATOR, QUAT):
                 return self.bad("DAL4001", f"{ta} values cannot be compared with '{op}'; compare lengths or components, e.g. is_nearly_zero(length(a - b))", op_pos)
             if ta is tb and isinstance(ta, StructType):
@@ -1585,6 +1749,10 @@ class Checker:
             return ir.Cond(a.ty, c, a, b)
         if a.ty.is_numeric and b.ty.is_numeric:
             return ir.Cond(FLOAT, c, self.widen(a), self.widen(b))
+        if a.ty is NONE_T and isinstance(b.ty, AssetType) and not b.ty.settings_only:
+            return ir.Cond(b.ty, c, ir.Lit(b.ty, None), b)
+        if b.ty is NONE_T and isinstance(a.ty, AssetType) and not a.ty.settings_only:
+            return ir.Cond(a.ty, c, a, ir.Lit(a.ty, None))
         return self.bad("DAL4004", f"the two branches of '?:' have different types ({a.ty} and {b.ty})", e.pos)
 
     # ---- calls -----------------------------------------------------------------------------------------------------------------------
@@ -1700,7 +1868,41 @@ class Checker:
             return self.peer_call(e, base.name, sc)
         if isinstance(base, S.NameRef) and sc.lookup(base.name) is None and base.name in self.globals and self.globals[base.name].kind == "peer":
             return ir.Lit(ERROR, 0)          # the peer could not be loaded: already reported
+        if isinstance(base, S.NameRef) and sc.lookup(base.name) is None and base.name not in self.globals and base.name not in BUILTIN_CONSTS:
+            return self.bad("DAL2004", "only functions can be called; write f(x), not x.f(...)", e.pos)
+        self.allow_settings_param = isinstance(base, S.NameRef)
+        b = self.ex(base, sc)
+        self.allow_settings_param = False
+        args = [self.ex(a, sc) for a in e.args]
+        if b.ty is ERROR or any(a.ty is ERROR for a in args):
+            return ir.Lit(ERROR, 0)
+        if (b.ty is CURVE or b.ty is CURVE3) and e.name == "eval":
+            if len(args) != 1:
+                return self.bad("DAL4041", f"eval() takes 1 argument (the position on the curve), got {len(args)}", e.pos)
+            x = self.assignable(FLOAT, args[0], e.args[0].pos, "the position on the curve")
+            return ir.CurveEval(FLOAT if b.ty is CURVE else VEC3, b, x)
+        if isinstance(b.ty, MapType) and e.name == "has":
+            if len(args) != 1:
+                return self.bad("DAL4041", f"has() takes 1 argument (the key), got {len(args)}", e.pos)
+            return ir.MapHas(BOOL, b, self.assignable(b.ty.key, args[0], e.args[0].pos, "the key"))
+        if b.ty is CURVE or b.ty is CURVE3:
+            return self.bad("DAL4030", f"a curve has the method eval(x), not '{e.name}'", e.name_pos or e.pos)
+        if isinstance(b.ty, MapType):
+            return self.bad("DAL4030", f"a table has the method has(key), not '{e.name}'", e.name_pos or e.pos)
         return self.bad("DAL2004", "only functions can be called; write f(x), not x.f(...)", e.pos)
+
+    def index_expr(self, e: S.IndexExpr, sc: Scope) -> ir.Expr:
+        self.allow_settings_param = isinstance(e.base, S.NameRef)
+        b = self.ex(e.base, sc)
+        self.allow_settings_param = False
+        i = self.ex(e.index, sc)
+        if b.ty is ERROR or i.ty is ERROR:
+            return ir.Lit(ERROR, 0)
+        if isinstance(b.ty, MapType):
+            return ir.Index(b.ty.value, b, self.assignable(b.ty.key, i, e.index.pos, "the key"))
+        if isinstance(b.ty, ArrayType):
+            return ir.Index(b.ty.elem, b, self.assignable(INT, i, e.index.pos, "the index"))
+        return self.bad("DAL4044", f"type {b.ty} cannot be indexed (tables and lists can)", e.pos)
 
     def peer_call(self, e: S.MemberCallExpr, peer: str, sc: Scope) -> ir.Expr:
         iface = self.peer_ifaces[peer]

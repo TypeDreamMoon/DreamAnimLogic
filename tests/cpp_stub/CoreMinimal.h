@@ -36,6 +36,7 @@ using int64 = std::int64_t;
 #define UE_ARRAY_COUNT(array) (sizeof(array) / sizeof((array)[0]))
 
 #define TEXT(x) x
+#define WITH_EDITOR 1
 
 // reflection macros are empty outside UHT
 #define UCLASS(...)
@@ -104,6 +105,49 @@ struct TArray
 	auto end() { return V.end(); }
 	auto begin() const { return V.begin(); }
 	auto end() const { return V.end(); }
+};
+
+template <class K, class V>
+struct TPair
+{
+	K Key;
+	V Value;
+};
+
+// TMap as far as generated code and the test driver use it: Find / Contains / Add / Num and range-for over pairs (Key, Value).
+// A vector of pairs compared with operator==, so that every key type the generated code uses (enums, ints, tags) works.
+template <class K, class V>
+struct TMap
+{
+	std::vector<TPair<K, V>> Pairs;
+	int32 Num() const { return static_cast<int32>(Pairs.size()); }
+	V* Find(const K& Key)
+	{
+		for (TPair<K, V>& Pair : Pairs)
+		{
+			if (Pair.Key == Key) { return &Pair.Value; }
+		}
+		return nullptr;
+	}
+	const V* Find(const K& Key) const
+	{
+		for (const TPair<K, V>& Pair : Pairs)
+		{
+			if (Pair.Key == Key) { return &Pair.Value; }
+		}
+		return nullptr;
+	}
+	bool Contains(const K& Key) const { return Find(Key) != nullptr; }
+	V& Add(const K& Key, const V& Value)
+	{
+		if (V* Found = Find(Key)) { *Found = Value; return *Found; }
+		Pairs.push_back(TPair<K, V>{Key, Value});
+		return Pairs.back().Value;
+	}
+	auto begin() { return Pairs.begin(); }
+	auto end() { return Pairs.end(); }
+	auto begin() const { return Pairs.begin(); }
+	auto end() const { return Pairs.end(); }
 };
 
 template <class T>

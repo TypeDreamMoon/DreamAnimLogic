@@ -16,7 +16,7 @@ from . import runtime as rt
 from . import values as vals
 from .builtins import BUILTINS, CONSTRUCTORS
 from .hostapi import HostV1
-from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, VOID, EnumType, StructType, TagType, Type, zero_value
+from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, VOID, ArrayType, EnumType, MapType, StructType, TagType, Type, zero_value
 
 
 class InterpError(Exception):
@@ -134,6 +134,17 @@ class Evaluator:
             return self.owner.host_query(e, [self.ev(a, env) for a in e.args])
         if k is ir.Valid:
             return bool(self.ev(e.x, env))
+        if k is ir.CurveEval:
+            c, x = self.ev(e.curve, env), self.ev(e.x, env)
+            return rt.curve_eval(c, x) if e.ty is FLOAT else rt.curve3_eval(c, x)
+        if k is ir.Index:
+            base, index = self.ev(e.base, env), self.ev(e.index, env)
+            default = (lambda: vals.default_of(e.ty)) if isinstance(e.ty, StructType) else zero_value(e.ty)
+            return rt.map_get(base, index, default) if isinstance(e.base.ty, MapType) else rt.array_get(base, index, default)
+        if k is ir.MapHas:
+            return self.ev(e.key, env) in self.ev(e.table, env)
+        if k is ir.ArrayLen:
+            return len(self.ev(e.items, env))
         if k is ir.CallMethod or k is ir.CallView:
             return self.call_method(self.methods[e.name], [self.ev(a, env) for a in e.args])
         if k is ir.CallPeer:
@@ -265,8 +276,10 @@ def eval_const(expr: ir.Expr):
 class Interpreter:
     """Runs a checked module.  Mirrors the API of the generated Python class."""
 
-    def __init__(self, module: ir.Module, host=None, externs: dict[str, Callable] | None = None, peers: dict | None = None, **params):
+    def __init__(self, module: ir.Module, host=None, externs: dict[str, Callable] | None = None, peers: dict | None = None,
+                 resolver=None, **params):
         self.module = module
+        self.resolver = resolver                                           # where settings find their curves (dal.settings.AssetResolver)
         self.host = host if host is not None else HostV1()
         self.overrides: dict[str, object] = {}
         self.values: dict[str, object] = {}
@@ -284,7 +297,12 @@ class Interpreter:
             p = next((x for x in module.params if x.name == name), None)
             if p is None:
                 raise InterpError(f"unknown param {name!r}")
-            self._params[name] = coerce(p.ty, val)
+            if isinstance(p.ty, StructType) and p.ty.is_settings and not isinstance(val, rt.Struct):
+                from . import settings
+
+                self._params[name] = settings.load_ir(p.ty, val, self.resolver)
+            else:
+                self._params[name] = coerce(p.ty, val)
         self.ev = Evaluator(self, externs, {f.name: f for f in module.funcs}, {x.name: x for x in module.methods})
         self.reset()
 

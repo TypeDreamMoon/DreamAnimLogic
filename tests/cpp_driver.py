@@ -24,7 +24,7 @@ import tempfile
 
 from dal import ir
 from dal.cppbackend import CppGen, CppOptions, generate_cpp
-from dal.types import BOOL, FLOAT, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, EnumType, StructType, TagType
+from dal.types import BOOL, FLOAT, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, ArrayType, AssetType, EnumType, MapType, StructType, TagType
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STUB = os.path.join(HERE, "cpp_stub")
@@ -109,6 +109,89 @@ def _lit(ty, v):
     raise ValueError(ty)
 
 
+class SettingsInit:
+    """C++ statements that fill a settings object (a ``UDataAsset`` or a value struct) with the members of a loaded instance,
+    the way the engine fills one from a data asset; curves become stand-in polylines, assets named stand-in objects."""
+
+    def __init__(self):
+        self.lines: list[str] = []
+        self.n = 0
+
+    def fresh(self) -> str:
+        self.n += 1
+        return f"Dal_E{self.n}"
+
+    def fill(self, ty, v, target: str) -> None:
+        if isinstance(ty, StructType):
+            for f in ty.fields:
+                if not f.derived:
+                    self.fill(f.ty, getattr(v, f.name), f"{target}.{f.name}")
+        elif isinstance(ty, MapType):
+            for k, x in v.items():
+                e = self.fresh()
+                self.lines.append(f"{{ auto& {e} = {target}.Add({_lit(ty.key, k)}, {cpp_type(ty.value)}());")
+                self.fill(ty.value, x, e)
+                self.lines.append("}")
+        elif isinstance(ty, ArrayType):
+            for x in v:
+                e = self.fresh()
+                self.lines.append(f"{{ auto& {e} = {target}[{target}.Add({cpp_type(ty.elem)}())];")
+                self.fill(ty.elem, x, e)
+                self.lines.append("}")
+        elif isinstance(ty, AssetType):
+            if v is None:
+                return
+            if ty.name == "curve":
+                self.lines.append(f"{target} = {_curve_expr(v)};")
+            elif ty.name == "curve3":
+                self.lines.append(f"{{ UCurveVector* Dal_V = DalCurveV(); {' '.join(f'Dal_V->StubCurves[{i}].StubKeys = {_keys(c)};' for i, c in enumerate(v.channels))} {target} = Dal_V; }}")
+            else:
+                self.lines.append(f'{target} = Dal{"Sequence" if ty.name == "sequence" else "Montage"}("{v}");')
+        else:
+            self.lines.append(f"{target} = {_lit(ty, v)};")
+
+
+def cpp_type(ty):
+    from dal.cppbackend import cpp_type as ct
+
+    return ct(ty)
+
+
+def _keys(curve) -> str:
+    if curve.pre != "constant" or curve.post != "constant" or any(k.interp not in ("linear", "constant") for k in curve.keys):
+        raise ValueError("the stand-in engine evaluates polylines with constant extrapolation only")
+    keys = ", ".join(f"{{{_num(k.time)}f, {_num(k.value)}f, {'true' if k.interp == 'constant' else 'false'}}}" for k in curve.keys)
+    return f"std::vector<FStubCurveKey>{{{keys}}}"
+
+
+def _curve_expr(curve) -> str:
+    return f"[&]() {{ UCurveFloat* Dal_C = DalCurveF(); Dal_C->StubKeys = {_keys(curve)}; return Dal_C; }}()"
+
+
+def settings_setup(module, params) -> list[str]:
+    """Driver lines that give the settings params of ``module`` the data in ``params`` (before BeginPlay)."""
+    from dal import settings as dal_settings
+
+    L: list[str] = []
+    for p in module.params:
+        if p.name not in params or not (isinstance(p.ty, StructType) and p.ty.is_settings):
+            continue
+        inst = dal_settings.load_ir(p.ty, params[p.name])
+        init = SettingsInit()
+        if p.ty.asset_root:
+            var = f"Dal_P_{p.name}"
+            L.append(f"\t{p.ty.cpp_type} {var};")
+            init.fill(p.ty, inst, var)
+            L += ["\t" + x for x in init.lines]
+            L.append(f"\t{var}.PostLoad();")
+            L.append(f"\tObj.{p.name} = &{var};")
+        else:
+            init.fill(p.ty, inst, f"Obj.{p.name}")
+            L += ["\t" + x for x in init.lines]
+            L.append(f"\tObj.{p.name}.DalRecomputeDerived();")
+    return L
+
+
 def _tag_lit(ty, v):
     member = ty.member_of(v)
     return "FGameplayTag::EmptyTag" if member in (None, "None") and v == "" else f"{ty.cpp_namespace}::{member}"
@@ -126,6 +209,8 @@ def leaves(name, ty):
 def _print_value(name, ty, obj="Obj"):
     """C++ statement printing ``<obj>.name`` as 'name v0 v1 ...' (nan / inf spelled out)."""
     ref = f"{obj}.{name}"
+    if isinstance(ty, AssetType):
+        return f'PvS("{name}", {ref} != nullptr ? {ref}->StubName : std::string());'
     if isinstance(ty, TagType):
         return f'PvS("{name}", {ref}.ToString());'
     if ty is FLOAT:
@@ -181,7 +266,7 @@ _SIMPLE = {
 _TRIGGER = {"started": "Started", "triggered": "Triggered", "ongoing": "Ongoing", "completed": "Completed", "canceled": "Canceled"}
 
 
-def make_driver(module: ir.Module, frames: list[dict]) -> str:
+def make_driver(module: ir.Module, frames: list[dict], params: dict | None = None) -> str:
     gen = CppGen(module, CppOptions())
     actor = module.kind == "actor"
     target = "Anim" if actor else "Obj"
@@ -211,6 +296,25 @@ def make_driver(module: ir.Module, frames: list[dict]) -> str:
         "{",
         '	std::printf("%s %s\\n", Name, Value.empty() ? "-" : Value.c_str());',
         "}",
+        "",
+        "[[maybe_unused]] static UAnimSequenceBase* DalSequence(const char* Name)",
+        "{",
+        "	static std::map<std::string, UAnimSequenceBase*> Pool;",
+        "	UAnimSequenceBase*& Found = Pool[Name];",
+        "	if (Found == nullptr) { Found = new UAnimSequenceBase(); Found->StubName = Name; }",
+        "	return Found;",
+        "}",
+        "",
+        "[[maybe_unused]] static UAnimMontage* DalMontage(const char* Name)",
+        "{",
+        "	static std::map<std::string, UAnimMontage*> Pool;",
+        "	UAnimMontage*& Found = Pool[Name];",
+        "	if (Found == nullptr) { Found = new UAnimMontage(); Found->StubName = Name; }",
+        "	return Found;",
+        "}",
+        "",
+        "[[maybe_unused]] static UCurveFloat* DalCurveF() { return new UCurveFloat(); }",
+        "[[maybe_unused]] static UCurveVector* DalCurveV() { return new UCurveVector(); }",
         "",
         "static void Pcmds()",
         "{",
@@ -265,6 +369,7 @@ def make_driver(module: ir.Module, frames: list[dict]) -> str:
         L.append(f"\tUAnimMontage Montage_{md.name};")
         L.append(f'\tMontage_{md.name}.StubName = "{md.name}";')
         L.append(f"\tObj.DalMontage_{md.name} = &Montage_{md.name};")
+    L += settings_setup(module, params or {})
     if gen.phased:
         L.append("\tObj.RegisterComponentTickFunctions(true);")
     L.append("\tObj.BeginPlay();" if actor else "\tObj.NativeInitializeAnimation();")
@@ -413,6 +518,8 @@ def parse_value(ty, vals):
     """One printed value ('v0 v1 ...') as the plain data the Python snapshot holds."""
     if isinstance(ty, TagType):
         return "" if vals[0] == "-" else vals[0]
+    if isinstance(ty, AssetType):
+        return None if vals[0] == "-" else vals[0]
     if ty is FLOAT:
         return float(vals[0])
     if ty is INT or isinstance(ty, EnumType):
@@ -440,7 +547,8 @@ class CompileFailed(Exception):
 
 
 def build_and_run(module: ir.Module, frames: list[dict], extra_include: str | None = None, options: CppOptions | None = None,
-                  keep_dir: str | None = None, warnings_as_errors: bool = False, defines: list[str] | None = None):
+                  keep_dir: str | None = None, warnings_as_errors: bool = False, defines: list[str] | None = None,
+                  params: dict | None = None):
     """Compile the generated C++ with the stand-in engine and run the driver; returns (states, compiler_output)."""
     compiler = find_compiler()
     if compiler is None:
@@ -466,7 +574,7 @@ def build_and_run(module: ir.Module, frames: list[dict], extra_include: str | No
             f.write("// intentionally empty\n")
         driver = os.path.join(work, "driver.cpp")
         with open(driver, "w", encoding="utf-8", newline="\n") as f:
-            f.write(make_driver(module, frames))
+            f.write(make_driver(module, frames, params))
         exe = os.path.join(work, "run.exe" if kind == "msvc" else "run")
         includes = [inc, gen] + ([os.path.abspath(extra_include)] if extra_include else [])
         srcs = [os.path.join(gen, n) for n in sorted(files) if n.endswith(".cpp")]
