@@ -1,4 +1,9 @@
-"""The host commands of the ALS character that ``dal/hostapi.py`` does not list yet (als-dal-rewrite.md section 4.1, "V2").
+"""The host commands of the ALS character that ``dal/hostapi.py`` did not list (als-dal-rewrite.md section 4.1, "V2").
+
+NOTE: the compiler core has these eight commands now (rows in ``hostapi.COMMANDS``, ``cppbackend.EXEC``, ``DalHost.h``, the stand-in
+engine, the mock hosts, DalLive's ``UeHost``).  ``missing()`` is empty, so ``install()`` / ``cpp_environment`` register and patch nothing
+and ``patch_stub_text`` leaves the stub alone; what is left of this module is the settings plumbing of ``cpp_environment``.  The text
+below describes what the module did before.
 
 ``AlsCharacter.dal`` / ``AlsInput.dal`` issue ``host.set_actor_rotation(...)``, ``host.set_ground_friction(...)`` ... as the
 specification names them.  The compiler core knows the commands of v1 / v2 only, so until the owner of ``dal/`` adds these rows

@@ -174,6 +174,18 @@ COMMANDS: dict[str, Command] = {
         _c("set_gravity_scale", [FLOAT], ue="CharacterMovement->GravityScale = v"),
         _c("set_jump_z_velocity", [FLOAT], ue="CharacterMovement->JumpZVelocity = v"),
         _c("set_air_control", [FLOAT], ue="CharacterMovement->AirControl = v"),
+        # v4: what the ALS character writes (UDalCharacterMovementComponent is the movement component of the DalRuntime module)
+        _c("set_max_walk_speed_crouched", [FLOAT], ue="CharacterMovement->MaxWalkSpeedCrouched = v"),
+        _c("set_max_acceleration_walking", [FLOAT], doc="the acceleration on the ground (ALS's movement component; get_max_acceleration returns it there)",
+           ue="UDalCharacterMovementComponent::MaxAccelerationWalking = v (DalRuntime)"),
+        _c("set_ground_friction", [FLOAT], ue="CharacterMovement->GroundFriction = v"),
+        _c("set_braking_friction_factor", [FLOAT], ue="CharacterMovement->BrakingFrictionFactor = v"),
+        _c("set_input_blocked", [BOOL], doc="the movement component drops the movement input while this is set (ALS's movement component)",
+           ue="UDalCharacterMovementComponent::bInputBlocked = b (DalRuntime)"),
+        _c("set_actor_rotation", [ROTATOR, BOOL], 1, (False,), doc="rotate the actor without sweeping; teleport = true is a teleport (it resets what is attached to the transform, foot locking)",
+           ue="Pawn->SetActorRotation(Rotation, bTeleport ? ETeleportType::TeleportPhysics : ETeleportType::None)"),
+        _c("add_controller_yaw_input", [FLOAT], doc="turn the controller (APawn::AddControllerYawInput)", ue="Pawn->AddControllerYawInput(v)"),
+        _c("add_controller_pitch_input", [FLOAT], doc="pitch the controller (APawn::AddControllerPitchInput)", ue="Pawn->AddControllerPitchInput(v)"),
         _c("set_rotation_rate", [ROTATOR], ue="CharacterMovement->RotationRate = r"),
         _c("set_orient_rotation_to_movement", [BOOL], ue="CharacterMovement->bOrientRotationToMovement = b"),
         _c("set_use_controller_desired_rotation", [BOOL], ue="CharacterMovement->bUseControllerDesiredRotation = b"),
@@ -503,6 +515,30 @@ class HostV1(HostV0):
 
     def set_air_control(self, value: float) -> None:
         """cm.p.air_control = value"""
+
+    def set_max_walk_speed_crouched(self, value: float) -> None:
+        """cm.p.max_walk_speed_crouched = value"""
+
+    def set_max_acceleration_walking(self, value: float) -> None:
+        """cm.p.max_acceleration_walking = value (c3 H2.1: ``get_max_acceleration()`` returns it on the ground)"""
+
+    def set_ground_friction(self, value: float) -> None:
+        """cm.p.ground_friction = value"""
+
+    def set_braking_friction_factor(self, value: float) -> None:
+        """cm.p.braking_friction_factor = value"""
+
+    def set_input_blocked(self, value: bool) -> None:
+        """cm.input_blocked = value (c3 H2.2)"""
+
+    def set_actor_rotation(self, rotation, teleport: bool) -> None:
+        """cm.rotation = Rot(pitch, yaw, roll); ``teleport`` also sets ``just_teleported`` (c3: ``set_actor_rotation(rot, teleport)``)"""
+
+    def add_controller_yaw_input(self, value: float) -> None:
+        """session.controller.add_yaw_input(value)"""
+
+    def add_controller_pitch_input(self, value: float) -> None:
+        """session.controller.add_pitch_input(value)"""
 
     def set_rotation_rate(self, rotation) -> None:
         """cm.p.rotation_rate = (pitch, yaw, roll)"""

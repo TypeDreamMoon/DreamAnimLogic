@@ -17,6 +17,15 @@ update(dt) {
     host.set_gravity_scale(F);
     host.set_jump_z_velocity(F);
     host.set_air_control(F);
+    host.set_max_walk_speed_crouched(F);
+    host.set_max_acceleration_walking(F);
+    host.set_ground_friction(F);
+    host.set_braking_friction_factor(F);
+    host.set_input_blocked(B);
+    host.set_actor_rotation(R);
+    host.set_actor_rotation(R, B);
+    host.add_controller_yaw_input(F);
+    host.add_controller_pitch_input(-F);
     host.set_rotation_rate(R);
     host.set_orient_rotation_to_movement(B);
     host.set_use_controller_desired_rotation(!B);

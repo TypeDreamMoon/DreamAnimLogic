@@ -166,6 +166,14 @@ namespace DalHost
 
 	enum class ECommand : uint8
 	{
+		SetMaxWalkSpeedCrouched,
+		SetMaxAccelerationWalking,
+		SetGroundFriction,
+		SetBrakingFrictionFactor,
+		SetInputBlocked,
+		SetActorRotation,
+		AddControllerYawInput,
+		AddControllerPitchInput,
 		SetMaxWalkSpeed,
 		SetMaxAcceleration,
 		SetBrakingDecelerationWalking,
@@ -249,6 +257,20 @@ namespace DalHost
 		}
 
 		inline FCommand SetMaxWalkSpeed(float V) { return WithFloat(ECommand::SetMaxWalkSpeed, V); }
+		inline FCommand SetMaxWalkSpeedCrouched(float V) { return WithFloat(ECommand::SetMaxWalkSpeedCrouched, V); }
+		inline FCommand SetMaxAccelerationWalking(float V) { return WithFloat(ECommand::SetMaxAccelerationWalking, V); }
+		inline FCommand SetGroundFriction(float V) { return WithFloat(ECommand::SetGroundFriction, V); }
+		inline FCommand SetBrakingFrictionFactor(float V) { return WithFloat(ECommand::SetBrakingFrictionFactor, V); }
+		inline FCommand SetInputBlocked(bool B) { return WithBool(ECommand::SetInputBlocked, B); }
+		inline FCommand AddControllerYawInput(float V) { return WithFloat(ECommand::AddControllerYawInput, V); }
+		inline FCommand AddControllerPitchInput(float V) { return WithFloat(ECommand::AddControllerPitchInput, V); }
+		inline FCommand SetActorRotation(const FRotator3f& R, bool bTeleport)
+		{
+			FCommand C = Make(ECommand::SetActorRotation);
+			C.R = R;
+			C.B0 = bTeleport;
+			return C;
+		}
 		inline FCommand SetMaxAcceleration(float V) { return WithFloat(ECommand::SetMaxAcceleration, V); }
 		inline FCommand SetBrakingDecelerationWalking(float V) { return WithFloat(ECommand::SetBrakingDecelerationWalking, V); }
 		inline FCommand SetGravityScale(float V) { return WithFloat(ECommand::SetGravityScale, V); }

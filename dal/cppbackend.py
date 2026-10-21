@@ -479,7 +479,17 @@ _G_ANIM = "if (UAnimInstance* DalAnim = DalGetAnimInstance())"
 _G_ASSET = "if (UAnimMontage* DalAsset = DalMontageAsset(DalCommand.Montage))"
 _G_RESOLVED = "if (UAnimMontage* DalAsset = DalResolveMontage(DalCommand))"       # a program that passes `montage` values: the asset of the command or of the declared montage
 
+_G_ALS_MOVEMENT = "if (UDalCharacterMovementComponent* DalAlsMovement = Cast<UDalCharacterMovementComponent>(DalMovement))"      # the movement component of DalRuntime
+
 EXEC: dict[str, tuple[list[str], list[str]]] = {
+    "set_max_walk_speed_crouched": ([_G_MOVEMENT], ["DalMovement->MaxWalkSpeedCrouched = DalCommand.F;"]),
+    "set_max_acceleration_walking": ([_G_MOVEMENT, _G_ALS_MOVEMENT], ["DalAlsMovement->MaxAccelerationWalking = DalCommand.F;"]),
+    "set_ground_friction": ([_G_MOVEMENT], ["DalMovement->GroundFriction = DalCommand.F;"]),
+    "set_braking_friction_factor": ([_G_MOVEMENT], ["DalMovement->BrakingFrictionFactor = DalCommand.F;"]),
+    "set_input_blocked": ([_G_MOVEMENT, _G_ALS_MOVEMENT], ["DalAlsMovement->bInputBlocked = DalCommand.B0;"]),
+    "set_actor_rotation": ([_G_PAWN], ["DalPawn->SetActorRotation(FRotator(DalCommand.R), DalCommand.B0 ? ETeleportType::TeleportPhysics : ETeleportType::None);"]),
+    "add_controller_yaw_input": ([_G_PAWN], ["DalPawn->AddControllerYawInput(DalCommand.F);"]),
+    "add_controller_pitch_input": ([_G_PAWN], ["DalPawn->AddControllerPitchInput(DalCommand.F);"]),
     "set_max_walk_speed": ([_G_MOVEMENT], ["DalMovement->MaxWalkSpeed = DalCommand.F;"]),
     "set_max_acceleration": ([_G_MOVEMENT], ["DalMovement->MaxAcceleration = DalCommand.F;"]),
     "set_braking_deceleration_walking": ([_G_MOVEMENT], ["DalMovement->BrakingDecelerationWalking = DalCommand.F;"]),
@@ -711,6 +721,7 @@ class CppGen:
         self.camera = "camera_set_fov" in self.cmds
         self.controller = "set_control_rotation" in self.cmds
         self.movement_cmds = [c for c in self.cmds if EXEC[c][0][0] == _G_MOVEMENT]
+        self.als_movement_cmds = [c for c in self.cmds if _G_ALS_MOVEMENT in EXEC[c][0]]      # they need UDalCharacterMovementComponent (module DalRuntime)
         self.character_cmds = [c for c in self.cmds if EXEC[c][0][0] == _G_CHARACTER]
 
     # ---- statements ---------------------------------------------------------------------------
@@ -849,7 +860,7 @@ class CppGen:
             mods += ["EnhancedInput"]
         if self.uses_tags(any_origin=True) or any(isinstance(d.ty, TagType) for d in [*self.m.params, *self.m.inputs, *self.m.states]):
             mods += ["GameplayTags"]
-        if self.uses(*_CONSUME_ITEMS):
+        if self.uses(*_CONSUME_ITEMS) or self.als_movement_cmds:
             mods += ["DalRuntime"]
         return mods
 
@@ -2202,8 +2213,10 @@ class CppGen:
             add("Components/SkeletalMeshComponent.h")
             add("Engine/SkeletalMesh.h")
             add("PhysicsEngine/PhysicsAsset.h")
-        if self.uses(*_CONSUME_ITEMS):
+        if self.uses(*_CONSUME_ITEMS) or self.als_movement_cmds:
             add("DalCharacterMovementComponent.h")
+        if "set_actor_rotation" in self.cmds:
+            add("Engine/EngineTypes.h")
         if self.uses(*_PAWN_ITEMS) or self.needs_pawn_helper or self.controller or self.arm or self.camera:
             add("GameFramework/Pawn.h")
         if self.action_names():

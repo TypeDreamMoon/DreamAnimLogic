@@ -462,6 +462,54 @@ class UeHost(HostV1):
         """CharacterMovement->RotationRate = r"""
         self._set_cmc("rotation_rate", _to_rotator(rotation))
 
+    def set_max_walk_speed_crouched(self, value):
+        """CharacterMovement->MaxWalkSpeedCrouched = v"""
+        self._set_cmc("max_walk_speed_crouched", float(value))
+
+    def set_ground_friction(self, value):
+        """CharacterMovement->GroundFriction = v"""
+        self._set_cmc("ground_friction", float(value))
+
+    def set_braking_friction_factor(self, value):
+        """CharacterMovement->BrakingFrictionFactor = v"""
+        self._set_cmc("braking_friction_factor", float(value))
+
+    def _set_als_cmc(self, prop: str, value) -> None:
+        """A property of the movement component of DalRuntime (UDalCharacterMovementComponent); a character with another one ignores it."""
+        cmc = self._get_cmc()
+        if cmc is None:
+            return
+        try:
+            cmc.set_editor_property(prop, value)
+        except Exception:                      # the property is not there: not the DalRuntime movement component
+            self._warn_once("als_cmc:" + prop, f"{self.comp.get_name()}: the movement component has no '{prop}' (UDalCharacterMovementComponent of DalRuntime)")
+
+    def set_max_acceleration_walking(self, value):
+        """UDalCharacterMovementComponent::MaxAccelerationWalking = v (DalRuntime)"""
+        self._set_als_cmc("max_acceleration_walking", float(value))
+
+    def set_input_blocked(self, value):
+        """UDalCharacterMovementComponent::bInputBlocked = b (DalRuntime)"""
+        self._set_als_cmc("input_blocked", bool(value))
+
+    def set_actor_rotation(self, rotation, teleport):
+        """Pawn->SetActorRotation(Rotation, bTeleport ? ETeleportType::TeleportPhysics : ETeleportType::None)"""
+        owner = self._get_owner()
+        if owner is not None:
+            owner.set_actor_rotation(_to_rotator(rotation), bool(teleport))
+
+    def add_controller_yaw_input(self, value):
+        """Pawn->AddControllerYawInput(v)"""
+        owner = self._get_owner()
+        if owner is not None:
+            owner.add_controller_yaw_input(float(value))
+
+    def add_controller_pitch_input(self, value):
+        """Pawn->AddControllerPitchInput(v)"""
+        owner = self._get_owner()
+        if owner is not None:
+            owner.add_controller_pitch_input(float(value))
+
     def set_orient_rotation_to_movement(self, value):
         """CharacterMovement->bOrientRotationToMovement = b"""
         self._set_cmc("orient_rotation_to_movement", bool(value))

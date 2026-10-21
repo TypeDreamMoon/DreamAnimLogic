@@ -94,6 +94,13 @@ enum EMovementMode : int
 	MOVE_Custom,
 };
 
+enum class ETeleportType : uint8
+{
+	None,
+	TeleportPhysics,
+	ResetPhysics,
+};
+
 enum ECollisionChannel : int
 {
 	ECC_WorldStatic, ECC_WorldDynamic, ECC_Pawn, ECC_Visibility, ECC_Camera, ECC_PhysicsBody, ECC_Vehicle, ECC_Destructible,
@@ -450,6 +457,10 @@ public:
 class AActor : public UObject
 {
 public:
+	virtual void SetActorRotation(FRotator NewRotation, ETeleportType Teleport = ETeleportType::None)
+	{
+		StubLog::Emit("set_actor_rotation", {NewRotation.Pitch, NewRotation.Yaw, NewRotation.Roll, Teleport != ETeleportType::None});
+	}
 	FVector StubLocation;
 	std::vector<FName> Tags;
 	std::vector<UObject*> StubComponents;
@@ -484,6 +495,9 @@ public:
 	FLoggedFloat GravityScale{"set_gravity_scale"};
 	FLoggedFloat JumpZVelocity{"set_jump_z_velocity"};
 	FLoggedFloat AirControl{"set_air_control"};
+	FLoggedFloat MaxWalkSpeedCrouched{"set_max_walk_speed_crouched"};
+	FLoggedFloat GroundFriction{"set_ground_friction"};
+	FLoggedFloat BrakingFrictionFactor{"set_braking_friction_factor"};
 	FLoggedRotator RotationRate{"set_rotation_rate"};
 	FLoggedBool bOrientRotationToMovement{"set_orient_rotation_to_movement"};
 	FLoggedBool bUseControllerDesiredRotation{"set_use_controller_desired_rotation"};
@@ -525,6 +539,8 @@ public:
 class APawn : public AActor
 {
 public:
+	virtual void AddControllerYawInput(float Val) { StubLog::Emit("add_controller_yaw_input", {Val}); }
+	virtual void AddControllerPitchInput(float Val) { StubLog::Emit("add_controller_pitch_input", {Val}); }
 	FQuat StubQuat;
 	FRotator StubControlRotation;
 	AController* StubController = nullptr;
@@ -554,6 +570,8 @@ public:
 class UDalCharacterMovementComponent : public UCharacterMovementComponent
 {
 public:
+	FLoggedFloat MaxAccelerationWalking{"set_max_acceleration_walking"};
+	FLoggedBool bInputBlocked{"set_input_blocked"};
 	FVector StubPrePenetration;
 	bool StubPrePenetrationValid = false;
 	bool TryConsumePrePenetrationAdjustmentVelocity(FVector& OutVelocity)
