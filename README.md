@@ -79,6 +79,8 @@ examples/
 als/                              ALS-Refactored rewritten in .dal (library + character + input; the animation instance is next to them)
   als_lib.dal                     the shared declarations: 8 tag sets, enums, the state structs, 23 settings types (they load the data
                                   assets of G:\DCC\AlsPack) and the pure math helpers
+  AlsCharacter.dal                AAlsCharacter: states, view, locomotion, gait, rotation, landing, jumping, the CMC gait settings push
+  AlsInput.dal                    the example character's Enhanced Input actions
 tests/                            python -I -m unittest discover -s tests
   oracles/                        independent hand-written ports (ALS lean, melee, lock-on); they do not import dal
   cpp_stub/ cpp_driver.py         stand-in engine headers + build/run helper for the C++ tests
@@ -284,6 +286,7 @@ python -I -m unittest discover -s tests
 | `test_host_reads.py` (17), `test_host_mesh.py` (10) | the v3 host reads: capsule, curves, consume-on-read, bones, mesh transform, reference skeleton, root motion mode |
 | `test_math3.py` (43) | component assignment, quaternion / vector / spring / easing built-ins by hand, `transform` (also against the animation runtime of the Blender host when it is on the machine) |
 | `test_queries.py` (23) | scene queries with channels, the extended hit, primitives, the thread-safe set; mock host vs stand-in engine scene |
+| `test_als_character.py` (62) | `als/`: every function cites its ALS line; the library's structs / settings against the C++ headers; the pack's settings load without a warning; the library math against the UE 5.8 goldens (`als/goldens`); interpreter / Python / C++ (stand-in engine) agree on random frames; gait, rotation, stance, landing, jump and input behaviour against the C++ semantics. `als_host_v2.py` registers, for these tests only, the host commands `hostapi.py` does not list yet (`set_actor_rotation`, `set_ground_friction`, ...) |
 | `test_live_session.py` | DalLive's pure-Python half with the mock hosts: which state survives a swap, compile errors keep the last good program, debounce, runtime faults, anim commands one update late, param overrides, compiler lookup |
 
 Regenerate golden files with `UPDATE_GOLDEN=1 python -I -m unittest discover -s tests -p test_cpp.py` (and
