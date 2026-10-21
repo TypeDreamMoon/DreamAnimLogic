@@ -24,9 +24,21 @@ class PeerIface:
     filename: str
     vars: dict[str, Type] = field(default_factory=dict)                                   # states, inputs and params
     settings_assets: set[str] = field(default_factory=set)                                # params that are settings data assets (C++: DalSettings_<name>())
+    slots: list[str] = field(default_factory=list)                                        # the tick slots an actor logic has an update block in, in slot order
     methods: dict[str, tuple[list[tuple[str, Type]], Type | None]] = field(default_factory=dict)   # pub methods
     views: dict[str, tuple[list[tuple[str, Type]], Type | None]] = field(default_factory=dict)     # pub views
     entries: dict[str, "ir.EntryDef"] = field(default_factory=dict)      # entry name -> its signature (typed parameters, `linked` marker)
+
+
+def actor_slots(unit) -> list[str]:
+    """The tick slots of an actor logic from its declarations: the slot of every ``update`` (the logic's own, then ``pre_movement``, when it names none)."""
+    from . import syntax as S
+
+    order = ("pre_movement", "after_movement", "after_anim")
+    logic = next((d for d in unit.decls if isinstance(d, S.LogicDecl)), None)
+    own = logic.phase if logic is not None else None
+    found = {(d.phase or own or "pre_movement") for d in unit.decls if isinstance(d, S.UpdateDecl)}
+    return [s for s in order if s in found]
 
 
 def load_interface(ctx: CompileContext, from_key: str, type_name: str) -> PeerIface:
@@ -50,6 +62,8 @@ def load_interface(ctx: CompileContext, from_key: str, type_name: str) -> PeerIf
     checker.interface_only = True
     module = checker.run()
     iface = PeerIface(module.name, module.kind, key, src.filename)
+    if module.kind == "actor":
+        iface.slots = actor_slots(unit)
     for d in [*module.params, *module.inputs, *module.states]:
         iface.vars[d.name] = d.ty
     for d in module.params:

@@ -1072,6 +1072,8 @@ class CppGen:
                Method("void", "DalRunPhase", "int32 Phase, float DeltaTime", [], "const int32 Phase, const float DeltaTime", access="public", external=True,
                       doc="Run one update block (the slot number is its place in the list: " + ", ".join(f"{i} = {s}" for i, s in enumerate(self.slots)) + ")."),
                Method("void", "DalSetupTickOrder", external=True, doc="Order the tick functions around the movement component, the controller and the mesh.")]
+        out.append(Method("FActorComponentTickFunction&", "DalGetPhaseTick", "const int32 Slot", [], "const int32 Slot", access="public", external=True,
+                          doc="The tick function of an update block (the other logics of the actor order theirs around it)."))
         for slot in self.slots:
             out.append(Method("void", f"DalUpdate_{camel(slot)}", "float DeltaSeconds", external=True, doc=f"update in {slot}"))
         return out
@@ -1118,8 +1120,22 @@ class CppGen:
                        f"{T}if (DalMesh != nullptr)", f"{T}{{", f"{T}{T}DalMesh->PrimaryComponentTick.AddPrerequisite(this, DalPhaseTicks[{i}]);", f"{T}}}"]
             else:
                 so += [f"{T}if (DalMesh != nullptr)", f"{T}{{", f"{T}{T}DalPhaseTicks[{i}].AddPrerequisite(DalMesh, DalMesh->PrimaryComponentTick);", f"{T}}}"]
+        for o in self.m.order:
+            so.append("")
+            so.append(f"{T}// {o.relation} {o.peer}")
+            so.append(f"{T}if ({o.peer} != nullptr)")
+            so.append(f"{T}{{")
+            for slot in o.slots:
+                i = self.slots.index(slot)
+                j = next(p for p in self.m.peers if p.name == o.peer).slots.index(slot)
+                if o.relation == "before":
+                    so.append(f"{T}{T}{o.peer}->DalGetPhaseTick({j}).AddPrerequisite(this, DalPhaseTicks[{i}]);                       // {slot}")
+                else:
+                    so.append(f"{T}{T}DalPhaseTicks[{i}].AddPrerequisite({o.peer}, {o.peer}->DalGetPhaseTick({j}));                    // {slot}")
+            so.append(f"{T}}}")
         so.append("}")
         blocks.append(so)
+        blocks.append([f"FActorComponentTickFunction& {cls}::DalGetPhaseTick(const int32 Slot)", "{", f"{T}return DalPhaseTicks[Slot];", "}"])
         blocks.append([f"void {tick}::ExecuteTick(const float DeltaTime, const ELevelTick TickType, [[maybe_unused]] ENamedThreads::Type CurrentThread, "
                        f"[[maybe_unused]] const FGraphEventRef& MyCompletionGraphEvent)", "{",
                        f"{T}FActorComponentTickFunction::ExecuteTickHelper(Target, false, DeltaTime, TickType, [this](const float DilatedTime)", f"{T}{{",
@@ -1132,7 +1148,10 @@ class CppGen:
             rp.append(f"{T}bDalTargetsFresh = false;")
         rp.append(f"{T}DalSampleInputs();")
         if self.has_events:
-            rp += [f"{T}if (Phase == 0)", f"{T}{{", f"{T}{T}DalTakeEvents();", f"{T}}}"]
+            if self.m.slot_events:
+                rp.append(f"{T}DalTakeEvents();                                  // slot_events: what was raised since the slot before is handled in this one")
+            else:
+                rp += [f"{T}if (Phase == 0)", f"{T}{{", f"{T}{T}DalTakeEvents();", f"{T}}}"]
         rp.append(f"{T}Dal_DeltaSeconds = DeltaTime;")
         rp += [f"{T}switch (Phase)", f"{T}{{"]
         for i, slot in enumerate(self.slots):
@@ -2668,7 +2687,7 @@ class CppGen:
                 body = []
                 if k == 0 and u is not None and u.pre:
                     body.extend(self.stmts(u.pre, 1))
-                if k == 0 and self.has_events:
+                if (k == 0 or self.m.slot_events) and self.has_events:
                     body.append(f"{T}DalDispatchEvents();")
                 if u is not None:
                     body.extend(self.stmts(u.body, 1))

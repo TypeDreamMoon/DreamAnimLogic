@@ -528,6 +528,8 @@ class Interpreter:
             if u is not None:
                 self._run(u.pre, {u.dt_name: self._dt})
             self._dispatch(events)
+        elif m.slot_events and any(h.event not in ("begin_play", "end_play") for h in m.handlers):
+            self._dispatch(self._collect_events())                 # an event raised since the slot before is handled in this one
         if u is not None:
             self._run(u.body, {u.dt_name: self._dt})
         if not m.post_flush:                                     # a post_flush logic hands its commands over after the post_update

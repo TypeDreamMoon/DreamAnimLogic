@@ -391,10 +391,32 @@ def default_schedule(modules: dict[str, ir.Module]) -> list[tuple[str, str | Non
     animation instances, then the actor logics that run after the animation.  ``(name, None)`` runs a whole ``update``."""
     steps: list[tuple[str, str | None]] = []
     for slot in ("pre_movement", "after_movement"):
-        steps += [(n, slot) for n, m in modules.items() if slot in phases_of(m)]
+        steps += _ordered([n for n, m in modules.items() if slot in phases_of(m)], slot, modules)
     steps += [(n, None) for n, m in modules.items() if m.kind == "anim"]
-    steps += [(n, "after_anim") for n, m in modules.items() if "after_anim" in phases_of(m)]
+    steps += _ordered([n for n, m in modules.items() if "after_anim" in phases_of(m)], "after_anim", modules)
     return steps
+
+
+def _ordered(names: list[str], slot: str, modules: dict[str, ir.Module]) -> list[tuple[str, str]]:
+    """The logics that run in a tick slot, in module order, rearranged only as far as the `before` / `after` declarations of the logics demand."""
+    first_to_last: dict[str, set[str]] = {n: set() for n in names}                # n must run before every name in the set
+    for n in names:
+        for o in modules[n].order:
+            if slot not in o.slots or o.logic not in first_to_last:
+                continue
+            if o.relation == "before":
+                first_to_last[n].add(o.logic)
+            else:
+                first_to_last[o.logic].add(n)
+    out: list[str] = []
+    todo = list(names)
+    while todo:
+        ready = [n for n in todo if not any(n in first_to_last[p] for p in todo if p != n)]
+        if not ready:
+            raise ValueError(f"the tick slot order of {', '.join(todo)} in {slot} is a cycle")
+        out.append(ready[0])
+        todo.remove(ready[0])
+    return [(n, slot) for n in out]
 
 
 def random_system_frames(modules: dict[str, ir.Module], count: int, seed: int = 1) -> list[dict]:
@@ -440,12 +462,20 @@ def run_system(modules: dict[str, ir.Module], frames: list[dict], backend: str =
             hosts[n].load(frames[0] if frames else {})
             begin()
     out = []
+    carried: dict[str, list] = {n: [] for n in modules}                # step events nobody took yet: the host's queue keeps them for the next tick
     for f in frames:
         for n in modules:
             hosts[n].load(f)
+            hosts[n].events = carried[n] + hosts[n].events
             for name, value in f.get("free", {}).get(n, {}).items():
                 objs[n].set_input(name, value)
-        for n, slot in steps:
+        raised: dict[str, list] = {n: [] for n in modules}
+        for si, (n, slot) in enumerate(steps):
+            for ev in f.get("step_events", {}).get(si, []):          # events that arrive between two steps (the movement component raised them)
+                for host_name, host in hosts.items():
+                    event = tuple(ev)
+                    host.events.append(event)
+                    raised[host_name].append(event)
             if slot is None:
                 objs[n].update(f["dt"])
             else:
@@ -459,6 +489,7 @@ def run_system(modules: dict[str, ir.Module], frames: list[dict], backend: str =
         snap = {}
         for n in modules:
             snap[n] = _snapshot(objs[n], hosts[n])
+            carried[n] = [e for e in raised[n] if any(e is x for x in hosts[n].events)]
         out.append(snap)
     return out
 

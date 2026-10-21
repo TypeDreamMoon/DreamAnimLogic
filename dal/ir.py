@@ -414,6 +414,16 @@ class PeerDef:
     kind: str                                                    # 'anim' | 'actor'
     filename: str
     methods: dict[str, tuple[list[tuple[str, Type]], Type | None]] = field(default_factory=dict)
+    slots: list[str] = field(default_factory=list)               # the tick slots an actor peer has an update block in
+
+
+@dataclass
+class OrderDef:
+    """`logic X : actor before Peer;` / `after Peer`: in every tick slot both logics have, X's block runs before / after the peer's."""
+    relation: str                                                # 'before' | 'after'
+    peer: str                                                    # the peer's name in this logic
+    logic: str                                                   # the peer's logic
+    slots: tuple[str, ...] = ()                                  # the tick slots both have an update block in
 
 
 @dataclass
@@ -451,6 +461,8 @@ class Module:
     updates: list[UpdateDef] = field(default_factory=list)      # one per tick slot, in slot order
     post_update: "UpdateDef | None" = None                      # anim logic: the block that runs after the graph update (game thread)
     post_flush: bool = False                                    # anim logic: its commands run right after the post_update of the same frame
+    slot_events: bool = False                                   # actor logic: events are handled at the start of every tick slot
+    order: list[OrderDef] = field(default_factory=list)         # actor logic: tick slot order against peers
     methods: list[MethodDef] = field(default_factory=list)      # methods and views, in source order
     peers: list[PeerDef] = field(default_factory=list)
     phases_explicit: bool = False                               # a tick slot was written (`in after_movement`)
@@ -700,7 +712,8 @@ def dump_stmts(stmts: list[Stmt], indent: int = 1) -> list[str]:
 
 
 def dump(m: Module) -> str:
-    out = [f"library {m.name}" if m.is_library else f"logic {m.name}" + (f" : {m.kind}" if m.kind != "anim" else "") + (" post_flush" if m.post_flush else "")]
+    out = [f"library {m.name}" if m.is_library else f"logic {m.name}" + (f" : {m.kind}" if m.kind != "anim" else "") + (" post_flush" if m.post_flush else "")
+           + (" slot_events" if m.slot_events else "") + "".join(f" {o.relation} {o.peer}" for o in m.order)]
     for lib in m.libs:
         out.append(f"use {lib.filename!r}")
     for en in m.enums:

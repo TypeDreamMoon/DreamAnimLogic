@@ -213,6 +213,9 @@ class LogicDecl(Decl):
     linked_pos: Pos | None = None
     post_flush: bool = False         # `logic X : anim post_flush;` -- the commands of a frame run right after its post_update, not at the next update
     post_flush_pos: Pos | None = None
+    slot_events: bool = False        # `logic X : actor slot_events;` -- events are handled at the start of every tick slot, not only the first
+    slot_events_pos: Pos | None = None
+    order: list = field(default_factory=list)      # `logic X : actor before Peer, after Other;` -- (relation, peer name, position) in source order
 
 
 @dataclass

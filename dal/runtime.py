@@ -1443,6 +1443,8 @@ class LogicBase:
     DAL_VIEWS: tuple = ()         # pub views
     DAL_PHASES: tuple = ()        # tick slots of the logic (empty: one update)
     DAL_POST_FLUSH = False        # anim logic with `post_flush`: update() and the entries leave the commands queued; post_update() hands them over
+    DAL_SLOT_EVENTS = False       # actor logic with `slot_events`: the events are handled at the start of every tick slot, not only the first
+    DAL_ORDER: tuple = ()         # actor logic: (relation, peer, peer logic, slots) -- in these tick slots the block runs 'before' / 'after' the peer's
 
     def __init__(self, host, params: dict, peers: dict | None = None):
         from .hostapi import HostV1

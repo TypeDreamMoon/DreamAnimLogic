@@ -513,6 +513,10 @@ class PyGen:
             L.append(f"{INDENT})")
         if m.post_flush:
             L.append(f"{INDENT}DAL_POST_FLUSH = True")
+        if m.slot_events:
+            L.append(f"{INDENT}DAL_SLOT_EVENTS = True")
+        if m.order:
+            L.append(f"{INDENT}DAL_ORDER = (" + "".join(f"({o.relation!r}, {o.peer!r}, {o.logic!r}, {tuple(o.slots)!r}), " for o in m.order) + ")")
         if m.peers:
             L.append(f"{INDENT}DAL_PEERS = (" + "".join(f"({p.name!r}, {p.logic!r}), " for p in m.peers) + ")")
         pub_methods = [x for x in m.methods if x.pub and not x.is_view]
@@ -624,13 +628,13 @@ class PyGen:
             out.append(f"{pad}self._sample()")
             if first and queue_target:
                 out.append(f"{pad}self._drain_peer_calls()")
-            if first and event_handlers:
+            if (first or m.slot_events) and event_handlers:
                 out.append(f"{pad}events = self._collect_events()")
             out.append(f"{pad}{dt} = float({dt})")
             out.append(f"{pad}self._dt = {dt}")
             if first and u is not None:
                 out.extend(self.stmts(u.pre, depth))
-            if first and event_handlers:
+            if (first or m.slot_events) and event_handlers:
                 out.append(f"{pad}self._dispatch(events)")
             if u is not None:
                 out.extend(self.stmts(u.body, depth))

@@ -307,8 +307,26 @@ class Parser:
             kind, kind_pos = k.text, k.pos
         linked, linked_pos = None, None
         post_flush, post_flush_pos = False, None
-        while self.is_word("linked") or self.is_word("post_flush"):          # the options of an animation logic, in either order
+        slot_events, slot_events_pos = False, None
+        order: list = []
+        while (self.is_word("linked") or self.is_word("post_flush") or self.is_word("slot_events") or self.is_word("before")
+               or self.is_word("after")):                                 # the options of the logic, in any order
             lk = self.advance()
+            if lk.text == "slot_events":
+                if kind != "actor":
+                    raise self.error("DAL2026", "only an actor logic has tick slots: logic Name : actor slot_events in after_movement;", lk.pos)
+                slot_events, slot_events_pos = True, lk.pos
+                continue
+            if lk.text in ("before", "after"):
+                if kind != "actor":
+                    raise self.error("DAL2026", f"only an actor logic has tick slots to order: logic Name : actor {lk.text} Peer in pre_movement;", lk.pos)
+                while True:
+                    peer = self.ident("the name of a peer")
+                    order.append((lk.text, peer.text, peer.pos))
+                    if not self.tok.is_op(","):
+                        break
+                    self.advance()
+                continue
             if lk.text == "post_flush":
                 if kind != "anim":
                     raise self.error("DAL2025", "only an animation logic can flush its commands after the post_update: logic Name : anim post_flush;", lk.pos)
@@ -322,7 +340,8 @@ class Parser:
             linked, linked_pos = parent.text, parent.pos
         phase, phase_pos = self.parse_phase()
         self.expect_op(";", "after the logic name")
-        return S.LogicDecl(kw.pos, name.text, kind, kind_pos, phase, phase_pos, linked, linked_pos, post_flush, post_flush_pos, name_pos=name.pos)
+        return S.LogicDecl(kw.pos, name.text, kind, kind_pos, phase, phase_pos, linked, linked_pos, post_flush, post_flush_pos,
+                           slot_events, slot_events_pos, order, name_pos=name.pos)
 
     def parse_phase(self) -> tuple[str | None, Pos | None]:
         """Optional `in pre_movement | after_movement | after_anim`."""

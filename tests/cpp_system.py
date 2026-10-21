@@ -111,7 +111,9 @@ def make_system_driver(modules: dict[str, ir.Module], frames: list[dict], schedu
                 L.append(f"\t\tL_{n}.{name} = {cd._lit(inp.ty, v)};")
         L.append("\t\tStubLog::Lines().clear();")
         dt = cd._num(f["dt"]) + "f"
-        for n, slot in schedule:
+        for si, (n, slot) in enumerate(schedule):
+            for ev in f.get("step_events", {}).get(si, []):                # hook events that arrive between two steps (the movement component raised them)
+                L.append("\t\t" + cd.hook_event(ev))
             g = gens[n]
             if modules[n].kind == "actor":
                 if g.phased:

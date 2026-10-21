@@ -447,6 +447,7 @@ class Checker:
                 self.check_method(d)
         self.check_updates([d for d in decls if isinstance(d, S.UpdateDecl)], logics[0] if logics else None)
         self.check_post_update([d for d in decls if isinstance(d, S.PostUpdateDecl)], logics[0] if logics else None)
+        self.check_logic_options(logics[0] if logics else None)
         for d in decls:
             self.focus(d)
             if isinstance(d, S.EntryDecl):
@@ -547,7 +548,7 @@ class Checker:
             return
         self.peer_ifaces[d.name] = iface
         self.module.peers.append(ir.PeerDef(d.name, iface.logic, iface.kind, iface.filename,
-                                            {n: (list(ps), r) for n, (ps, r) in iface.methods.items()}))
+                                            {n: (list(ps), r) for n, (ps, r) in iface.methods.items()}, list(iface.slots)))
 
     def check_peer_binding(self, d: S.InputDecl, ty: Type) -> ir.PeerUse | None:
         b = d.peer
@@ -615,6 +616,35 @@ class Checker:
         for phase, d in slotted:
             self.focus(d)
             m.updates.append(self.check_update(d, phase))
+
+    def check_logic_options(self, logic: S.LogicDecl | None) -> None:
+        """`slot_events` and the tick slot order of the logic line (`before Peer`, `after Peer`)."""
+        if logic is None:
+            return
+        m = self.module
+        self.focus(logic)
+        m.slot_events = logic.slot_events
+        mine = [u.phase for u in m.updates] or [m.default_phase]
+        for relation, peer, pos in logic.order:
+            iface = self.peer_ifaces.get(peer)
+            if iface is None:
+                sym = self.globals.get(peer)
+                if sym is None:
+                    self.err("DAL3040", f"undefined name '{peer}'" + self.suggest(peer, [k for k, v in self.globals.items() if v.kind == "peer"])
+                             + f" (declare the peer: peer {peer}: LogicName;)", pos)
+                elif sym.kind != "peer":
+                    self.err("DAL3076", f"'{peer}' is a {sym.kind}, not a peer: `{relation}` names a peer of this logic", pos)
+                continue
+            if iface.kind != "actor":
+                self.err("DAL5068", f"{iface.logic} is an animation instance: it has no tick slots to be ordered against (its update runs on a worker thread)", pos)
+                continue
+            if any(o.peer == peer for o in m.order):
+                self.err("DAL5069", f"the order against '{peer}' is declared twice", pos)
+                continue
+            common = tuple(s for s in mine if s in iface.slots)
+            if not common:
+                self.warn("DAL5095", f"{iface.logic} has no update block in a tick slot of this logic ({', '.join(mine)}): `{relation} {peer}` orders nothing", pos)
+            m.order.append(ir.OrderDef(relation, peer, iface.logic, common))
 
     def check_post_update(self, posts: list[S.PostUpdateDecl], logic: S.LogicDecl | None) -> None:
         """`post_update { ... }` (anim logic): runs on the game thread after the animation graph updated, with the inputs of the frame's
