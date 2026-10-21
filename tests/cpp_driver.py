@@ -460,6 +460,7 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
         "\tUEnhancedInputLocalPlayerSubsystem Subsystem;",
         "\tUEnhancedPlayerInput PlayerInput;",
         "\tUSkeletalMeshComponent Mesh;",
+        "\tUDalRagdollService Ragdoll;",
         "\tUAnimInstance Anim;",
         "\tUSpringArmComponent Arm;",
         "\tUCameraComponent Camera;",
@@ -479,7 +480,7 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
         L += [
             "\tObj.StubOwner = &Pawn;",
             "\tObj.StubWorld = &World;",
-            "\tPawn.StubComponents = {&Mesh, &Arm, &Camera};",
+            "\tPawn.StubComponents = {&Mesh, &Arm, &Camera, &Ragdoll};",
             "\tPawn.InputComponent = &InputComp;",
             "\tMesh.StubAnim = &Anim;",
         ]

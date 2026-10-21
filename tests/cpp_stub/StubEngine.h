@@ -73,6 +73,19 @@ struct FLoggedRotator
 	FLoggedRotator& operator=(const FRotator& In) { V = In; StubLog::Emit(Name, {In.Pitch, In.Yaw, In.Roll}); return *this; }
 };
 
+// UCharacterMovementComponent::Velocity: reads like an FVector, the writes of the generated code are logged
+struct FLoggedVelocity : FVector
+{
+	const char* Name;
+	explicit FLoggedVelocity(const char* InName) : Name(InName) {}
+	FLoggedVelocity& operator=(const FVector& In)
+	{
+		static_cast<FVector&>(*this) = In;
+		StubLog::Emit(Name, {In.X, In.Y, In.Z});
+		return *this;
+	}
+};
+
 struct FLoggedVector
 {
 	FVector V;
@@ -468,6 +481,12 @@ public:
 class AActor : public UObject
 {
 public:
+	virtual bool SetActorLocation(const FVector& NewLocation, bool bSweep = false, void* /*OutSweepHitResult*/ = nullptr, ETeleportType Teleport = ETeleportType::None)
+	{
+		StubLocation = NewLocation;
+		StubLog::Emit("set_actor_location", {NewLocation.X, NewLocation.Y, NewLocation.Z, bSweep, Teleport != ETeleportType::None});
+		return true;
+	}
 	virtual void SetActorRotation(FRotator NewRotation, ETeleportType Teleport = ETeleportType::None)
 	{
 		StubLog::Emit("set_actor_rotation", {NewRotation.Pitch, NewRotation.Yaw, NewRotation.Roll, Teleport != ETeleportType::None});
@@ -499,7 +518,7 @@ class UCharacterMovementComponent : public UObject
 {
 public:
 	FActorComponentTickFunction PrimaryComponentTick;
-	FVector Velocity;
+	FLoggedVelocity Velocity{"set_velocity"};
 	TEnumAsByte<EMovementMode> MovementMode;
 	FLoggedFloat MaxWalkSpeed{"set_max_walk_speed"};
 	FLoggedFloat MaxAcceleration{"set_max_acceleration"};
@@ -585,6 +604,7 @@ class UDalCharacterMovementComponent : public UCharacterMovementComponent
 public:
 	FLoggedFloat MaxAccelerationWalking{"set_max_acceleration_walking"};
 	FLoggedBool bInputBlocked{"set_input_blocked"};
+	FLoggedBool bMovementModeLocked{"set_movement_mode_locked"};
 	void SetRootMotionOverride(const FVector& InVelocity, const FQuat& RotationDelta)
 	{
 		StubLog::Emit("root_motion_override", {InVelocity.X, InVelocity.Y, InVelocity.Z, RotationDelta.X, RotationDelta.Y, RotationDelta.Z, RotationDelta.W});
@@ -611,6 +631,7 @@ public:
 	UCharacterMovementComponent* GetCharacterMovement() const { return StubMovement; }
 	UCapsuleComponent* GetCapsuleComponent() const { return StubCapsule; }
 	bool HasAnyRootMotion() const { return StubRootMotion; }
+	virtual void SetAnimRootMotionTranslationScale(float InAnimRootMotionTranslationScale = 1.f) { StubLog::Emit("set_anim_root_motion_translation_scale", {InAnimRootMotionTranslationScale}); }
 	virtual void Jump() { StubLog::Emit("jump", {}); }
 	virtual void StopJumping() { StubLog::Emit("stop_jumping", {}); }
 	virtual void Crouch(bool /*bClientSimulation*/ = false) { StubLog::Emit("crouch", {}); }
@@ -619,6 +640,17 @@ public:
 	{
 		StubLog::Emit("launch", {LaunchVelocity.X, LaunchVelocity.Y, LaunchVelocity.Z, bXYOverride, bZOverride});
 	}
+};
+
+// the native ragdoll service of DalRuntime (a component of the actor)
+class UDalRagdollService : public UObject
+{
+public:
+	void Begin(bool bLimitSpeed, float SpeedLimit) { StubLog::Emit("ragdoll_begin", {bLimitSpeed, SpeedLimit}); }
+	void End() { StubLog::Emit("ragdoll_end", {}); }
+	void LimitSpeed(float Speed) { StubLog::Emit("ragdoll_limit_speed", {Speed}); }
+	void SetMotorStrength(float Strength) { StubLog::Emit("ragdoll_set_motor_strength", {Strength}); }
+	void AddForce(const FVector& Force, bool bSpine) { StubLog::Emit("ragdoll_add_force", {Force.X, Force.Y, Force.Z, bSpine}); }
 };
 
 // ---- enhanced input ------------------------------------------------------------------------------------------------------

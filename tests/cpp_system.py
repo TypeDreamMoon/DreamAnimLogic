@@ -67,6 +67,7 @@ def make_system_driver(modules: dict[str, ir.Module], frames: list[dict], schedu
         "\tUCapsuleComponent Capsule;",
         "\tAPlayerController Controller;",
         "\tUSkeletalMeshComponent Mesh;",
+        "\tUDalRagdollService Ragdoll;",
         "\tPawn.StubMovement = &Move;",
         "\tPawn.StubCapsule = &Capsule;",
         "\tPawn.StubController = &Controller;",
@@ -75,7 +76,7 @@ def make_system_driver(modules: dict[str, ir.Module], frames: list[dict], schedu
         L.append(f"\tU{m.name} L_{n};")
     actors = [n for n, m in modules.items() if m.kind == "actor"]
     anims = [n for n, m in modules.items() if m.kind == "anim"]
-    L.append("\tPawn.StubComponents = {&Mesh" + "".join(f", &L_{n}" for n in actors) + "};")
+    L.append("\tPawn.StubComponents = {&Mesh, &Ragdoll" + "".join(f", &L_{n}" for n in actors) + "};")
     if anims:
         L.append(f"\tMesh.StubAnim = &L_{anims[0]};")
     for n in actors:

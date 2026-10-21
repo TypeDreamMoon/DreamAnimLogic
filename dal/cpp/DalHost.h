@@ -204,6 +204,15 @@ namespace DalHost
 		MontageSetPosition,
 		RootMotionOverride,
 		RootMotionClear,
+		SetMovementModeLocked,
+		SetActorLocation,
+		SetVelocity,
+		SetAnimRootMotionTranslationScale,
+		RagdollBegin,
+		RagdollEnd,
+		RagdollLimitSpeed,
+		RagdollSetMotorStrength,
+		RagdollAddForce,
 		MontageStopSource,
 		PlaySlotAnimation,
 		StopMontagesWithSlot,
@@ -319,6 +328,44 @@ namespace DalHost
 		}
 
 		inline FCommand RootMotionClear() { return Make(ECommand::RootMotionClear); }
+
+		inline FCommand SetMovementModeLocked(bool B) { return WithBool(ECommand::SetMovementModeLocked, B); }
+		inline FCommand SetAnimRootMotionTranslationScale(float V) { return WithFloat(ECommand::SetAnimRootMotionTranslationScale, V); }
+		inline FCommand RagdollLimitSpeed(float V) { return WithFloat(ECommand::RagdollLimitSpeed, V); }
+		inline FCommand RagdollSetMotorStrength(float V) { return WithFloat(ECommand::RagdollSetMotorStrength, V); }
+		inline FCommand RagdollEnd() { return Make(ECommand::RagdollEnd); }
+
+		inline FCommand SetActorLocation(const FVector3f& Location, bool bSweep, bool bTeleport)
+		{
+			FCommand C = Make(ECommand::SetActorLocation);
+			C.V = Location;
+			C.B0 = bSweep;
+			C.B1 = bTeleport;
+			return C;
+		}
+
+		inline FCommand SetVelocity(const FVector3f& Velocity)
+		{
+			FCommand C = Make(ECommand::SetVelocity);
+			C.V = Velocity;
+			return C;
+		}
+
+		inline FCommand RagdollBegin(bool bLimitSpeed, float SpeedLimit)
+		{
+			FCommand C = Make(ECommand::RagdollBegin);
+			C.B0 = bLimitSpeed;
+			C.F = SpeedLimit;
+			return C;
+		}
+
+		inline FCommand RagdollAddForce(const FVector3f& Force, bool bSpine)
+		{
+			FCommand C = Make(ECommand::RagdollAddForce);
+			C.V = Force;
+			C.B0 = bSpine;
+			return C;
+		}
 
 		inline FCommand AddMovementInput(const FVector3f& Direction, float Scale)
 		{

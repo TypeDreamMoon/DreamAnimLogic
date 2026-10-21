@@ -163,5 +163,83 @@ class AlsSourceTests(unittest.TestCase):
                 dal.check_file(os.path.join(ROOT, "als", f"{name}.dal"))          # raises DalError with the diagnostics when there are errors
 
 
+MORE = ("set_movement_mode_locked", "set_actor_location", "set_velocity", "set_anim_root_motion_translation_scale", "ragdoll_begin", "ragdoll_end",
+        "ragdoll_limit_speed", "ragdoll_set_motor_strength", "ragdoll_add_force")
+
+MORE_PROGRAM = """
+logic Cl : actor;
+input F: float;
+input V: vec3;
+input B: bool;
+update(dt) {
+    host.set_movement_mode_locked(B);
+    host.set_actor_location(V);
+    host.set_actor_location(V, B, !B);
+    host.set_velocity(V * 2.0);
+    host.set_anim_root_motion_translation_scale(F);
+    host.ragdoll_begin(B, F);
+    host.ragdoll_end();
+    host.ragdoll_limit_speed(F);
+    host.ragdoll_set_motor_strength(F);
+    host.ragdoll_add_force(V);
+    host.ragdoll_add_force(V, B);
+}
+"""
+
+
+class MoreCommandsTests(unittest.TestCase):
+    """Climbing and ragdolling: the commands of the ALS rewrite that came after the first eight."""
+
+    def test_the_tables(self):
+        for name in MORE:
+            with self.subTest(name=name):
+                self.assertIn(name, hostapi.COMMANDS)
+                self.assertIn(name, EXEC)
+                self.assertTrue(callable(getattr(hostapi.HostV1, name)))
+        self.assertEqual((hostapi.COMMANDS["set_actor_location"].min_args, hostapi.COMMANDS["set_actor_location"].defaults), (1, (False, True)))
+        self.assertEqual((hostapi.COMMANDS["ragdoll_add_force"].min_args, hostapi.COMMANDS["ragdoll_add_force"].defaults), (1, (False,)))
+        self.assertEqual(hostapi.COMMANDS["ragdoll_begin"].min_args, 2)
+
+    def test_the_checker(self):
+        self.assertEqual(codes(MORE_PROGRAM), [])
+        for stmt, want in (("host.set_actor_location(F);", "DAL4002"), ("host.ragdoll_begin(B);", "DAL4041"), ("host.ragdoll_end(1.0);", "DAL4041"),
+                           ("host.set_velocity(1.0, 2.0);", "DAL4041"), ("host.ragdoll_add_force(V, 2.0);", "DAL4002")):
+            with self.subTest(stmt=stmt):
+                self.assertEqual(codes(MORE_PROGRAM.replace("host.ragdoll_end();", stmt, 1)), [want], stmt)
+
+    def test_the_host_gets_the_canonical_arguments(self):
+        module = compile_ok(MORE_PROGRAM)
+        frames = [{"dt": 0.1, "free": {"F": 3.0, "V": (1.0, 2.0, 3.0), "B": True}}]
+        py = harness.run_python(module, frames)
+        self.assertEqual(harness.compare(py, harness.run_interpreter(module, frames)), [])
+        calls = dict(py[0]["__cmds__"][i] for i in range(len(py[0]["__cmds__"])) if py[0]["__cmds__"][i][0] != "set_actor_location")
+        self.assertEqual(calls["set_velocity"], ((2.0, 4.0, 6.0),))
+        self.assertEqual(calls["ragdoll_begin"], (True, 3.0))
+        self.assertEqual(calls["ragdoll_add_force"], ((1.0, 2.0, 3.0), True))          # (the last of the two calls)
+        locations = [c[1] for c in py[0]["__cmds__"] if c[0] == "set_actor_location"]
+        self.assertEqual(locations, [((1.0, 2.0, 3.0), False, True), ((1.0, 2.0, 3.0), True, False)])       # the defaults: no sweep, a teleport
+
+    def test_the_executors(self):
+        files = generate_cpp(compile_ok(MORE_PROGRAM))
+        cpp, h = files["Cl.cpp"], files["Cl.h"]
+        self.assertIn("DalAlsMovement->bMovementModeLocked = DalCommand.B0;", cpp)
+        self.assertIn("DalPawn->SetActorLocation(FVector(DalCommand.V), DalCommand.B0, nullptr, DalCommand.B1 ? ETeleportType::TeleportPhysics : ETeleportType::None);", cpp)
+        self.assertIn("DalMovement->Velocity = FVector(DalCommand.V);", cpp)
+        self.assertIn("DalCharacter->SetAnimRootMotionTranslationScale(DalCommand.F);", cpp)
+        self.assertIn("UDalRagdollService* DalRagdoll = DalPawn->FindComponentByClass<UDalRagdollService>()", cpp)
+        for call in ("DalRagdoll->Begin(DalCommand.B0, DalCommand.F);", "DalRagdoll->End();", "DalRagdoll->LimitSpeed(DalCommand.F);",
+                     "DalRagdoll->SetMotorStrength(DalCommand.F);", "DalRagdoll->AddForce(FVector(DalCommand.V), DalCommand.B0);"):
+            self.assertIn(call, cpp)
+        self.assertIn('#include "DalRagdollService.h"', cpp)
+        self.assertIn("// Module dependencies: Core, CoreUObject, Engine, DalRuntime", h)
+
+    @unittest.skipIf(tcc is None or tcc.COMPILER is None, "no C++ compiler found")
+    def test_the_effects_match_python(self):
+        module = compile_ok(MORE_PROGRAM)
+        runner = tcc.CppCompileTests("test_hero_gait_matches_python")
+        effects = sum(runner.run_case(module, harness.random_frames(module, 40, seed), warnings_as_errors=True) for seed in (1, 2))
+        self.assertGreaterEqual(effects, 40 * 2 * 11)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -244,6 +244,21 @@ COMMANDS: dict[str, Command] = {
                "it stays in effect until root_motion_clear()",
            ue="UDalCharacterMovementComponent::SetRootMotionOverride(Velocity, RotationDelta): an override root motion source (DalRuntime)"),
         _c("root_motion_clear", [], doc="end the root motion override", ue="UDalCharacterMovementComponent::ClearRootMotionOverride() (DalRuntime)"),
+        # v4: the rest of the character commands of the ALS rewrite (climbing, ragdolling)
+        _c("set_movement_mode_locked", [BOOL], doc="while it is set the movement component ignores every SetMovementMode, its own calls included (ALS's movement component)",
+           ue="UDalCharacterMovementComponent::bMovementModeLocked = b (DalRuntime)"),
+        _c("set_actor_location", [VEC3, BOOL, BOOL], 1, (False, True), doc="move the actor; sweep: stop at what blocks, teleport: reset the physics state (a teleport)",
+           ue="Pawn->SetActorLocation(Location, bSweep, nullptr, bTeleport ? ETeleportType::TeleportPhysics : ETeleportType::None)"),
+        _c("set_velocity", [VEC3], ue="CharacterMovement->Velocity = v"),
+        _c("set_anim_root_motion_translation_scale", [FLOAT], ue="Character->SetAnimRootMotionTranslationScale(Scale)"),
+        _c("ragdoll_begin", [BOOL, FLOAT], doc="start ragdolling (the native ragdoll service of the actor); speed_limit caps the speed of the bodies while limit_speed is set",
+           ue="UDalRagdollService::Begin(bLimitSpeed, SpeedLimit) (DalRuntime)"),
+        _c("ragdoll_end", [], doc="stop ragdolling", ue="UDalRagdollService::End() (DalRuntime)"),
+        _c("ragdoll_limit_speed", [FLOAT], doc="the speed the ragdoll's bodies are capped to", ue="UDalRagdollService::LimitSpeed(Speed) (DalRuntime)"),
+        _c("ragdoll_set_motor_strength", [FLOAT], doc="strength of the joint motors that make the ragdoll follow its animation pose",
+           ue="UDalRagdollService::SetMotorStrength(Strength) (DalRuntime)"),
+        _c("ragdoll_add_force", [VEC3, BOOL], 1, (False,), doc="push the ragdoll; spine: apply it to the spine body only",
+           ue="UDalRagdollService::AddForce(Force, bSpine) (DalRuntime)"),
         # controller / camera (v2)
         _c("set_control_rotation", [ROTATOR], ue="Controller->SetControlRotation(Rotation)"),
         _c("camera_set_arm_length", [FLOAT], ue="SpringArm->TargetArmLength = v"),
@@ -648,6 +663,33 @@ class HostV1(HostV0):
     def montage_is_playing(self, name) -> bool:
         """manager.is_playing(montage) for a montage asset value (the asset's name); the same as ``montage_playing`` for a declared montage"""
         return bool(self.montage_playing(name)) if name is not None else False
+
+    def set_movement_mode_locked(self, value: bool) -> None:
+        """cm.set_movement_mode_locked(value): the movement mode cannot change, the movement component's own changes included"""
+
+    def set_actor_location(self, location, sweep: bool, teleport: bool) -> None:
+        """cm.set_actor_location(V3(location), sweep, teleport)"""
+
+    def set_velocity(self, velocity) -> None:
+        """cm.set_velocity(V3(velocity))"""
+
+    def set_anim_root_motion_translation_scale(self, scale: float) -> None:
+        """cm.set_anim_root_motion_translation_scale(scale)"""
+
+    def ragdoll_begin(self, limit_speed: bool, speed_limit: float) -> None:
+        """the ragdoll service of the character: ``ragdoll_begin(limit_speed, speed_limit)`` (a host without one does nothing)"""
+
+    def ragdoll_end(self) -> None:
+        """the ragdoll service: ``ragdoll_end()``"""
+
+    def ragdoll_limit_speed(self, speed: float) -> None:
+        """the ragdoll service: ``ragdoll_limit_speed(speed)``"""
+
+    def ragdoll_set_motor_strength(self, strength: float) -> None:
+        """the ragdoll service: ``ragdoll_set_motor_strength(strength)``"""
+
+    def ragdoll_add_force(self, force, spine: bool) -> None:
+        """the ragdoll service: ``ragdoll_add_force(V3(force), spine)``"""
 
     def root_motion_override(self, velocity, rotation_delta) -> None:
         """character movement: while the override is set, root motion = ``Transform(rotation_delta, velocity * dt)`` replaces the movement's own

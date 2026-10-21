@@ -26,6 +26,17 @@ update(dt) {
     host.set_actor_rotation(R, B);
     host.add_controller_yaw_input(F);
     host.add_controller_pitch_input(-F);
+    host.set_movement_mode_locked(B);
+    host.set_actor_location(V);
+    host.set_actor_location(V, B, !B);
+    host.set_velocity(V * 2.0);
+    host.set_anim_root_motion_translation_scale(F);
+    host.ragdoll_begin(B, F);
+    host.ragdoll_end();
+    host.ragdoll_limit_speed(F);
+    host.ragdoll_set_motor_strength(F);
+    host.ragdoll_add_force(V);
+    host.ragdoll_add_force(V, B);
     host.set_rotation_rate(R);
     host.set_orient_rotation_to_movement(B);
     host.set_use_controller_desired_rotation(!B);

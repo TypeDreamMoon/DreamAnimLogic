@@ -482,6 +482,7 @@ _G_ASSET = "if (UAnimMontage* DalAsset = DalMontageAsset(DalCommand.Montage))"
 _G_RESOLVED = "if (UAnimMontage* DalAsset = DalResolveMontage(DalCommand))"       # a program that passes `montage` values: the asset of the command or of the declared montage
 
 _G_ALS_MOVEMENT = "if (UDalCharacterMovementComponent* DalAlsMovement = Cast<UDalCharacterMovementComponent>(DalMovement))"      # the movement component of DalRuntime
+_G_RAGDOLL = "if (UDalRagdollService* DalRagdoll = DalPawn->FindComponentByClass<UDalRagdollService>())"                         # the ragdoll service of DalRuntime
 
 EXEC: dict[str, tuple[list[str], list[str]]] = {
     "set_max_walk_speed_crouched": ([_G_MOVEMENT], ["DalMovement->MaxWalkSpeedCrouched = DalCommand.F;"]),
@@ -504,6 +505,15 @@ EXEC: dict[str, tuple[list[str], list[str]]] = {
     "set_movement_mode": ([_G_MOVEMENT], ["DalMovement->SetMovementMode(static_cast<EMovementMode>(DalCommand.Mode));"]),        # (with a sub mode: see execute_body)
     "root_motion_override": ([_G_MOVEMENT, _G_ALS_MOVEMENT], ["DalAlsMovement->SetRootMotionOverride(FVector(DalCommand.V), FQuat(DalCommand.Q));"]),
     "root_motion_clear": ([_G_MOVEMENT, _G_ALS_MOVEMENT], ["DalAlsMovement->ClearRootMotionOverride();"]),
+    "set_movement_mode_locked": ([_G_MOVEMENT, _G_ALS_MOVEMENT], ["DalAlsMovement->bMovementModeLocked = DalCommand.B0;"]),
+    "set_actor_location": ([_G_PAWN], ["DalPawn->SetActorLocation(FVector(DalCommand.V), DalCommand.B0, nullptr, DalCommand.B1 ? ETeleportType::TeleportPhysics : ETeleportType::None);"]),
+    "set_velocity": ([_G_MOVEMENT], ["DalMovement->Velocity = FVector(DalCommand.V);"]),
+    "set_anim_root_motion_translation_scale": ([_G_CHARACTER], ["DalCharacter->SetAnimRootMotionTranslationScale(DalCommand.F);"]),
+    "ragdoll_begin": ([_G_PAWN, _G_RAGDOLL], ["DalRagdoll->Begin(DalCommand.B0, DalCommand.F);"]),
+    "ragdoll_end": ([_G_PAWN, _G_RAGDOLL], ["DalRagdoll->End();"]),
+    "ragdoll_limit_speed": ([_G_PAWN, _G_RAGDOLL], ["DalRagdoll->LimitSpeed(DalCommand.F);"]),
+    "ragdoll_set_motor_strength": ([_G_PAWN, _G_RAGDOLL], ["DalRagdoll->SetMotorStrength(DalCommand.F);"]),
+    "ragdoll_add_force": ([_G_PAWN, _G_RAGDOLL], ["DalRagdoll->AddForce(FVector(DalCommand.V), DalCommand.B0);"]),
     "jump": ([_G_CHARACTER], ["DalCharacter->Jump();"]),
     "stop_jumping": ([_G_CHARACTER], ["DalCharacter->StopJumping();"]),
     "crouch": ([_G_CHARACTER], ["DalCharacter->Crouch();"]),
@@ -733,6 +743,7 @@ class CppGen:
         self.controller = "set_control_rotation" in self.cmds
         self.movement_cmds = [c for c in self.cmds if EXEC[c][0][0] == _G_MOVEMENT]
         self.als_movement_cmds = [c for c in self.cmds if _G_ALS_MOVEMENT in EXEC[c][0]]      # they need UDalCharacterMovementComponent (module DalRuntime)
+        self.ragdoll_cmds = [c for c in self.cmds if _G_RAGDOLL in EXEC[c][0]]                 # they need UDalRagdollService (module DalRuntime)
         self.character_cmds = [c for c in self.cmds if EXEC[c][0][0] == _G_CHARACTER]
 
     # ---- statements ---------------------------------------------------------------------------
@@ -881,7 +892,7 @@ class CppGen:
             mods += ["EnhancedInput"]
         if self.uses_tags(any_origin=True) or any(isinstance(d.ty, TagType) for d in [*self.m.params, *self.m.inputs, *self.m.states]):
             mods += ["GameplayTags"]
-        if self.uses(*_CONSUME_ITEMS) or self.als_movement_cmds:
+        if self.uses(*_CONSUME_ITEMS) or self.als_movement_cmds or self.ragdoll_cmds:
             mods += ["DalRuntime"]
         return mods
 
@@ -2305,6 +2316,8 @@ class CppGen:
             add("PhysicsEngine/PhysicsAsset.h")
         if self.uses(*_CONSUME_ITEMS) or self.als_movement_cmds:
             add("DalCharacterMovementComponent.h")
+        if self.ragdoll_cmds:
+            add("DalRagdollService.h")
         if "set_actor_rotation" in self.cmds:
             add("Engine/EngineTypes.h")
         if self.uses(*_PAWN_ITEMS) or self.needs_pawn_helper or self.controller or self.arm or self.camera:

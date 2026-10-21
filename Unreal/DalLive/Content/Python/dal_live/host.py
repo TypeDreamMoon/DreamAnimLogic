@@ -498,6 +498,22 @@ class UeHost(HostV1):
         if owner is not None:
             owner.set_actor_rotation(_to_rotator(rotation), bool(teleport))
 
+    def set_actor_location(self, location, sweep=False, teleport=True):
+        """Pawn->SetActorLocation(Location, bSweep, nullptr, bTeleport ? ETeleportType::TeleportPhysics : ETeleportType::None)"""
+        owner = self._get_owner()
+        if owner is not None:
+            owner.set_actor_location(_to_vector(location), bool(sweep), bool(teleport))
+
+    def set_velocity(self, velocity):
+        """CharacterMovement->Velocity = v"""
+        self._set_cmc("velocity", _to_vector(velocity))
+
+    def set_anim_root_motion_translation_scale(self, scale):
+        """Character->SetAnimRootMotionTranslationScale(Scale)"""
+        ch = self._get_char()
+        if ch is not None:
+            ch.set_anim_root_motion_translation_scale(float(scale))
+
     def add_controller_yaw_input(self, value):
         """Pawn->AddControllerYawInput(v)"""
         owner = self._get_owner()
@@ -621,7 +637,8 @@ class UeHost(HostV1):
 
     # Not in the editor session (no Python API reaches them; the commands do nothing here, the generated C++ and the Blender host have them):
     # montage_stop_source (the montage instance of a notify), stop_montages_with_slot (FAnimMontageInstance tracks), snapshot_pose (FPoseSnapshot),
-    # root_motion_override / root_motion_clear (the root motion source of DalRuntime's movement component), the montage asset queries
+    # root_motion_override / root_motion_clear (the root motion source of DalRuntime's movement component), set_movement_mode_locked and the ragdoll_*
+    # commands (DalRuntime's movement component and ragdoll service), the montage asset queries
     # (montage_length, montage_rate_scale, montage_sampling_rate, montage_blend_in_time, montage_blend_in_option, montage_root_transform,
     # montage_last_root_transform: they answer their neutral defaults).
 
