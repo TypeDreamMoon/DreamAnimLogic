@@ -28,7 +28,7 @@ from typing import Callable
 
 from . import ir
 from . import runtime as rt
-from .hostapi import HOST_ITEMS
+from .hostapi import HOOK_EVENTS, HOST_ITEMS
 from .mockhost import MockHost
 from .interp import Interpreter
 from .pybackend import generate_python, load_class
@@ -252,12 +252,25 @@ def call_items(frame: dict) -> list[tuple[str, dict]]:
     return out
 
 
+def _random_hook(rng: random.Random, event: str) -> tuple:
+    """A random event of the character: modes for movement_mode_changed, a trace result for landed (no primitive: it is a scene object)."""
+    if event == "movement_mode_changed":
+        return (event, rng.randrange(7), rng.randrange(7))
+    if event == "landed":
+        v = lambda: tuple(rng.uniform(-300, 300) for _ in range(3))
+        return (event, (rng.random() < 0.8, v(), tuple(rng.choice([-1.0, 0.0, 0.5, 1.0]) for _ in range(3)), rng.uniform(0, 100),
+                        rng.uniform(0, 1), v(), rng.random() < 0.2, None, v()))
+    return (event,)
+
+
 def _random_events(module: ir.Module, rng: random.Random) -> list[tuple]:
     out: list[tuple] = []
     handlers = [h for h in module.handlers if h.event not in ("begin_play", "end_play")]
     for _ in range(rng.choice([0, 0, 1, 1, 2, 3])):
         h = rng.choice(handlers)
-        if h.event in ("notify", "notify_begin", "notify_end"):
+        if h.event in HOOK_EVENTS:
+            out.append(_random_hook(rng, h.event))
+        elif h.event in ("notify", "notify_begin", "notify_end"):
             out.append((h.event, h.name))
         elif h.event in ("montage_ended", "montage_blending_out"):
             out.append((h.event, h.name, rng.random() < 0.5))

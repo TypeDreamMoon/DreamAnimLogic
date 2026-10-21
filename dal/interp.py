@@ -15,7 +15,7 @@ from . import ir
 from . import runtime as rt
 from . import values as vals
 from .builtins import BUILTINS, CONSTRUCTORS
-from .hostapi import HOST_ITEMS, HostV1
+from .hostapi import HOOK_EVENTS, HOST_ITEMS, HostV1
 from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, SPRING_MEMBERS, TRANSFORM, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, VOID, SPRING, ArrayType, AssetType, EnumType, MapType, StructType, TagType, Type, zero_value
 
 
@@ -439,7 +439,14 @@ class Interpreter:
     # ---- events -------------------------------------------------------------------------------------
     def _dispatch(self, events: list[tuple]) -> None:
         for ev in events:
-            kind, name = ev[0], ev[1]
+            kind = ev[0]
+            if kind in HOOK_EVENTS:                          # the hooks of the character have no name: the payload follows the kind
+                for h in self.module.handlers:
+                    if h.event == kind:
+                        env = {n: coerce(t, ev[i + 1] if i + 1 < len(ev) else zero_value(t)) for i, (n, t) in enumerate(h.params)}
+                        self._run(h.body, env)
+                continue
+            name = ev[1]
             for h in self.module.handlers:
                 if h.event != kind or h.name != name:
                     continue

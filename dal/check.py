@@ -23,7 +23,7 @@ from .builtins import (
     resolve_overload,
 )
 from .errors import DalError, Diagnostic, Pos, SourceFile
-from .hostapi import COMMANDS, HOST_ITEMS, QUERIES
+from .hostapi import COMMANDS, HOOK_EVENTS, HOST_ITEMS, QUERIES
 from .interp import eval_const
 from . import peers as peermod
 from . import values
@@ -1688,6 +1688,8 @@ class Checker:
         if d.event in ("begin_play", "end_play"):
             sc = Scope("handler")
             return ir.HandlerDef(d.event, "", None, [], self.block(d.body, sc))
+        if d.event in HOOK_EVENTS:
+            return self.check_hook_handler(d)
         if d.event in ("montage_ended", "montage_blending_out"):
             sym = self.globals.get(d.name)
             if sym is None or sym.kind != "montage":
@@ -1713,6 +1715,32 @@ class Checker:
             sc.declare(n, Local(t, False))
         body = self.block(d.body, sc)
         return ir.HandlerDef(d.event, d.name, d.phase, params, body)
+
+    def check_hook_handler(self, d: S.HandlerDecl) -> ir.HandlerDef | None:
+        """`on movement_mode_changed(prev, cur) { ... }`, `on jumped { ... }`: events of the character without a name; the
+        parameters (named by the program) carry the payload, or the list is left out when the handler does not need it."""
+        payload = HOOK_EVENTS[d.event]
+        sc = Scope("handler")
+        params: list[tuple[str, Type]] = []
+        if d.param_names:
+            if len(d.param_names) != len(payload):
+                want = f"{len(payload)} parameter(s) ({', '.join(t.name for t in payload)})" if payload else "no parameters"
+                self.err("DAL4041", f"on {d.event} takes {want}, got {len(d.param_names)}", d.param_names[0][1])
+                return None
+            seen: set[str] = set()
+            for (pname, ppos), ty in zip(d.param_names, payload):
+                if not self.valid_ident(pname, ppos, "a parameter name"):
+                    continue
+                if pname in seen:
+                    self.err("DAL3001", f"parameter '{pname}' is declared twice", ppos)
+                    continue
+                if pname in self.globals:
+                    self.err("DAL3005", f"parameter '{pname}' hides the {self.globals[pname].kind} of the same name", ppos)
+                    continue
+                seen.add(pname)
+                sc.declare(pname, Local(ty, False))
+                params.append((pname, ty))
+        return ir.HandlerDef(d.event, "", None, params, self.block(d.body, sc))
 
     def cmd_stmt(self, s: S.CmdStmt, sc: Scope) -> ir.Stmt | None:
         pos = s.name_pos or s.pos

@@ -3,24 +3,47 @@
 // Part of the dal compiler package; copied next to the generated sources by `python -m dal compile --cpp`
 // when a program uses the v1 host features (event handlers, host commands, actor logic).
 //
-// * FEvent   something the host tells the logic (notify, montage ended, input action ...);
+// * FEvent   something the host tells the logic (notify, montage ended, input action, a hook of the character ...);
 //            queued on the game thread, handled at the start of the logic's next update;
 // * FCommand something the logic asks the host to do (play a montage, change the walk speed ...);
 //            queued by the update (any thread), executed on the game thread after it;
-// * FHit     the result of a host trace (a reduced FHitResult).
+// * FHit     the result of a host trace (a reduced FHitResult);
+// * IEventSink / FEventRouter   how events that do not come from an animation delegate reach the logics of an actor:
+//            the hooks of the character (the movement component of DalRuntime posts them) and the notifies of the
+//            classes a program declares (the generated notify classes post them).  A logic that handles such an
+//            event registers itself as a sink; Post() hands the event to every sink of the actor.
 //
 // The ids (montage, notify, action, section) are indices into tables the generator writes into the
 // logic's .cpp.  Do not edit; regenerate with the compiler.
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Misc/ScopeLock.h"
 
+class AActor;
+class UObject;
 class UPrimitiveComponent;
 
-#define DAL_HOST_VERSION 1
+#define DAL_HOST_VERSION 2
 
 namespace DalHost
 {
+	/** Result of a trace; a miss has bBlocking == false, Point == Location == the trace end, Distance == 0 and Time == 1.
+	 *  Point / Normal are the ImpactPoint / ImpactNormal of the FHitResult, FaceNormal its Normal, Location the swept shape's
+	 *  center at the hit; Primitive is the component that was hit. */
+	struct FHit
+	{
+		bool bBlocking = false;
+		FVector3f Point = FVector3f(0.0f, 0.0f, 0.0f);
+		FVector3f Normal = FVector3f(0.0f, 0.0f, 0.0f);
+		float Distance = 0.0f;
+		float Time = 1.0f;
+		FVector3f Location = FVector3f(0.0f, 0.0f, 0.0f);
+		bool bStartPenetrating = false;
+		UPrimitiveComponent* Primitive = nullptr;
+		FVector3f FaceNormal = FVector3f(0.0f, 0.0f, 0.0f);
+	};
+
 	enum class EEventKind : uint8
 	{
 		Notify,
@@ -29,6 +52,14 @@ namespace DalHost
 		MontageEnded,
 		MontageBlendingOut,
 		Input,
+		// v4
+		NotifyTick,
+		MovementModeChanged,
+		Jumped,
+		Landed,
+		CrouchStarted,
+		CrouchEnded,
+		Teleported,
 	};
 
 	enum class EInputPhase : uint8
@@ -47,6 +78,72 @@ namespace DalHost
 		EInputPhase Phase = EInputPhase::Started;
 		bool bFlag = false;                    // montage events: interrupted
 		FVector3f Value = FVector3f(0.0f, 0.0f, 0.0f);   // input events: bool / float in X, vec2 in XY, vec3 in XYZ
+		// v4
+		int32 ModeA = 0;                       // MovementModeChanged: the previous EMovementMode ...
+		int32 ModeB = 0;                       // ... and the new one
+		FHit Hit;                              // Landed
+		FName Name;                            // events posted by a notify class: the declared name (the logic looks up its Id)
+		const UObject* Source = nullptr;       // events posted by a notify class: the notify object, its properties are the payload
+		int32 MontageInstance = INDEX_NONE;    // events posted by a notify class: the montage instance that raised it
+	};
+
+	/** A logic that receives the events of its actor that do not come from the animation delegates. */
+	class IEventSink
+	{
+	public:
+		virtual ~IEventSink() = default;
+		virtual const AActor* DalSinkOwner() const = 0;
+		virtual void DalReceiveEvent(const FEvent& Event) = 0;
+	};
+
+	/** The sinks of the running logics.  Post() is called by the movement component and the notify classes (game thread);
+	 *  a sink registers when play begins and unregisters when it ends. */
+	class FEventRouter
+	{
+	public:
+		static void Register(IEventSink* Sink)
+		{
+			FScopeLock Lock(&Guard());
+			Sinks().AddUnique(Sink);
+		}
+
+		static void Unregister(IEventSink* Sink)
+		{
+			FScopeLock Lock(&Guard());
+			Sinks().Remove(Sink);
+		}
+
+		static void Post(const AActor* Owner, const FEvent& Event)
+		{
+			TArray<IEventSink*> Targets;
+			{
+				FScopeLock Lock(&Guard());
+				for (IEventSink* Sink : Sinks())
+				{
+					if (Sink->DalSinkOwner() == Owner)
+					{
+						Targets.Add(Sink);
+					}
+				}
+			}
+			for (IEventSink* Sink : Targets)
+			{
+				Sink->DalReceiveEvent(Event);
+			}
+		}
+
+	private:
+		static TArray<IEventSink*>& Sinks()
+		{
+			static TArray<IEventSink*> Registered;
+			return Registered;
+		}
+
+		static FCriticalSection& Guard()
+		{
+			static FCriticalSection Lock;
+			return Lock;
+		}
 	};
 
 	enum class ECommand : uint8
@@ -221,20 +318,4 @@ namespace DalHost
 			return C;
 		}
 	} // namespace Cmd
-
-	/** Result of a trace; a miss has bBlocking == false, Point == Location == the trace end, Distance == 0 and Time == 1.
-	 *  Point / Normal are the ImpactPoint / ImpactNormal of the FHitResult, FaceNormal its Normal, Location the swept shape's
-	 *  center at the hit; Primitive is the component that was hit. */
-	struct FHit
-	{
-		bool bBlocking = false;
-		FVector3f Point = FVector3f(0.0f, 0.0f, 0.0f);
-		FVector3f Normal = FVector3f(0.0f, 0.0f, 0.0f);
-		float Distance = 0.0f;
-		float Time = 1.0f;
-		FVector3f Location = FVector3f(0.0f, 0.0f, 0.0f);
-		bool bStartPenetrating = false;
-		UPrimitiveComponent* Primitive = nullptr;
-		FVector3f FaceNormal = FVector3f(0.0f, 0.0f, 0.0f);
-	};
 } // namespace DalHost

@@ -1396,6 +1396,21 @@ def coerce_by_name(type_name: str, value):
     return _COERCE.get(type_name, int)(value)
 
 
+# the hook events of the character (hostapi.HOOK_EVENTS): how the host's values become the handler's parameters
+def _as_mode(v):
+    return MovementMode(int(v))
+
+
+HOOK_ARGS = {                                   # event -> ((converter, value when the host left it out), ...)
+    "movement_mode_changed": ((_as_mode, 0), (_as_mode, 0)),
+    "jumped": (),
+    "landed": ((as_hit, Hit()),),
+    "crouch_started": (),
+    "crouch_ended": (),
+    "teleported": (),
+}
+
+
 class LogicBase:
     """Base class of generated Python logic classes.
 
@@ -1517,7 +1532,15 @@ class LogicBase:
 
     def _dispatch(self, events: list) -> None:
         for ev in events:
-            kind, name = ev[0], ev[1]
+            kind = ev[0]
+            if kind in HOOK_ARGS:                           # the hooks of the character have no name: the payload follows the kind
+                conv = HOOK_ARGS[kind]
+                args = [c(ev[i + 1] if i + 1 < len(ev) else d) for i, (c, d) in enumerate(conv)]
+                for h_kind, _h_name, _h_phase, method, n_params in self.DAL_HANDLERS:
+                    if h_kind == kind:
+                        getattr(self, method)(*args[:int(n_params)])          # a handler that names no parameters gets none
+                continue
+            name = ev[1]
             for h_kind, h_name, h_phase, method, value_type in self.DAL_HANDLERS:
                 if h_kind != kind or h_name != name:
                     continue

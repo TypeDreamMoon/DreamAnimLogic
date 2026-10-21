@@ -321,11 +321,12 @@ class ActionDecl(Decl):
 @dataclass
 class HandlerDecl(Decl):
     """on notify Hit { ... } / on montage_ended Light1 { ... } / on input Attack started { ... }"""
-    event: str                      # notify notify_begin notify_end montage_ended montage_blending_out input
+    event: str                      # notify notify_begin notify_end notify_tick montage_ended montage_blending_out input + the hook events
     name: str
     target_pos: Pos | None
     phase: str | None               # input: started triggered ongoing completed canceled
     body: list[Stmt]
+    param_names: list[tuple[str, Pos]] = field(default_factory=list)      # hook events: on movement_mode_changed(prev, cur) { ... }
 
 
 @dataclass

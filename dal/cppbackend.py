@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 
 from . import ir
 from .builtins import BUILTIN_CONSTS, BUILTINS
-from .hostapi import COMMANDS, QUERIES
+from .hostapi import COMMANDS, HOOK_EVENTS, QUERIES
 from .names import SAMPLE_LOCALS
 from .types import (
     VOID,
@@ -606,6 +606,8 @@ class CppGen:
             for _label, body in module.bodies() for e in ir.walk_stmt_exprs(body))
         self.event_handlers = [h for h in module.handlers if h.event not in LIFECYCLE]
         self.has_events = bool(self.event_handlers)
+        self.hook_handlers = [h for h in module.handlers if h.event in HOOK_EVENTS]
+        self.sink = bool(self.hook_handlers)             # the class receives events through DalHost::FEventRouter (the hooks of the character)
         self.begin_handlers = [k for k, h in enumerate(module.handlers) if h.event == "begin_play"]
         self.end_handlers = [k for k, h in enumerate(module.handlers) if h.event == "end_play"]
         self.phased = module.phases_explicit or len(module.updates) > 1
@@ -867,6 +869,13 @@ class CppGen:
         elif m.handlers:
             for k, h in enumerate(m.handlers):
                 out.append(Method("void", f"DalHandler_{k}", doc="on " + h.event, body=self.stmts(h.body, 0)))
+        # ---- events that arrive through the router
+        if self.sink:
+            out.append(Method("const AActor*", "DalSinkOwner", "", [f"return {'GetOwner()' if self.actor else 'GetOwningActor()'};"], const=True,
+                              override=True, access="public", doc="The actor whose events this logic receives (DalHost::IEventSink)."))
+            out.append(Method("void", "DalReceiveEvent", "const DalHost::FEvent& DalEvent", def_params="const DalHost::FEvent& DalEvent",
+                              body=self.receive_body(), override=True, access="public",
+                              doc="Called through DalHost::FEventRouter::Post: the hooks of the character and the notify classes of the program."))
         # ---- commands
         if cmds:
             out.append(Method("void", "DalEnqueue", "const DalHost::FCommand& DalCommand", doc="Queue a host command; it runs on the game thread after the update.", body=[
@@ -1168,13 +1177,24 @@ class CppGen:
             out.append("}")
         return out
 
+    def receive_body(self) -> list[str]:
+        """DalReceiveEvent: queue an event the router posted."""
+        return ["DalPostEvent(DalEvent);"]
+
     def dispatch_body(self) -> list[str]:
         m = self.m
         out = ["for (const DalHost::FEvent& DalEvent : DalFrameEvents)", "{"]
-        kinds = {"notify": "Notify", "notify_begin": "NotifyBegin", "notify_end": "NotifyEnd",
-                 "montage_ended": "MontageEnded", "montage_blending_out": "MontageBlendingOut", "input": "Input"}
+        kinds = {"notify": "Notify", "notify_begin": "NotifyBegin", "notify_end": "NotifyEnd", "notify_tick": "NotifyTick",
+                 "montage_ended": "MontageEnded", "montage_blending_out": "MontageBlendingOut", "input": "Input",
+                 "movement_mode_changed": "MovementModeChanged", "jumped": "Jumped", "landed": "Landed",
+                 "crouch_started": "CrouchStarted", "crouch_ended": "CrouchEnded", "teleported": "Teleported"}
         for k, h in enumerate(m.handlers):
             if h.event in LIFECYCLE:
+                continue
+            if h.event in HOOK_EVENTS:
+                args = {"movement_mode_changed": "static_cast<EMovementMode>(DalEvent.ModeA), static_cast<EMovementMode>(DalEvent.ModeB)",
+                        "landed": "DalEvent.Hit"}.get(h.event, "") if h.params else ""
+                out += [f"	// on {h.event}", f"	if (DalEvent.Kind == DalHost::EEventKind::{kinds[h.event]})", "	{", f"		DalHandler_{k}({args});", "	}"]
                 continue
             what = f"on {h.event} {h.name}" + (f" {h.phase}" if h.phase else "")
             kind = kinds[h.event]
@@ -1740,7 +1760,7 @@ class CppGen:
             L.append("UCLASS(ClassGroup = (Dal), Meta = (BlueprintSpawnableComponent))")
         else:
             L.append("UCLASS()")
-        L.append(f"class {self.api}{self.cls} : public {self.parent}")
+        L.append(f"class {self.api}{self.cls} : public {self.parent}{', public DalHost::IEventSink' if self.sink else ''}")
         L.append("{")
         L.append(f"{T}GENERATED_BODY()")
         L.append("")
@@ -1789,7 +1809,7 @@ class CppGen:
         cls_name = self.cls
         if self.actor:
             L.append(f"{T}virtual void BeginPlay() override;")
-            if self.bind_anim or self.end_handlers:
+            if self.bind_anim or self.end_handlers or self.sink:
                 L.append(f"{T}virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;")
             if not self.phased:
                 L.append(f"{T}virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;")
@@ -1802,7 +1822,7 @@ class CppGen:
                 L.append(f"{T}virtual void NativeBeginPlay() override;")
             L.append(f"{T}virtual void NativeUpdateAnimation(float DeltaSeconds) override;")
             L.append(f"{T}virtual void NativeThreadSafeUpdateAnimation(float DeltaSeconds) override;")
-            if self.end_handlers:
+            if self.end_handlers or self.sink:
                 L.append(f"{T}virtual void NativeUninitializeAnimation() override;")
         L.append("")
         L.append(f"{T}/** Restore every input and state to its declared default. */")
@@ -2139,6 +2159,8 @@ class CppGen:
                                f"{T}PrimaryComponentTick.bCanEverTick = true;",
                                f"{T}PrimaryComponentTick.TickGroup = TG_PrePhysics;", "}"])
             begin = [f"void {cls}::BeginPlay()", "{", f"{T}Super::BeginPlay();", "", f"{T}DalResetState();"]
+            if self.sink:
+                begin.append(f"{T}DalHost::FEventRouter::Register(this);")
             if m.peers:
                 begin.append(f"{T}DalBindPeers();")
             if self.bind_anim or self.bind_input:
@@ -2152,7 +2174,7 @@ class CppGen:
                     begin.append(f"{T}DalFlushCommands();")
             begin.append("}")
             blocks.append(begin)
-            if self.bind_anim or self.end_handlers:
+            if self.bind_anim or self.end_handlers or self.sink:
                 end_lines = [f"void {cls}::EndPlay(const EEndPlayReason::Type EndPlayReason)", "{"]
                 if self.end_handlers:
                     end_lines.append(f"{T}DalSampleInputs();")
@@ -2165,8 +2187,10 @@ class CppGen:
                     end_lines += [f"{T}if (DalBoundAnim.IsValid())", f"{T}{{",
                                   f"{T}{T}DalUnbindAnim(DalBoundAnim.Get());", f"{T}}}",
                                   f"{T}DalBoundAnim.Reset();", ""]
-                else:
+                elif self.end_handlers or not self.sink:
                     end_lines.append("")
+                if self.sink:
+                    end_lines += [f"{T}DalHost::FEventRouter::Unregister(this);", ""]
                 end_lines += [f"{T}Super::EndPlay(EndPlayReason);", "}"]
                 blocks.append(end_lines)
             if not self.phased:
@@ -2189,6 +2213,8 @@ class CppGen:
             if m.linked is not None:
                 blocks.append([f"{cls}::{cls}()", "{", f"{T}bUseMainInstanceMontageEvaluationData = true;", "}"])
             init = [f"void {cls}::NativeInitializeAnimation()", "{", f"{T}Super::NativeInitializeAnimation();", "", f"{T}DalResetState();"]
+            if self.sink:
+                init.append(f"{T}DalHost::FEventRouter::Register(this);")
             if m.linked is not None:
                 init.append(f"{T}DalResolveParent();")
             if self.bind_anim:
@@ -2227,12 +2253,17 @@ class CppGen:
                            f"{T}Super::NativeThreadSafeUpdateAnimation(DeltaSeconds);", "",
                            f"{T}Dal_DeltaSeconds = DeltaSeconds;",
                            f"{T}DalUpdate(DeltaSeconds);", "}"])
-            if self.end_handlers:
-                ep = [f"void {cls}::NativeUninitializeAnimation()", "{", f"{T}DalSampleInputs();"]
-                ep.extend(f"{T}DalHandler_{k}();" for k in self.end_handlers)
-                if self.has_cmds:
-                    ep.append(f"{T}DalFlushCommands();")
-                ep += ["", f"{T}Super::NativeUninitializeAnimation();", "}"]
+            if self.end_handlers or self.sink:
+                ep = [f"void {cls}::NativeUninitializeAnimation()", "{"]
+                if self.end_handlers:
+                    ep.append(f"{T}DalSampleInputs();")
+                    ep.extend(f"{T}DalHandler_{k}();" for k in self.end_handlers)
+                    if self.has_cmds:
+                        ep.append(f"{T}DalFlushCommands();")
+                    ep.append("")
+                if self.sink:
+                    ep += [f"{T}DalHost::FEventRouter::Unregister(this);", ""]
+                ep += [f"{T}Super::NativeUninitializeAnimation();", "}"]
                 blocks.append(ep)
 
         # ---- reset

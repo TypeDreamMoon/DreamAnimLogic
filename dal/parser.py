@@ -13,7 +13,8 @@ from .lexer import RESERVED_WORDS, Token, tokenize
 
 ASSIGN_OPS = ("=", "+=", "-=", "*=", "/=")
 
-HANDLER_EVENTS = ("notify", "notify_begin", "notify_end", "montage_ended", "montage_blending_out", "input")
+HOOK_EVENTS = ("movement_mode_changed", "jumped", "landed", "crouch_started", "crouch_ended", "teleported")     # `on jumped { ... }`: no name
+HANDLER_EVENTS = ("notify", "notify_begin", "notify_end", "notify_tick", "montage_ended", "montage_blending_out", "input") + HOOK_EVENTS
 LIFECYCLE_EVENTS = ("begin_play", "end_play")         # `on begin_play { ... }`: no name, not an event of the queue
 PHASES = ("pre_movement", "after_movement", "after_anim")
 INPUT_PHASES = ("started", "triggered", "ongoing", "completed", "canceled")
@@ -669,14 +670,31 @@ class Parser:
     def parse_handler(self) -> S.HandlerDecl:
         kw = self.advance()      # on
         t = self.tok
-        if not (t.kind == "IDENT" or t.is_kw("input")):
+        if not (t.kind == "IDENT" or t.is_kw("input") or t.is_kw("timer")):
             raise self.error("DAL2001", f"expected an event name after 'on', found {self.describe(t)}")
+        if t.is_kw("timer"):
+            self.advance()
+            name = self.ident("a timer name")
+            return S.HandlerDecl(kw.pos, "timer", name.text, name.pos, None, self.parse_block())
         if t.kind == "IDENT" and t.text in LIFECYCLE_EVENTS:
             self.advance()
             return S.HandlerDecl(kw.pos, t.text, "", t.pos, None, self.parse_block())
         if t.text not in HANDLER_EVENTS:
-            raise self.error("DAL2021", f"unknown event '{t.text}'; events: {', '.join(HANDLER_EVENTS + LIFECYCLE_EVENTS)}")
+            raise self.error("DAL2021", f"unknown event '{t.text}'; events: {', '.join(HANDLER_EVENTS + LIFECYCLE_EVENTS + ('timer',))}")
         self.advance()
+        if t.text in HOOK_EVENTS:
+            names: list[tuple[str, Pos]] = []
+            if self.tok.is_op("("):
+                self.advance()
+                while not self.tok.is_op(")"):
+                    p = self.ident("a parameter name")
+                    names.append((p.text, p.pos))
+                    if self.tok.is_op(","):
+                        self.advance()
+                        continue
+                    break
+                self.expect_op(")", "to close the parameter list")
+            return S.HandlerDecl(kw.pos, t.text, "", t.pos, None, self.parse_block(), names)
         name = self.ident("the name the event is about")
         phase = None
         if t.text == "input":

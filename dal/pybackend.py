@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from . import ir
 from .builtins import BUILTIN_CONSTS, BUILTINS
-from .hostapi import HOST_ITEMS
+from .hostapi import HOOK_EVENTS, HOST_ITEMS
 from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, SPRING, SPRING3, SPRING_MEMBERS, TRANSFORM, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, VOID, ArrayType, AssetType, EnumType, MapType, StructType, TagType, Type, py_member_name, zero_value
 
 INDENT = "    "
@@ -481,7 +481,7 @@ class PyGen:
         if event_handlers:
             L.append(f"{INDENT}DAL_HANDLERS = (")
             for k, h in event_handlers:
-                vt = h.params[0][1].name if h.event == "input" else ""
+                vt = h.params[0][1].name if h.event == "input" else (str(len(h.params)) if h.event in HOOK_EVENTS else "")
                 L.append(f"{INDENT*2}({h.event!r}, {h.name!r}, {h.phase!r}, '_h{k}', {vt!r}),")
             L.append(f"{INDENT})")
         if m.peers:

@@ -248,12 +248,30 @@ QUERIES: dict[str, Query] = {
 # ---- events ---------------------------------------------------------------------------------------------------------------------
 
 EVENTS: dict[str, str] = {
-    "notify": "an animation notify named N fired: ('notify', N)",
-    "notify_begin": "a notify state / window named N began: ('notify_begin', N)",
-    "notify_end": "a notify state / window named N ended: ('notify_end', N)",
+    "notify": "an animation notify named N fired: ('notify', N); a declared `notify` class adds its properties: ('notify', N, payload, source)",
+    "notify_begin": "a notify state / window named N began: ('notify_begin', N); a declared `notify_state` adds ('notify_begin', N, payload, source)",
+    "notify_end": "a notify state / window named N ended: ('notify_end', N) or ('notify_end', N, payload, source)",
+    "notify_tick": "a declared notify state N is active, once per update of the montage that plays it: ('notify_tick', N, payload, source)",
     "montage_ended": "a montage ended: ('montage_ended', M, interrupted)",
     "montage_blending_out": "a montage started blending out: ('montage_blending_out', M, interrupted)",
     "input": "an input action changed phase: ('input', A, phase, value) with phase started / triggered / ongoing / completed / canceled",
+    # v4: hooks of the character (the movement component and the character class tell the logic)
+    "movement_mode_changed": "the movement mode changed: ('movement_mode_changed', previous, new) with the MovementMode values",
+    "jumped": "the character started a jump: ('jumped',)",
+    "landed": "the character landed: ('landed', hit)",
+    "crouch_started": "the character crouched: ('crouch_started',)",
+    "crouch_ended": "the character stood up from a crouch: ('crouch_ended',)",
+    "teleported": "the character was moved without sweeping (a teleport): ('teleported',)",
+}
+
+# the events without a name (`on jumped { ... }`): their handlers take these parameters, whose names the program chooses
+HOOK_EVENTS: dict[str, tuple[Type, ...]] = {
+    "movement_mode_changed": (MOVEMENT_MODE, MOVEMENT_MODE),
+    "jumped": (),
+    "landed": (HIT,),
+    "crouch_started": (),
+    "crouch_ended": (),
+    "teleported": (),
 }
 
 
@@ -426,6 +444,12 @@ class HostV1(HostV0):
         ``("notify_begin", N)`` / ``("notify_end", N)`` for notify states.  Input actions: bind the declared actions with
         ``pi.bind(A, Event.STARTED / TRIGGERED / ONGOING / COMPLETED / CANCELED, callback)`` (``c3.input``) and queue
         ``("input", A, "started" / "triggered" / ..., value)`` from the callbacks (``value`` = the action value).
+
+        The hooks of the character (``HOOK_EVENTS``, v4) come from the movement component: ``("movement_mode_changed", previous, new)``
+        (the ``MovementMode`` values) for ``c3`` ``mode_changed``, ``("jumped",)`` for ``jumped``, ``("landed", hit)`` for ``landed``
+        (``rt.Hit(h.blocking_hit, h.impact_point, h.impact_normal, h.distance, h.time, ...)``), ``("crouch_started",)`` /
+        ``("crouch_ended",)`` and ``("teleported",)``.  A handler that names parameters gets those values; a host may leave trailing
+        payload values out (they read as zero).
         """
         return []
 

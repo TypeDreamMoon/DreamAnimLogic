@@ -71,7 +71,8 @@ class Lowerer:
     def run(self) -> S.SourceUnit:
         sugar = (S.TimerDecl, S.WindowDecl, S.BufferDecl, S.ComboDecl)
         has_sugar = any(isinstance(d, sugar) for d in self.unit.decls)
-        if not has_sugar and not self._any_call_stmt():
+        has_timer_handlers = any(isinstance(d, S.HandlerDecl) and d.event == "timer" for d in self.unit.decls)
+        if not has_sugar and not has_timer_handlers and not self._any_call_stmt():
             return self.unit
 
         for d in self.unit.decls:
@@ -89,11 +90,27 @@ class Lowerer:
             elif isinstance(d, S.ComboDecl):
                 self.declare(d.name, "combo", d.pos)
 
+        # `on timer T { ... }`: the handlers of a timer become private methods the countdown calls when it reaches zero
+        fired: dict[str, list[str]] = {}
+        methods: list[S.Decl] = []
+        for d in self.unit.decls:
+            if isinstance(d, S.HandlerDecl) and d.event == "timer":
+                if self.kinds.get(d.name) != "timer":
+                    what = f"'{d.name}' is a {self.kinds[d.name]}" if d.name in self.kinds else f"there is no timer '{d.name}'"
+                    self.err("DAL3063", f"{what}: 'on timer' reacts to a declared timer (timer {d.name} = seconds;)", d.target_pos or d.pos)
+                    continue
+                names = fired.setdefault(d.name, [])
+                mname = f"On{d.name}" if not names else f"On{d.name}_{len(names) + 1}"
+                names.append(mname)
+                methods.append(S.MethodDecl(d.pos, mname, [], None, None, d.body, False, False, name_pos=d.target_pos or d.pos))
+
         out: list[S.Decl] = []
         for d in self.unit.decls:
+            if isinstance(d, S.HandlerDecl) and d.event == "timer":
+                continue
             if isinstance(d, S.TimerDecl):
                 out.append(S.StateDecl(d.pos, d.name, "float", d.pos, None, name_pos=d.name_pos))
-                self.pre.append(self.tick(d.name, d.pos))
+                self.pre.append(self.tick(d.name, d.pos, fired.get(d.name, [])))
             elif isinstance(d, S.WindowDecl):
                 out.extend(self.lower_window(d))
             elif isinstance(d, S.BufferDecl):
@@ -103,6 +120,8 @@ class Lowerer:
                 out.extend(self.lower_combo(d))
             else:
                 out.append(d)
+
+        out.extend(methods)
 
         # rewrite user code (and the generated code, which may contain user expressions)
         final: list[S.Decl] = []
@@ -157,10 +176,14 @@ class Lowerer:
                 return True
         return False
 
-    def tick(self, n: str, pos: Pos) -> S.Stmt:
-        """if (T > 0.0) { T = max(T - dt, 0.0); }"""
+    def tick(self, n: str, pos: Pos, fired: list[str] | None = None) -> S.Stmt:
+        """if (T > 0.0) { T = max(T - dt, 0.0); [if (T <= 0.0) { OnT(); }] }  -- the handlers run once, when the countdown reaches zero"""
         dec = S.CallExpr(pos, "max", [self.bin("-", self.name(n, pos), self.name(self.dt_name, pos), pos), self.flt(0.0, pos)])
-        return S.IfStmt(pos, self.bin(">", self.name(n, pos), self.flt(0.0, pos), pos), [self.assign(n, dec, pos)], [])
+        body: list[S.Stmt] = [self.assign(n, dec, pos)]
+        if fired:
+            body.append(S.IfStmt(pos, self.bin("<=", self.name(n, pos), self.flt(0.0, pos), pos),
+                                 [S.CallStmt(pos, m, []) for m in fired], []))
+        return S.IfStmt(pos, self.bin(">", self.name(n, pos), self.flt(0.0, pos), pos), body, [])
 
     # ---- window / buffer -----------------------------------------------------------------------------------------------------
     def lower_window(self, d: S.WindowDecl) -> list[S.Decl]:

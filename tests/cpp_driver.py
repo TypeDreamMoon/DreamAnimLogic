@@ -329,6 +329,26 @@ def entry_call(module: ir.Module, target: str, item) -> str:
     return f"{target}.{name}({', '.join(parts)});"
 
 
+_HOOK_KINDS = {"movement_mode_changed": "MovementModeChanged", "jumped": "Jumped", "landed": "Landed", "crouch_started": "CrouchStarted",
+               "crouch_ended": "CrouchEnded", "teleported": "Teleported"}
+
+
+def hook_event(ev, owner: str = "Pawn") -> str:
+    """The statement that posts a hook event of the character the way DalRuntime's movement component does: through the router."""
+    kind = ev[0]
+    parts = [f"DalHost::FEvent E; E.Kind = DalHost::EEventKind::{_HOOK_KINDS[kind]};"]
+    if kind == "movement_mode_changed":
+        parts.append(f"E.ModeA = {int(ev[1])}; E.ModeB = {int(ev[2]) if len(ev) > 2 else 0};")
+    elif kind == "landed" and len(ev) > 1:
+        h = list(ev[1]) + [None] * (9 - len(ev[1]))
+        v3 = lambda v: f"FVector3f({_num(v[0])}f, {_num(v[1])}f, {_num(v[2])}f)"
+        parts.append(f"E.Hit.bBlocking = {'true' if h[0] else 'false'}; E.Hit.Point = {v3(h[1])}; E.Hit.Normal = {v3(h[2])}; "
+                     f"E.Hit.Distance = {_num(h[3])}f; E.Hit.Time = {_num(h[4])}f; E.Hit.Location = {v3(h[5] if h[5] is not None else h[1])}; "
+                     f"E.Hit.bStartPenetrating = {'true' if h[6] else 'false'}; E.Hit.FaceNormal = {v3(h[8] if h[8] is not None else h[2])};")
+    parts.append(f"DalHost::FEventRouter::Post(&{owner}, E);")
+    return "{ " + " ".join(parts) + " }"
+
+
 def _dtransform(t) -> str:
     """A double-precision FTransform for a harness transform ((location), (rotation x y z w), (scale))."""
     return (f"FTransform(FQuat({_num(t[1][0])}, {_num(t[1][1])}, {_num(t[1][2])}, {_num(t[1][3])}), "
@@ -522,7 +542,7 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
                 L.append(f"\t\tObj.AnimNotify_{name}();")
         # events, oldest first
         for ev in f.get("events", []):
-            kind, name = ev[0], ev[1]
+            kind, name = ev[0], (ev[1] if len(ev) > 1 else "")
             if kind == "notify":
                 if not actor and name in anim_notifies:
                     L.append(f"\t\tObj.AnimNotify_{name}();")
@@ -540,6 +560,8 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
                 c = _comps(_action_type(module, name), ev[3])
                 L.append(f"\t\tInputComp.Fire(&Action_{name}, ETriggerEvent::{_TRIGGER[ev[2]]}, "
                          f"FInputActionValue({_num(c[0])}, {_num(c[1])}, {_num(c[2])}));")
+            elif kind in _HOOK_KINDS:
+                L.append("\t\t" + hook_event(ev))
         dt = _num(f["dt"])
         L.append("\t\tStubLog::Lines() = BeginLog;" if keep_begin else "\t\tStubLog::Lines().clear();")
         if actor and gen.phased:

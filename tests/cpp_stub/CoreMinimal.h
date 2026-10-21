@@ -98,6 +98,20 @@ struct TArray
 	int32 Add(const T& In) { V.push_back(In); return Num() - 1; }
 	int32 Add(T&& In) { V.push_back(std::move(In)); return Num() - 1; }
 	void Append(const TArray& Other) { V.insert(V.end(), Other.V.begin(), Other.V.end()); }
+	int32 AddUnique(const T& In)
+	{
+		for (size_t I = 0; I < V.size(); ++I)
+		{
+			if (V[I] == In) { return static_cast<int32>(I); }
+		}
+		return Add(In);
+	}
+	int32 Remove(const T& In)
+	{
+		const size_t Before = V.size();
+		V.erase(std::remove(V.begin(), V.end(), In), V.end());
+		return static_cast<int32>(Before - V.size());
+	}
 	void Reset() { V.clear(); }
 	T& operator[](int32 I) { return V[static_cast<size_t>(I)]; }
 	const T& operator[](int32 I) const { return V[static_cast<size_t>(I)]; }
