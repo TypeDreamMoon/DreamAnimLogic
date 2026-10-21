@@ -12,14 +12,14 @@ record the logic state and the host effects every frame, and compare. The accept
 
 ```
 python Unreal\TestHost\create_project.py            # --dest G:\DCC\DalLiveHost --engine I:\UnrealEngine\UE_5.8
-Unreal\TestHost\scripts\build.cmd                   # UBT, DalLiveHostEditor Win64 Development (about a minute)
+Unreal\TestHost\scripts\build.ps1                   # UBT, DalLiveHostEditor Win64 Development (about a minute)
 Unreal\TestHost\scripts\run_editor.ps1 -Script Unreal\TestHost\scripts\make_content.py -NoFixedStep   # once: actions, montages, map
 ```
 
 `create_project.py` copies and renames the template (like the engine's project creation does with `TemplateDefs.ini`),
 drops the template's variants, lays `overlay/` on top (module Build.cs, test character / game mode / `UDalTestLibrary` /
 timed components, config, .uproject), copies the shared Mannequin and Input content, compiles the examples into the module
-(`hero_gait` with `--bag`) and copies the plugin. After changing the plugin run `scripts\sync_plugin.cmd` and `build.cmd`.
+(`hero_gait` with `--bag`) and copies the plugin. After changing the plugin run `scripts\sync_plugin.cmd` and `build.ps1`.
 
 **Remove it:** delete `G:\DCC\DalLiveHost`. Nothing outside that folder is changed (the engine is not touched; logs and
 results go to `G:\DCC\scratch\w4_logs`, delete that too).

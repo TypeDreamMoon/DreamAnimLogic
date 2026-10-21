@@ -134,9 +134,9 @@ C++ and against DalLive, comparing every frame. Results of 2026-10-21:
 | `lockon_camera.dal` (target choice, traces, camera, timers) | 700 | identical except the lost-sight timer: it expires one frame earlier in double than in float (`7.6e-7` s left in float32 after 90 ticks); numbers within 3e-4 |
 | `hero_gait.dal` (anim logic through `UHeroGaitBag`) | 520 | identical: every param / input / state of the AnimInstance; `Speed` within 9e-5 |
 
-Hot swap during PIE (`melee_swap`, `gait_swap`): 240-330 ms from saving the file to the new generation running (100 ms poll
+Hot swap during PIE (`melee_swap`, `gait_swap`): 225-335 ms from saving the file to the new generation running (six measurements) (100 ms poll
 + 150 ms quiet time + compile); `Hits` kept across the swap and the next `Hit` notify adds 10 instead of 1; a file with four
-compile errors is reported in 277 ms and generation 2 keeps running (the next attack still adds 10); a new state appears
+compile errors is reported in 243-298 ms and generation 2 keeps running (the next attack still adds 10); a new state appears
 and works; a `param` override survives every generation; anim logic: `Speed` continuous across the swap, the gait changes
 the frame the new threshold takes effect.
 

@@ -4,7 +4,7 @@ $scripts = $PSScriptRoot
 $runs = Join-Path $Out 'runs'
 foreach ($s in 'melee', 'lockon', 'gait') {
     foreach ($m in 'compiled', 'interp') { & "$scripts\run_test.ps1" -Scenario $s -Mode $m -Out $Out | Out-Null }
-    Write-Output "== $s: compiled vs interpreted"
+    Write-Output "== ${s}: compiled vs interpreted"
     python "$scripts\compare_runs.py" "$runs\${s}_compiled.json" "$runs\${s}_interp.json" --skew 1 $(if ($s -eq 'lockon') { '--ignore'; 'TargetId' })
 }
 foreach ($s in 'melee_swap', 'gait_swap') { & "$scripts\run_test.ps1" -Scenario $s -Mode interp -Out $Out | Out-Null }

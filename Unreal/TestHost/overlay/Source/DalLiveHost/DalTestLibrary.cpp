@@ -91,7 +91,11 @@ int64 UDalTestLibrary::GetFrameCounter()
 
 int32 UDalTestLibrary::AddMontageSection(UAnimMontage* Montage, FName SectionName, float StartTime)
 {
+#if WITH_EDITOR
 	return Montage != nullptr ? Montage->AddAnimCompositeSection(SectionName, StartTime) : INDEX_NONE;
+#else
+	return INDEX_NONE; // editor-only API
+#endif
 }
 
 UActorComponent* UDalTestLibrary::CreateComponent(AActor* Owner, TSubclassOf<UActorComponent> ComponentClass)

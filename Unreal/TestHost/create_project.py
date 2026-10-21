@@ -11,7 +11,7 @@ What it does:
   4. compiles the example programs into Source/DalLiveHost/Dal with the compiler of this repository (hero_gait with --bag);
   5. copies the DalLive plugin into Plugins/ (re-run `scripts/sync_plugin.cmd` after changing the plugin).
 
-Then:  scripts\\build.cmd, scripts\\run_editor.ps1 -Script scripts\\make_content.py (once), scripts\\run_all.ps1.
+Then:  scripts\\build.ps1, scripts\\run_editor.ps1 -Script scripts\\make_content.py (once), scripts\\run_all.ps1.
 To remove the project: delete the folder (nothing outside it is touched; the engine is not modified).
 """
 
