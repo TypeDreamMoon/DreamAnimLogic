@@ -25,7 +25,7 @@ from settings_sources import DATA, DECLS, PROGRAM, curve, curve3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-ALS_LIB = os.path.join(ROOT, "examples", "als", "als_lib.dal")
+ALS_LIB = os.path.join(ROOT, "als", "als_lib.dal")
 PACK = os.environ.get("DAL_ALS_PACK", r"G:\DCC\AlsPack")
 HAVE_PACK = os.path.isfile(os.path.join(PACK, "pack.json"))
 

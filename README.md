@@ -74,10 +74,11 @@ dal/                  the package (pure Python 3.11+, no dependencies) -- this i
 examples/
   als_lean.dal                    ALS-Refactored's lean logic (+ als_lean_standins.py, AlsLeanLibrary.h)
   hero_gait.dal                   enums, input actions, notifies, entries
-  als/als_lib.dal                 the shared declarations of ALS-Refactored in .dal: 8 tag sets, enums, state structs, 23 settings
-                                  types (they load the data assets of G:\DCC\AlsPack) and the pure math helpers
   melee_combo.dal                 three-hit chain: montages, input buffer, cancel windows, combo (actor logic)
   lockon_camera.dal               lock-on target selection, line-of-sight trace, camera framing (actor logic)
+als/                              ALS-Refactored rewritten in .dal (library + character + input; the animation instance is next to them)
+  als_lib.dal                     the shared declarations: 8 tag sets, enums, the state structs, 23 settings types (they load the data
+                                  assets of G:\DCC\AlsPack) and the pure math helpers
 tests/                            python -I -m unittest discover -s tests
   oracles/                        independent hand-written ports (ALS lean, melee, lock-on); they do not import dal
   cpp_stub/ cpp_driver.py         stand-in engine headers + build/run helper for the C++ tests
@@ -114,7 +115,7 @@ python -m dal host                                                      # the ho
 * `--bag` (anim logic): also write `U<Logic>Bag` into `<Logic>.h`, a `UAnimInstance` with the same params / inputs / states
   and none of the logic -- the parent class of an Animation Blueprint while DalLive interprets the program.
 * A file without a `logic` line that only declares shared things is a library (`use "x.dal";`): it checks and compiles on
-  its own (`python -m dal compile examples/als/als_lib.dal --cpp out`) into `<Stem>.h` / `.cpp` (the types, tags, inline functions).
+  its own (`python -m dal compile als/als_lib.dal --cpp out`) into `<Stem>.h` / `.cpp` (the types, tags, inline functions).
   `--cpp` also writes `DalData.h` when the program has settings.
 * Exit code 0 = ok, 1 = compile errors (`file:line:col: error DALnnnn: message` plus the source line and a
   caret), 2 = usage error.
