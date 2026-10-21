@@ -89,7 +89,7 @@ class PeerCheckTests(unittest.TestCase):
                            ("Character.SetDesiredGait();", "DAL4041"),
                            ("Character.SetDesiredGait(1.0);", "DAL4002"),
                            ("Character.SetDesiredGait(AlsGait.Running, 2);", "DAL4041"),
-                           ("let x = Character.Jump() && true;", "DAL4042"),
+                           ("let x = true && Character.Jump();", "DAL4042"),
                            ("Character.Jump(1);", "DAL4041"),
                            ("let x = Character.SetStance(AlsStance.Standing);", "DAL4043"),
                            ("R = Character.can_sprint();", "DAL3077")):       # a view is read through an input

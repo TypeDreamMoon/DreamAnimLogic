@@ -65,11 +65,19 @@ update(dt) { bump(dt); }""", "t.dal").module
     def test_a_method_result_is_taken_from_a_whole_right_hand_side(self):
         pre = HDR + "state S: float;\nmethod inc() -> float { S += 1.0; return S; }\nmethod nothing() { S = 0.0; }\n"
         self.check(pre + "update(dt) { let a = inc(); var b = inc(); b = inc(); S = inc(); inc(); }")
-        self.check(pre + "update(dt) { let a = inc() + 1.0; }", "DAL4042")
-        self.check(pre + "update(dt) { S = 2.0 * inc(); }", "DAL4042")
-        self.check(pre + "update(dt) { S += inc(); }", "DAL4042")
-        self.check(pre + "update(dt) { if (inc() > 1.0) { S = 1.0; } }", "DAL4042")
-        self.check(pre + "update(dt) { let a = sqrt(inc()); }", "DAL4042")
+        # inside an expression a call runs before the statement (language version 4): fine where it always runs
+        self.check(pre + "update(dt) { let a = inc() + 1.0; }")
+        self.check(pre + "update(dt) { S = 2.0 * inc(); }")
+        self.check(pre + "update(dt) { S += inc(); }")
+        self.check(pre + "update(dt) { if (inc() > 1.0) { S = 1.0; } }")
+        self.check(pre + "update(dt) { let a = sqrt(inc()); }")
+        # ... and an error where it might not run, or has to run every pass
+        self.check(pre + "update(dt) { if (S > 0.0 && inc() > 1.0) { S = 1.0; } }", "DAL4042")
+        self.check(pre + "update(dt) { if (S > 0.0 || inc() > 1.0) { S = 1.0; } }", "DAL4042")
+        self.check(pre + "update(dt) { let a = S > 0.0 ? inc() : 1.0; }", "DAL4042")
+        self.check(pre + "update(dt) { let a = S > 0.0 ? 2.0 : inc(); }", "DAL4042")
+        self.check(pre + "update(dt) { while (inc() < 3.0) bound 3 { S += 1.0; } }", "DAL4042")
+        self.check(pre + "update(dt) { if (inc() > 1.0 && S > 0.0) { S = 1.0; } }")                          # the left side always runs
         self.check(pre + "update(dt) { let a = nothing(); }", "DAL4043")
         self.check(pre + "update(dt) { nothing(); }")
 

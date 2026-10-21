@@ -172,6 +172,9 @@ class Checker:
         self.interface_only = False                       # stop after the declarations (the checker run for a peer's interface)
         self.loop_depth = 0                               # how many loops enclose the statement being checked (`break` needs one)
         self.settings_init = False                        # the default of a settings member is being folded (it may build a settings value)
+        self.hoist: list[ir.Stmt] | None = None           # the method calls of the statement being checked, as lets that run before it
+        self.no_hoist = 0                                 # > 0 inside the right side of && / ||, the branches of ?:, a loop condition: a call there may not run
+        self.hoisted = 0                                  # temporaries made so far (Dal_t1, Dal_t2 ...)
         self.method_sigs: dict[str, MethodSig] = {}
         self.entry_sigs: dict[int, list[ir.EntryParam]] = {}      # id(EntryDecl) -> its typed parameters
         self.method_calls: dict[str, list[str]] = {}      # call graph of methods and views (recursion check)
@@ -1313,7 +1316,13 @@ class Checker:
             if terminated:
                 self.warn("DAL5090", f"unreachable code after '{what}'", s.pos)
                 terminated = False
-            r = self.stmt(s, sc)
+            saved_hoist, self.hoist = self.hoist, []
+            try:
+                r = self.stmt(s, sc)
+                pre = self.hoist
+            finally:
+                self.hoist = saved_hoist
+            out.extend(pre)                                    # the method calls inside the statement's expressions, in the order written
             if r is not None:
                 out.append(r)
                 if isinstance(r, (ir.Return, ir.Break)):
@@ -1631,7 +1640,13 @@ class Checker:
             return self.unary(e, sc)
         if isinstance(e, S.BinaryExpr):
             a = self.ex(e.left, sc)
-            b = self.ex(e.right, sc)
+            if e.op in ("&&", "||"):
+                self.no_hoist += 1                               # the right side may not run: a method call there cannot be moved in front of the statement
+            try:
+                b = self.ex(e.right, sc)
+            finally:
+                if e.op in ("&&", "||"):
+                    self.no_hoist -= 1
             return self.binary(e.op, a, b, e.pos, e.op_pos or e.pos)
         if isinstance(e, S.CondExpr):
             return self.cond(e, sc)
@@ -2107,7 +2122,11 @@ class Checker:
 
     def while_stmt(self, s: S.WhileStmt, sc: Scope) -> ir.Stmt | None:
         """`while (cond) bound N { ... }`: the bound is a constant 1..64 (a program cannot loop for ever)."""
-        c = self.ex(s.cond, sc)
+        self.no_hoist += 1                                       # the condition runs before every pass: a method call in it cannot be moved in front of the loop
+        try:
+            c = self.ex(s.cond, sc)
+        finally:
+            self.no_hoist -= 1
         ok = True
         if c.ty is not BOOL and c.ty is not ERROR:
             self.err("DAL4003", f"the condition of 'while' must be bool, not {c.ty}", s.cond.pos)
@@ -2236,8 +2255,12 @@ class Checker:
 
     def cond(self, e: S.CondExpr, sc: Scope) -> ir.Expr:
         c = self.ex(e.cond, sc)
-        a = self.ex(e.then, sc)
-        b = self.ex(e.orelse, sc)
+        self.no_hoist += 1                                       # only one branch runs
+        try:
+            a = self.ex(e.then, sc)
+            b = self.ex(e.orelse, sc)
+        finally:
+            self.no_hoist -= 1
         if c.ty is not BOOL and c.ty is not ERROR:
             self.err("DAL4003", f"the condition of '?:' must be bool, not {c.ty}", e.cond.pos)
         if a.ty is ERROR or b.ty is ERROR:
@@ -2343,10 +2366,22 @@ class Checker:
             self.err("DAL4043", f"{what} returns nothing; call it as a statement: name(...);", e.pos)
             return False
         if id(e) not in self.value_calls:
-            self.err("DAL4042", f"the result of {what} can only be the whole right-hand side of 'let', '=' or 'return' "
-                                f"(methods change state, so they cannot hide inside an expression); put it in a variable first", e.pos)
-            return False
+            if self.hoist is None or self.no_hoist:
+                self.err("DAL4042", f"the result of {what} cannot be used here: a method call inside an expression runs before the statement, so it "
+                                    f"may not sit in the right side of && / ||, in a ?: branch or in the condition of a 'while' (it might not run, or has to run "
+                                    f"every pass); put it in a variable first: let r = {what.split(chr(39))[1]}(...);", e.pos)
+                return False
         return True
+
+    def hoisted_call(self, e: S.Expr, call: ir.Expr, ret: Type | None, view: bool) -> ir.Expr:
+        """A method / peer call that produces a value inside an expression: it becomes a `let` that runs before the statement, in the order written, and
+        the expression reads the variable."""
+        if view or ret is None or id(e) in self.value_calls or id(e) in self.stmt_calls or self.hoist is None:
+            return call
+        self.hoisted += 1
+        name = f"Dal_t{self.hoisted}"
+        self.hoist.append(ir.Let(name, call.ty, call, False))
+        return ir.LocalRef(call.ty, name)
 
     def call_method(self, e: S.CallExpr, name: str, args: list[ir.Expr], sc: Scope) -> ir.Expr:
         sig = self.method_sigs.get(name)
@@ -2362,7 +2397,7 @@ class Checker:
             self.method_calls[sc.fn_name].append(name)
         if sig.is_view:
             return ir.CallView(sig.ret or ERROR, name, conv)
-        return ir.CallMethod(sig.ret if sig.ret is not None else VOID, name, conv)
+        return self.hoisted_call(e, ir.CallMethod(sig.ret if sig.ret is not None else VOID, name, conv), sig.ret, False)
 
     def member_call(self, e: S.MemberCallExpr, sc: Scope) -> ir.Expr:
         base = e.base
@@ -2429,7 +2464,7 @@ class Checker:
         if len(args) != len(params):
             return self.bad("DAL4041", f"{peer}.{e.name}() takes {len(params)} argument(s) ({', '.join(f'{n}: {t}' for n, t in params)}), got {len(args)}", e.pos)
         conv = [self.assignable(pt, a, ae.pos, f"argument '{pn}' of {peer}.{e.name}()") for (pn, pt), a, ae in zip(params, args, e.args)]
-        return ir.CallPeer(ret if ret is not None else VOID, peer, e.name, conv, queued)
+        return self.hoisted_call(e, ir.CallPeer(ret if ret is not None else VOID, peer, e.name, conv, queued), ret, False)
 
     def make_struct(self, e: S.CallExpr, st: StructType, args: list[ir.Expr], sc: Scope) -> ir.Expr:
         if st.kind == "settings" and not self.settings_init:
