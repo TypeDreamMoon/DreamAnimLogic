@@ -1039,6 +1039,12 @@ class LogicBase:
     def sample_inputs(self) -> None:
         self._sample()
 
+    def update_phase(self, phase: str, dt: float) -> None:
+        """One tick slot.  A logic without tick slots has one update, which runs in pre_movement (generated classes with
+        slots override this)."""
+        if phase == "pre_movement" and not self.DAL_PHASES:
+            self.update(dt)
+
     # ---- peers (v3) --------------------------------------------------------------------------------------
     def connect(self, name: str, other) -> None:
         """Wire the peer ``name`` (a ``peer`` declaration) to another logic instance."""

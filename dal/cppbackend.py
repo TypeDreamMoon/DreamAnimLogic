@@ -35,7 +35,9 @@ from dataclasses import dataclass, field
 from . import ir
 from .builtins import BUILTIN_CONSTS, BUILTINS
 from .hostapi import COMMANDS, QUERIES
+from .names import SAMPLE_LOCALS
 from .types import (
+    VOID,
     BOOL,
     FLOAT,
     HIT,
@@ -49,9 +51,12 @@ from .types import (
     StructType,
     TagType,
     Type,
+    zero_value,
 )
 
 T = "\t"
+
+LIFECYCLE = ("begin_play", "end_play")
 
 
 @dataclass
@@ -273,9 +278,28 @@ class CppExprGen:
             return f"{query_cpp(e.name)}({', '.join(unparen(self.x(a)) for a in e.args)})"
         if k is ir.Valid:
             return f"{self.x(e.x)}.IsValid()"
+        if k is ir.CallMethod or k is ir.CallView:
+            return f"{self.method_name(e.name)}({', '.join(unparen(self.x(a)) for a in e.args)})"
+        if k is ir.CallPeer:
+            call = self.peer_invoke(e)
+            if e.ty is VOID:
+                return call
+            return f"({e.peer} != nullptr ? {call} : {cpp_value(e.ty, zero_value(e.ty))})"
         if k is ir.MakeStruct:
             return self.make_struct(e)
         raise AssertionError(k)
+
+    def method_name(self, name: str) -> str:
+        """C++ name of a method or view: the DAL name when it is pub, a private Dal... name otherwise."""
+        x = self.m.find_method(name)
+        if x is None or x.pub:
+            return name
+        return ("DalView_" if x.is_view else "DalMethod_") + name
+
+    def peer_invoke(self, e: ir.CallPeer) -> str:
+        """`Peer->Method(args)`; a call of an animation instance goes through its queue (`DalQueue_Method`)."""
+        args = ", ".join(unparen(self.x(a)) for a in e.args)
+        return f"{e.peer}->{'DalQueue_' if e.queued else ''}{e.method}({args})"
 
     def make_struct(self, e: ir.MakeStruct) -> str:
         var = f"Dal_S{self.struct_depth}"
@@ -391,14 +415,18 @@ class Method:
     access: str = "private"
     doc: str = ""
     const: bool = False
+    spec: str = ""                                      # UFUNCTION specifiers (empty: a bare UFUNCTION())
+    override: bool = False                              # `virtual ... override` in the declaration
+    external: bool = False                              # declared here, defined by source() itself
 
     def decl(self) -> list[str]:
         out = []
         if self.doc:
             out.append(f"{T}/** {self.doc} */")
         if self.ufunction:
-            out.append(f"{T}UFUNCTION()")
-        out.append(f"{T}{self.ret} {self.name}({self.params}){' const' if self.const else ''};")
+            out.append(f"{T}UFUNCTION({self.spec})")
+        head = f"{T}{'virtual ' if self.override else ''}{self.ret} {self.name}({self.params}){' const' if self.const else ''}"
+        out.append(head + (" override;" if self.override else ";"))
         return out
 
     def define(self, cls: str) -> list[str]:
@@ -445,7 +473,13 @@ class CppGen:
                     used_queries.add(e.name)
         self.cmds = [n for n in COMMANDS if n in used_cmds]
         self.queries = [n for n in QUERIES if n in used_queries]
-        self.has_events = bool(module.handlers)
+        self.event_handlers = [h for h in module.handlers if h.event not in LIFECYCLE]
+        self.has_events = bool(self.event_handlers)
+        self.begin_handlers = [k for k, h in enumerate(module.handlers) if h.event == "begin_play"]
+        self.end_handlers = [k for k, h in enumerate(module.handlers) if h.event == "end_play"]
+        self.phased = module.phases_explicit or len(module.updates) > 1
+        self.slots = [u.phase for u in module.updates] or [module.default_phase]
+        self.queue_target = module.kind == "anim" and any(x.pub and not x.is_view for x in module.methods)
         self.has_cmds = bool(self.cmds)
         self.hosth = self.actor or self.has_events or self.has_cmds         # DalHost.h is part of the output
         kinds = {h.event for h in module.handlers}
@@ -483,6 +517,11 @@ class CppGen:
                 out.append(f"{pad}{const}{cpp_type(s.ty)} {s.name} = {unparen(self.ex.x(s.init))};")
             elif isinstance(s, ir.Assign):
                 out.append(f"{pad}{s.name} = {unparen(self.ex.x(s.value))};")
+            elif isinstance(s, ir.ExprStmt):
+                if isinstance(s.expr, ir.CallPeer):
+                    out += [f"{pad}if ({s.expr.peer} != nullptr)", f"{pad}{{", f"{pad}{T}{self.ex.peer_invoke(s.expr)};", f"{pad}}}"]
+                else:
+                    out.append(f"{pad}{unparen(self.ex.x(s.expr))};")
             elif isinstance(s, ir.AssignField):
                 out.append(f"{pad}{s.name}{''.join('.' + m for m in s.path)} = {unparen(self.ex.x(s.value))};")
             elif isinstance(s, ir.If):
@@ -641,6 +680,9 @@ class CppGen:
                 dparams = ", ".join(f"[[maybe_unused]] const {cpp_type(t)} {n}" for n, t in h.params)
                 out.append(Method("void", f"DalHandler_{k}", params, def_params=dparams, body=self.stmts(h.body, 0),
                                   doc="on " + h.event + " " + h.name + (f" {h.phase}" if h.phase else "")))
+        elif m.handlers:
+            for k, h in enumerate(m.handlers):
+                out.append(Method("void", f"DalHandler_{k}", doc="on " + h.event, body=self.stmts(h.body, 0)))
         # ---- commands
         if cmds:
             out.append(Method("void", "DalEnqueue", "const DalHost::FCommand& DalCommand", doc="Queue a host command; it runs on the game thread after the update.", body=[
@@ -694,6 +736,139 @@ class CppGen:
                     f"DalPostInput(Dal_ActionId_{a}, DalHost::EInputPhase::{_TRIGGER[phase]}, DalValue);"]))
         # ---- queries
         out.extend(self.query_methods())
+        out.extend(self.peer_methods())
+        if self.phased:
+            out.extend(self.phase_methods())
+        out.extend(self.user_methods())
+        return out
+
+    def phase_methods(self) -> list[Method]:
+        """Declarations for an actor logic with tick slots: one tick function per update block, run through DalRunPhase."""
+        out = [Method("void", "RegisterComponentTickFunctions", "bool bRegister", [], "const bool bRegister", override=True, access="public", external=True),
+               Method("void", "DalRunPhase", "int32 Phase, float DeltaTime", [], "const int32 Phase, const float DeltaTime", access="public", external=True,
+                      doc="Run one update block (the slot number is its place in the list: " + ", ".join(f"{i} = {s}" for i, s in enumerate(self.slots)) + ")."),
+               Method("void", "DalSetupTickOrder", external=True, doc="Order the tick functions around the movement component, the controller and the mesh.")]
+        for slot in self.slots:
+            out.append(Method("void", f"DalUpdate_{camel(slot)}", "float DeltaSeconds", external=True, doc=f"update in {slot}"))
+        return out
+
+    def phase_blocks(self) -> list[list[str]]:
+        """Definitions of the tick-slot machinery (registration, ordering, the tick function structs, DalRunPhase)."""
+        cls = self.cls
+        tick = f"F{self.m.name}PhaseTick"
+        blocks: list[list[str]] = []
+        reg = [f"void {cls}::RegisterComponentTickFunctions(const bool bRegister)", "{",
+               f"{T}Super::RegisterComponentTickFunctions(bRegister);", "",
+               f"{T}for (int32 DalIndex = 0; DalIndex < {len(self.slots)}; ++DalIndex)", f"{T}{{",
+               f"{T}{T}{tick}& DalTick = DalPhaseTicks[DalIndex];",
+               f"{T}{T}if (bRegister)", f"{T}{T}{{",
+               f"{T}{T}{T}if (SetupActorComponentTickFunction(&DalTick))", f"{T}{T}{T}{{",
+               f"{T}{T}{T}{T}DalTick.Target = this;", f"{T}{T}{T}}}", f"{T}{T}}}",
+               f"{T}{T}else if (DalTick.IsTickFunctionRegistered())", f"{T}{T}{{",
+               f"{T}{T}{T}DalTick.UnRegisterTickFunction();", f"{T}{T}}}", f"{T}}}", "}"]
+        blocks.append(reg)
+        need = {"owner": False, "pawn": False, "move": False, "mesh": False, "ctrl": False}
+        for slot in self.slots:
+            if slot == "pre_movement":
+                need.update(owner=True, pawn=True, move=True, ctrl=True)
+            elif slot == "after_movement":
+                need.update(owner=True, move=True, mesh=True)
+            else:
+                need.update(owner=True, mesh=True)
+        so = [f"void {cls}::DalSetupTickOrder()", "{", f"{T}AActor* DalOwner = GetOwner();", f"{T}if (DalOwner == nullptr)", f"{T}{{", f"{T}{T}return;", f"{T}}}", ""]
+        if need["ctrl"]:
+            so.append(f"{T}const APawn* DalPawn = Cast<APawn>(DalOwner);")
+            so.append(f"{T}AController* DalController = DalPawn != nullptr ? DalPawn->GetController() : nullptr;")
+        if need["move"]:
+            so.append(f"{T}UCharacterMovementComponent* DalMovement = DalOwner->FindComponentByClass<UCharacterMovementComponent>();")
+        if need["mesh"]:
+            so.append(f"{T}USkeletalMeshComponent* DalMesh = DalOwner->FindComponentByClass<USkeletalMeshComponent>();")
+        for i, slot in enumerate(self.slots):
+            so.append("")
+            so.append(f"{T}// update in {slot}")
+            if slot == "pre_movement":
+                so += [f"{T}if (DalController != nullptr)", f"{T}{{", f"{T}{T}DalPhaseTicks[{i}].AddPrerequisite(DalController, DalController->PrimaryActorTick);", f"{T}}}",
+                       f"{T}if (DalMovement != nullptr)", f"{T}{{", f"{T}{T}DalMovement->PrimaryComponentTick.AddPrerequisite(this, DalPhaseTicks[{i}]);", f"{T}}}"]
+            elif slot == "after_movement":
+                so += [f"{T}if (DalMovement != nullptr)", f"{T}{{", f"{T}{T}DalPhaseTicks[{i}].AddPrerequisite(DalMovement, DalMovement->PrimaryComponentTick);", f"{T}}}",
+                       f"{T}if (DalMesh != nullptr)", f"{T}{{", f"{T}{T}DalMesh->PrimaryComponentTick.AddPrerequisite(this, DalPhaseTicks[{i}]);", f"{T}}}"]
+            else:
+                so += [f"{T}if (DalMesh != nullptr)", f"{T}{{", f"{T}{T}DalPhaseTicks[{i}].AddPrerequisite(DalMesh, DalMesh->PrimaryComponentTick);", f"{T}}}"]
+        so.append("}")
+        blocks.append(so)
+        blocks.append([f"void {tick}::ExecuteTick(const float DeltaTime, const ELevelTick TickType, [[maybe_unused]] ENamedThreads::Type CurrentThread, "
+                       f"[[maybe_unused]] const FGraphEventRef& MyCompletionGraphEvent)", "{",
+                       f"{T}FActorComponentTickFunction::ExecuteTickHelper(Target, false, DeltaTime, TickType, [this](const float DilatedTime)", f"{T}{{",
+                       f"{T}{T}Target->DalRunPhase(Phase, DilatedTime);", f"{T}}});", "}"])
+        blocks.append([f"FString {tick}::DiagnosticMessage()", "{", f'{T}return FString(TEXT("{cls}::DalRunPhase"));', "}"])
+        rp = [f"void {cls}::DalRunPhase(const int32 Phase, const float DeltaTime)", "{"]
+        if self.bind_anim or self.bind_input:
+            rp.append(f"{T}DalBindHost();")
+        if any(q.startswith("target_") for q in self.queries):
+            rp.append(f"{T}bDalTargetsFresh = false;")
+        rp.append(f"{T}DalSampleInputs();")
+        if self.has_events:
+            rp += [f"{T}if (Phase == 0)", f"{T}{{", f"{T}{T}DalTakeEvents();", f"{T}}}"]
+        rp.append(f"{T}Dal_DeltaSeconds = DeltaTime;")
+        rp += [f"{T}switch (Phase)", f"{T}{{"]
+        for i, slot in enumerate(self.slots):
+            rp += [f"{T}case {i}:", f"{T}{T}DalUpdate_{camel(slot)}(DeltaTime);", f"{T}{T}break;"]
+        rp += [f"{T}default:", f"{T}{T}break;", f"{T}}}"]
+        if self.has_cmds:
+            rp.append(f"{T}DalFlushCommands();")
+        rp.append("}")
+        blocks.append(rp)
+        return blocks
+
+    def peer_methods(self) -> list[Method]:
+        """Finding the peers, and (animation instance) the queue that actor logics call into."""
+        m = self.m
+        out: list[Method] = []
+        if m.peers:
+            body: list[str] = []
+            if self.actor:
+                body.append("const AActor* DalOwner = GetOwner();")
+            else:
+                body.append("const AActor* DalOwner = TryGetPawnOwner();")
+            for peer in m.peers:
+                body.append(f"if ({peer.name} == nullptr)")
+                body.append("{")
+                if peer.kind == "actor":
+                    body.append(f"\t{peer.name} = DalOwner != nullptr ? DalOwner->FindComponentByClass<U{peer.logic}>() : nullptr;")
+                else:
+                    body.append("\tconst USkeletalMeshComponent* DalMesh = DalOwner != nullptr ? DalOwner->FindComponentByClass<USkeletalMeshComponent>() : nullptr;")
+                    body.append(f"\t{peer.name} = DalMesh != nullptr ? Cast<U{peer.logic}>(DalMesh->GetAnimInstance()) : nullptr;")
+                body.append("}")
+            out.append(Method("void", "DalBindPeers", doc="Find the peer logics (the actor's components, or its animation instance).", body=body))
+        if self.queue_target:
+            out.append(Method("void", "DalDrainPeerCalls", doc="Run what actor logics asked of this animation instance since the last update.", body=[
+                "TArray<TFunction<void()>> DalPending;",
+                "{",
+                "\tFScopeLock DalLock(&DalPeerLock);",
+                "\tDalPending = MoveTemp(DalPeerQueue);",
+                "\tDalPeerQueue.Reset();",
+                "}",
+                "for (const TFunction<void()>& DalCall : DalPending)",
+                "{",
+                "\tDalCall();",
+                "}"]))
+        return out
+
+    def user_methods(self) -> list[Method]:
+        """The `method`s and `view`s of the program; the `pub` ones are public (and callable from Blueprints)."""
+        out: list[Method] = []
+        for x in self.m.methods:
+            name = self.ex.method_name(x.name)
+            params = ", ".join(f"{cpp_type(t)} {n}" for n, t in x.params)
+            dparams = ", ".join(f"[[maybe_unused]] const {cpp_type(t)} {n}" for n, t in x.params)
+            ret = cpp_type(x.ret) if x.ret is not None else "void"
+            spec = ""
+            if x.pub:
+                spec = 'BlueprintPure, Category = "DAL|View"' if x.is_view else 'BlueprintCallable, Category = "DAL|Method"'
+                if x.is_view and not self.actor:
+                    spec += ", Meta = (BlueprintThreadSafe)"
+            doc = ("view " if x.is_view else "method ") + x.name
+            out.append(Method(ret, name, params, self.stmts(x.body, 0), dparams or None, x.pub, "public" if x.pub else "private", doc, x.is_view, spec))
         return out
 
     def input_pairs(self) -> list[tuple[str, str]]:
@@ -815,6 +990,8 @@ class CppGen:
         kinds = {"notify": "Notify", "notify_begin": "NotifyBegin", "notify_end": "NotifyEnd",
                  "montage_ended": "MontageEnded", "montage_blending_out": "MontageBlendingOut", "input": "Input"}
         for k, h in enumerate(m.handlers):
+            if h.event in LIFECYCLE:
+                continue
             what = f"on {h.event} {h.name}" + (f" {h.phase}" if h.phase else "")
             kind = kinds[h.event]
             if h.event in ("notify", "notify_begin", "notify_end"):
@@ -1133,9 +1310,13 @@ class CppGen:
             L.append('#include "Engine/EngineTypes.h"')
         if self.bind_begin or self.bind_end:
             L.append('#include "Animation/AnimNotifies/AnimNotify.h"')
+        if self.queue_target:
+            L.append('#include "Templates/Function.h"')
         L.append(f'#include "{m.name}.generated.h"')
         L.append("")
         fwd: list[str] = []
+        for peer in m.peers:
+            fwd.append(f"class U{peer.logic};")
         # Engine classes named in the declarations of the helper methods below. The header must not lean on what the
         # parent class' header happens to include.
         if self.needs_pawn_helper:
@@ -1167,6 +1348,19 @@ class CppGen:
             if st.origin is None:
                 L.extend(self.struct_decl(st))
                 L.append("")
+        if self.phased:
+            L.append(f"class {self.cls};")
+            L.append("")
+            L.append(f"/** The tick function of one update block of {self.cls}: it runs {self.cls}::DalRunPhase for its slot. */")
+            L.append(f"struct {self.api}F{m.name}PhaseTick : public FActorComponentTickFunction")
+            L.append("{")
+            L.append(f"{T}{self.cls}* Target = nullptr;")
+            L.append(f"{T}int32 Phase = 0;")
+            L.append("")
+            L.append(f"{T}virtual void ExecuteTick(float DeltaTime, ELevelTick TickType, ENamedThreads::Type CurrentThread, const FGraphEventRef& MyCompletionGraphEvent) override;")
+            L.append(f"{T}virtual FString DiagnosticMessage() override;")
+            L.append("};")
+            L.append("")
         if self.actor:
             L.append("UCLASS(ClassGroup = (Dal), Meta = (BlueprintSpawnableComponent))")
         else:
@@ -1206,15 +1400,26 @@ class CppGen:
             L.append(f'{T}UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "DAL|Host")')
             L.append(f"{T}TEnumAsByte<ECollisionChannel> DalTraceChannel = ECC_Visibility;")
             L.append("")
+        if m.peers:
+            L.append(f"{T}// ---- peers: the other logics on this actor, found when play begins ----")
+            for peer in m.peers:
+                L.append(f'{T}UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "DAL|Peer", Transient)')
+                L.append(f"{T}TObjectPtr<U{peer.logic}> {peer.name};")
+                L.append("")
         if self.actor:
             L.append(f"{T}virtual void BeginPlay() override;")
-            if self.bind_anim:
+            if self.bind_anim or self.end_handlers:
                 L.append(f"{T}virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;")
-            L.append(f"{T}virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;")
+            if not self.phased:
+                L.append(f"{T}virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;")
         else:
             L.append(f"{T}virtual void NativeInitializeAnimation() override;")
+            if self.begin_handlers:
+                L.append(f"{T}virtual void NativeBeginPlay() override;")
             L.append(f"{T}virtual void NativeUpdateAnimation(float DeltaSeconds) override;")
             L.append(f"{T}virtual void NativeThreadSafeUpdateAnimation(float DeltaSeconds) override;")
+            if self.end_handlers:
+                L.append(f"{T}virtual void NativeUninitializeAnimation() override;")
         L.append("")
         L.append(f"{T}/** Restore every input and state to its declared default. */")
         L.append(f"{T}void DalResetState();")
@@ -1226,6 +1431,17 @@ class CppGen:
             L.append(f'{T}UFUNCTION(BlueprintCallable, Category = "DAL|Entry"{thread_safe})')
             L.append(f"{T}void {e.name}();")
             L.append("")
+        for mt in self.methods():
+            if mt.access == "public":
+                L.extend(mt.decl())
+                L.append("")
+        if self.queue_target:
+            for x in m.methods:
+                if x.pub and not x.is_view:
+                    params = ", ".join(f"{cpp_type(t)} {n}" for n, t in x.params)
+                    L.append(f"{T}/** Called by an actor logic: {x.name} runs at the start of the next animation update. */")
+                    L.append(f"{T}void DalQueue_{x.name}({params});")
+                    L.append("")
         notify_flags = self.notify_names()
         if not self.actor:
             for n in self.anim_notify_funcs():
@@ -1240,12 +1456,15 @@ class CppGen:
         L.append(f"{T}/** Game thread: read the host into the input properties. */")
         L.append(f"{T}void DalSampleInputs();")
         L.append("")
-        queued = " (host commands are queued)" if (not self.actor and self.has_cmds) else ""
-        L.append(f"{T}/** {'Game thread' if self.actor else 'Worker thread'}: the update body. Touches only this object's properties{queued}. */")
-        L.append(f"{T}void DalUpdate(float DeltaSeconds);")
-        L.append("")
+        if not self.phased:
+            queued = " (host commands are queued)" if (not self.actor and self.has_cmds) else ""
+            L.append(f"{T}/** {'Game thread' if self.actor else 'Worker thread'}: the update body. Touches only this object's properties{queued}. */")
+            L.append(f"{T}void DalUpdate(float DeltaSeconds);")
+            L.append("")
         L.append("private:")
         L.append(f"{T}float Dal_DeltaSeconds = 0.0f;")
+        if self.phased:
+            L.append(f"{T}F{m.name}PhaseTick DalPhaseTicks[{len(self.slots)}];             // one tick function per update block")
         for n in notify_flags:
             L.append(f"{T}bool DalNotify_{n} = false;")
         if self.hosth:
@@ -1264,7 +1483,11 @@ class CppGen:
             if any(q.startswith("target_") for q in self.queries):
                 L.append(f"{T}TArray<TWeakObjectPtr<AActor>> DalTargets;")
                 L.append(f"{T}bool bDalTargetsFresh = false;")
-        methods = self.methods()
+        if self.queue_target:
+            L.append("")
+            L.append(f"{T}FCriticalSection DalPeerLock;                    // guards the queue of calls from actor logics")
+            L.append(f"{T}TArray<TFunction<void()>> DalPeerQueue;          // calls from actor logics, run at the start of the update")
+        methods = [mt for mt in self.methods() if mt.access != "public"]
         if methods:
             L.append("")
             for mt in methods:
@@ -1327,6 +1550,19 @@ class CppGen:
             add("Misc/ScopeLock.h")
         if any(t.origin is None for t in m.tagsets):
             add("NativeGameplayTags.h")
+        if self.phased:
+            for x in ("GameFramework/Actor.h", "GameFramework/Pawn.h", "GameFramework/Controller.h", "GameFramework/Character.h",
+                      "GameFramework/CharacterMovementComponent.h", "Components/SkeletalMeshComponent.h"):
+                add(x)
+        if m.peers:
+            add("GameFramework/Actor.h")
+            if any(p.kind == "anim" for p in m.peers):
+                add("Components/SkeletalMeshComponent.h")
+                add("Animation/AnimInstance.h")
+        if self.queue_target or any(p.kind == "anim" for p in m.peers) or self.has_events or self.has_cmds:
+            add("Misc/ScopeLock.h")
+        for p in m.peers:
+            add(f"{p.logic}.h")
         for x in m.externs:
             if x.include and x.origin is None:
                 add(x.include)
@@ -1469,41 +1705,80 @@ class CppGen:
 
         # ---- lifecycle
         if self.actor:
-            blocks.append([f"{cls}::{cls}()", "{",
-                           f"{T}PrimaryComponentTick.bCanEverTick = true;",
-                           f"{T}PrimaryComponentTick.TickGroup = TG_PrePhysics;", "}"])
+            if self.phased:
+                ctor = [f"{cls}::{cls}()", "{",
+                        f"{T}PrimaryComponentTick.bCanEverTick = false;              // every update block has its own tick function"]
+                for i, slot in enumerate(self.slots):
+                    ctor += [f"{T}DalPhaseTicks[{i}].Target = this;",
+                             f"{T}DalPhaseTicks[{i}].Phase = {i};",
+                             f"{T}DalPhaseTicks[{i}].bCanEverTick = true;",
+                             f"{T}DalPhaseTicks[{i}].TickGroup = {'TG_PostPhysics' if slot == 'after_anim' else 'TG_PrePhysics'};"]
+                ctor.append("}")
+                blocks.append(ctor)
+            else:
+                blocks.append([f"{cls}::{cls}()", "{",
+                               f"{T}PrimaryComponentTick.bCanEverTick = true;",
+                               f"{T}PrimaryComponentTick.TickGroup = TG_PrePhysics;", "}"])
             begin = [f"void {cls}::BeginPlay()", "{", f"{T}Super::BeginPlay();", "", f"{T}DalResetState();"]
+            if m.peers:
+                begin.append(f"{T}DalBindPeers();")
             if self.bind_anim or self.bind_input:
                 begin.append(f"{T}DalBindHost();")
+            if self.phased:
+                begin.append(f"{T}DalSetupTickOrder();")
+            if self.begin_handlers:
+                begin.append(f"{T}DalSampleInputs();")
+                begin.extend(f"{T}DalHandler_{k}();" for k in self.begin_handlers)
+                if self.has_cmds:
+                    begin.append(f"{T}DalFlushCommands();")
             begin.append("}")
             blocks.append(begin)
-            if self.bind_anim:
-                blocks.append([f"void {cls}::EndPlay(const EEndPlayReason::Type EndPlayReason)", "{",
-                               f"{T}if (DalBoundAnim.IsValid())", f"{T}{{",
-                               f"{T}{T}DalUnbindAnim(DalBoundAnim.Get());", f"{T}}}",
-                               f"{T}DalBoundAnim.Reset();", "",
-                               f"{T}Super::EndPlay(EndPlayReason);", "}"])
-            tick = [f"void {cls}::TickComponent(const float DeltaTime, const ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)", "{",
-                    f"{T}Super::TickComponent(DeltaTime, TickType, ThisTickFunction);", ""]
-            if any(q.startswith("target_") for q in self.queries):
-                tick.append(f"{T}bDalTargetsFresh = false;")
-            if self.bind_anim or self.bind_input:
-                tick.append(f"{T}DalBindHost();")
-            tick.append(f"{T}DalSampleInputs();")
-            if self.has_events:
-                tick.append(f"{T}DalTakeEvents();")
-            tick.append(f"{T}Dal_DeltaSeconds = DeltaTime;")
-            tick.append(f"{T}DalUpdate(DeltaTime);")
-            if self.has_cmds:
-                tick.append(f"{T}DalFlushCommands();")
-            tick.append("}")
-            blocks.append(tick)
+            if self.bind_anim or self.end_handlers:
+                end_lines = [f"void {cls}::EndPlay(const EEndPlayReason::Type EndPlayReason)", "{"]
+                if self.end_handlers:
+                    end_lines.append(f"{T}DalSampleInputs();")
+                    end_lines.extend(f"{T}DalHandler_{k}();" for k in self.end_handlers)
+                    if self.has_cmds:
+                        end_lines.append(f"{T}DalFlushCommands();")
+                    if self.bind_anim:
+                        end_lines.append("")
+                if self.bind_anim:
+                    end_lines += [f"{T}if (DalBoundAnim.IsValid())", f"{T}{{",
+                                  f"{T}{T}DalUnbindAnim(DalBoundAnim.Get());", f"{T}}}",
+                                  f"{T}DalBoundAnim.Reset();", ""]
+                else:
+                    end_lines.append("")
+                end_lines += [f"{T}Super::EndPlay(EndPlayReason);", "}"]
+                blocks.append(end_lines)
+            if not self.phased:
+                tick = [f"void {cls}::TickComponent(const float DeltaTime, const ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)", "{",
+                        f"{T}Super::TickComponent(DeltaTime, TickType, ThisTickFunction);", ""]
+                if any(q.startswith("target_") for q in self.queries):
+                    tick.append(f"{T}bDalTargetsFresh = false;")
+                if self.bind_anim or self.bind_input:
+                    tick.append(f"{T}DalBindHost();")
+                tick.append(f"{T}DalSampleInputs();")
+                if self.has_events:
+                    tick.append(f"{T}DalTakeEvents();")
+                tick.append(f"{T}Dal_DeltaSeconds = DeltaTime;")
+                tick.append(f"{T}DalUpdate(DeltaTime);")
+                if self.has_cmds:
+                    tick.append(f"{T}DalFlushCommands();")
+                tick.append("}")
+                blocks.append(tick)
         else:
             init = [f"void {cls}::NativeInitializeAnimation()", "{", f"{T}Super::NativeInitializeAnimation();", "", f"{T}DalResetState();"]
             if self.bind_anim:
                 init.append(f"{T}DalBindAnim(this);")
             init.append("}")
             blocks.append(init)
+            if self.begin_handlers:
+                bp = [f"void {cls}::NativeBeginPlay()", "{", f"{T}Super::NativeBeginPlay();", "", f"{T}DalSampleInputs();"]
+                bp.extend(f"{T}DalHandler_{k}();" for k in self.begin_handlers)
+                if self.has_cmds:
+                    bp.append(f"{T}DalFlushCommands();")
+                bp.append("}")
+                blocks.append(bp)
             upd = [f"void {cls}::NativeUpdateAnimation(const float DeltaSeconds)", "{",
                    f"{T}Super::NativeUpdateAnimation(DeltaSeconds);", ""]
             if traffic:
@@ -1512,17 +1787,28 @@ class CppGen:
                 if self.has_cmds:
                     upd.append(f"{T}DalFlushCommands();")
                 upd.append(f"{T}DalSampleInputs();")
+                if self.queue_target:
+                    upd.append(f"{T}DalDrainPeerCalls();")
                 if self.has_events:
                     upd.append(f"{T}DalTakeEvents();")
             else:
                 upd.append(f"{T}// Game thread: gather the host values; the worker thread only reads this object.")
                 upd.append(f"{T}DalSampleInputs();")
+                if self.queue_target:
+                    upd.append(f"{T}DalDrainPeerCalls();")
             upd.append("}")
             blocks.append(upd)
             blocks.append([f"void {cls}::NativeThreadSafeUpdateAnimation(const float DeltaSeconds)", "{",
                            f"{T}Super::NativeThreadSafeUpdateAnimation(DeltaSeconds);", "",
                            f"{T}Dal_DeltaSeconds = DeltaSeconds;",
                            f"{T}DalUpdate(DeltaSeconds);", "}"])
+            if self.end_handlers:
+                ep = [f"void {cls}::NativeUninitializeAnimation()", "{", f"{T}DalSampleInputs();"]
+                ep.extend(f"{T}DalHandler_{k}();" for k in self.end_handlers)
+                if self.has_cmds:
+                    ep.append(f"{T}DalFlushCommands();")
+                ep += ["", f"{T}Super::NativeUninitializeAnimation();", "}"]
+                blocks.append(ep)
 
         # ---- reset
         reset = [f"void {cls}::DalResetState()", "{", f"{T}Dal_DeltaSeconds = 0.0f;"]
@@ -1537,6 +1823,8 @@ class CppGen:
             reset.append(f"{T}DalFrameEvents.Reset();")
         if self.has_cmds:
             reset.append(f"{T}DalCommandQueue.Reset();")
+        if self.queue_target:
+            reset.append(f"{T}DalPeerQueue.Reset();")
         if any(q.startswith("target_") for q in self.queries):
             reset.append(f"{T}DalTargets.Reset();")
             reset.append(f"{T}bDalTargetsFresh = false;")
@@ -1546,28 +1834,49 @@ class CppGen:
 
         # ---- v1 members (helpers, events, commands, binding, queries)
         for mt in self.methods():
-            if mt.name == "DalDispatchEvents" or mt.name.startswith("DalHandler_"):
+            if mt.name == "DalDispatchEvents" or mt.name.startswith("DalHandler_") or mt.external:
                 continue
             blocks.append(mt.define(cls))
 
         # ---- update
-        u = m.update
-        upd_lines = [f"void {cls}::DalUpdate([[maybe_unused]] const float {u.dt_name if u else 'DeltaSeconds'})", "{"]
-        body: list[str] = []
-        if u is not None and u.pre:
-            body.extend(self.stmts(u.pre, 1))
-        if self.has_events:
-            body.append(f"{T}DalDispatchEvents();")
-        if u is not None:
-            body.extend(self.stmts(u.body, 1))
-        if not body and u is None:
-            body.append(f"{T}// (no update body)")
-        upd_lines.extend(body)
-        upd_lines.append("}")
-        for mt in self.methods():
-            if mt.name == "DalDispatchEvents" or mt.name.startswith("DalHandler_"):
-                blocks.append(mt.define(cls))
-        blocks.append(upd_lines)
+        if self.phased:
+            for mt in self.methods():
+                if mt.name == "DalDispatchEvents" or mt.name.startswith("DalHandler_"):
+                    blocks.append(mt.define(cls))
+            for k, slot in enumerate(self.slots):
+                u = next((x for x in m.updates if x.phase == slot), None)
+                lines = [f"void {cls}::DalUpdate_{camel(slot)}([[maybe_unused]] const float {u.dt_name if u else 'DeltaSeconds'})", "{"]
+                body = []
+                if k == 0 and u is not None and u.pre:
+                    body.extend(self.stmts(u.pre, 1))
+                if k == 0 and self.has_events:
+                    body.append(f"{T}DalDispatchEvents();")
+                if u is not None:
+                    body.extend(self.stmts(u.body, 1))
+                if not body:
+                    body.append(f"{T}// (no update body)")
+                lines.extend(body)
+                lines.append("}")
+                blocks.append(lines)
+            blocks.extend(self.phase_blocks())
+        else:
+            u = m.update
+            upd_lines = [f"void {cls}::DalUpdate([[maybe_unused]] const float {u.dt_name if u else 'DeltaSeconds'})", "{"]
+            body = []
+            if u is not None and u.pre:
+                body.extend(self.stmts(u.pre, 1))
+            if self.has_events:
+                body.append(f"{T}DalDispatchEvents();")
+            if u is not None:
+                body.extend(self.stmts(u.body, 1))
+            if not body and u is None:
+                body.append(f"{T}// (no update body)")
+            upd_lines.extend(body)
+            upd_lines.append("}")
+            for mt in self.methods():
+                if mt.name == "DalDispatchEvents" or mt.name.startswith("DalHandler_"):
+                    blocks.append(mt.define(cls))
+            blocks.append(upd_lines)
         for e in m.entries:
             lines = [f"void {cls}::{e.name}()", "{",
                      f"{T}[[maybe_unused]] const float {e.dt_name} = Dal_DeltaSeconds;"]
@@ -1590,6 +1899,15 @@ class CppGen:
                               f"{T}DalPostEvent(DalEvent);"]
                 lines.append("}")
                 blocks.append(lines)
+        if self.queue_target:
+            for x in m.methods:
+                if x.pub and not x.is_view:
+                    params = ", ".join(f"{cpp_type(t)} {n}" for n, t in x.params)
+                    caps = ", ".join(["this"] + [n for n, _t in x.params])
+                    args = ", ".join(n for n, _t in x.params)
+                    blocks.append([f"void {cls}::DalQueue_{x.name}({params})", "{",
+                                   f"{T}FScopeLock DalLock(&DalPeerLock);",
+                                   f"{T}DalPeerQueue.Add([{caps}]() {{ {x.name}({args}); }});", "}"])
         for k, blk in enumerate(blocks):
             if k:
                 L.append("")
@@ -1597,6 +1915,39 @@ class CppGen:
         return "\n".join(L) + "\n"
 
     def sample_function(self) -> list[str]:
+        """DalSampleInputs: host reads, then peer reads.  A peer called like one of the locals (`Character`) renames the local."""
+        import re
+
+        m = self.m
+        peer_inputs = [i for i in m.inputs if i.peer is not None]
+        if not peer_inputs and not m.peers:
+            return self.host_sample()
+        host_lines = self.host_sample()
+        head, body = host_lines[:2], host_lines[2:-1]
+        clash = [p.name for p in m.peers if p.name in SAMPLE_LOCALS]
+        for n in clash:
+            body = [re.sub(rf"\b{n}\b", "Dal" + n, ln) for ln in body]
+        if body == [f"{T}// (no host-bound inputs)"]:
+            body = []
+        L = list(head)
+        if m.peers:
+            L.append(f"{T}DalBindPeers();")
+            if body:
+                L.append("")
+        L.extend(body)
+        if peer_inputs and body and body[-1] != "":
+            L.append("")
+        for i in peer_inputs:
+            pu = i.peer
+            assert pu is not None
+            value = f"{pu.peer}->" + ".".join(pu.path)
+            if i.ty is MOVEMENT_MODE:
+                value = f"static_cast<EMovementMode>({value})"
+            L.append(f"{T}{i.name} = {pu.peer} != nullptr ? {value} : {cpp_value(i.ty, i.default)};")
+        L.append("}")
+        return L
+
+    def host_sample(self) -> list[str]:
         m = self.m
         L = [f"void {self.cls}::DalSampleInputs()", "{"]
         host = self.host_items()

@@ -123,9 +123,9 @@ def leaves(name, ty):
         yield name, ty
 
 
-def _print_value(name, ty):
-    """C++ statement printing ``Obj.name`` as 'name v0 v1 ...' (nan / inf spelled out)."""
-    ref = f"Obj.{name}"
+def _print_value(name, ty, obj="Obj"):
+    """C++ statement printing ``<obj>.name`` as 'name v0 v1 ...' (nan / inf spelled out)."""
+    ref = f"{obj}.{name}"
     if isinstance(ty, TagType):
         return f'PvS("{name}", {ref}.ToString());'
     if ty is FLOAT:
@@ -265,13 +265,20 @@ def make_driver(module: ir.Module, frames: list[dict]) -> str:
         L.append(f"\tUAnimMontage Montage_{md.name};")
         L.append(f'\tMontage_{md.name}.StubName = "{md.name}";')
         L.append(f"\tObj.DalMontage_{md.name} = &Montage_{md.name};")
+    if gen.phased:
+        L.append("\tObj.RegisterComponentTickFunctions(true);")
     L.append("\tObj.BeginPlay();" if actor else "\tObj.NativeInitializeAnimation();")
+    if not actor and gen.begin_handlers:
+        L.append("\tObj.NativeBeginPlay();")
     by_name = {i.host.arg: i for i in module.inputs if i.host and i.host.item == "action"}
     notify_inputs = {i.host.arg for i in module.inputs if i.host and i.host.item == "notify"}
     anim_notifies = set(gen.anim_notify_funcs())
     for n, f in enumerate(frames):
         L.append(f"\t// ---- frame {n}")
         L.append("\t{")
+        keep_begin = n == 0 and actor and bool(gen.begin_handlers)
+        if keep_begin:
+            L.append("\t\tconst std::vector<std::string> BeginLog = StubLog::Lines();")        # what BeginPlay did belongs to the first frame
         if "time" in f:
             L.append(f"\t\tWorld.Time = {_num(f['time'])};")
         for key, fmt in _SIMPLE.items():
@@ -337,14 +344,19 @@ def make_driver(module: ir.Module, frames: list[dict]) -> str:
                 L.append(f"\t\tInputComp.Fire(&Action_{name}, ETriggerEvent::{_TRIGGER[ev[2]]}, "
                          f"FInputActionValue({_num(c[0])}, {_num(c[1])}, {_num(c[2])}));")
         dt = _num(f["dt"])
-        L.append("\t\tStubLog::Lines().clear();")
-        if actor:
+        L.append("\t\tStubLog::Lines() = BeginLog;" if keep_begin else "\t\tStubLog::Lines().clear();")
+        if actor and gen.phased:
+            for slot_index in range(len(gen.slots)):
+                L.append(f"\t\tObj.DalRunPhase({slot_index}, {dt}f);")
+        elif actor:
             L.append(f"\t\tObj.TickComponent({dt}f, LEVELTICK_All, nullptr);")
         else:
             L.append(f"\t\tObj.NativeUpdateAnimation({dt}f);")
             L.append(f"\t\tObj.NativeThreadSafeUpdateAnimation({dt}f);")
         for call in f.get("calls", []):
             L.append(f"\t\tObj.{call}();")
+        if f.get("end_play"):
+            L.append("\t\tObj.EndPlay(EEndPlayReason::Destroyed);" if actor else "\t\tObj.NativeUninitializeAnimation();")
         L.append(f'\t\tstd::printf("FRAME {n}\\n");')
         for d in [*module.inputs, *module.states]:
             for path, ty in leaves(d.name, d.ty):
@@ -393,18 +405,21 @@ def parse_output(module: ir.Module, text: str) -> list[dict]:
             frames[-1]["__cmds__"].append((parts[1], *toks))
             continue
         name, vals = parts[0], parts[1:]
-        ty = types[name]
-        if isinstance(ty, TagType):
-            frames[-1][name] = "" if vals[0] == "-" else vals[0]
-        elif ty is FLOAT:
-            frames[-1][name] = float(vals[0])
-        elif ty is INT or isinstance(ty, EnumType):
-            frames[-1][name] = int(vals[0])
-        elif ty is BOOL:
-            frames[-1][name] = bool(int(vals[0]))
-        else:
-            frames[-1][name] = tuple(float(v) for v in vals)
+        frames[-1][name] = parse_value(types[name], vals)
     return frames
+
+
+def parse_value(ty, vals):
+    """One printed value ('v0 v1 ...') as the plain data the Python snapshot holds."""
+    if isinstance(ty, TagType):
+        return "" if vals[0] == "-" else vals[0]
+    if ty is FLOAT:
+        return float(vals[0])
+    if ty is INT or isinstance(ty, EnumType):
+        return int(vals[0])
+    if ty is BOOL:
+        return bool(int(vals[0]))
+    return tuple(float(v) for v in vals)
 
 
 def forwarding_headers(files: dict[str, str], module_name: str, extra_include: str | None) -> list[str]:

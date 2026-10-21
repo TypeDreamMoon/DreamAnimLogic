@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <limits>
 #include <string>
 #include <type_traits>
@@ -107,6 +108,11 @@ struct TArray
 
 template <class T>
 T&& MoveTemp(T& Object) { return static_cast<T&&>(Object); }
+
+template <class Signature>
+using TFunction = std::function<Signature>;
+
+using FString = std::string;
 
 struct FCriticalSection
 {

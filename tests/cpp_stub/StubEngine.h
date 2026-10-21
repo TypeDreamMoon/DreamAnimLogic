@@ -13,6 +13,7 @@
 
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -137,6 +138,43 @@ public:
 	virtual ~UObject() = default;
 	uint32 GetUniqueID() const { return StubId; }
 	uint32 StubId = 0;
+};
+
+// ---- tick functions -----------------------------------------------------------------------------------------------
+// FTickFunction / FActorComponentTickFunction as far as the generated tick-slot code uses them: the setup fields,
+// prerequisites, registration state and the ExecuteTick entry point.
+namespace ENamedThreads
+{
+	enum Type : int
+	{
+		GameThread,
+	};
+}
+using FGraphEventRef = std::shared_ptr<int>;
+
+struct FTickFunction
+{
+	bool bCanEverTick = false;
+	bool bStartWithTickEnabled = true;
+	ETickingGroup TickGroup = TG_PrePhysics;
+	bool bStubRegistered = false;
+	std::vector<std::pair<const UObject*, const FTickFunction*>> StubPrerequisites;
+
+	virtual ~FTickFunction() = default;
+	void AddPrerequisite(UObject* TargetObject, FTickFunction& TargetTickFunction) { StubPrerequisites.push_back({TargetObject, &TargetTickFunction}); }
+	bool IsTickFunctionRegistered() const { return bStubRegistered; }
+	void UnRegisterTickFunction() { bStubRegistered = false; }
+	virtual void ExecuteTick(float, ELevelTick, ENamedThreads::Type, const FGraphEventRef&) {}
+	virtual FString DiagnosticMessage() { return FString(); }
+};
+
+struct FActorComponentTickFunction : public FTickFunction
+{
+	template <class Fn>
+	static void ExecuteTickHelper(UObject* /*Target*/, bool /*bTickInEditor*/, float DeltaTime, ELevelTick /*TickType*/, Fn&& Function)
+	{
+		Function(DeltaTime);
+	}
 };
 
 template <class T>
@@ -282,6 +320,7 @@ class UInputComponent : public UObject
 class AController : public UObject
 {
 public:
+	FTickFunction PrimaryActorTick;
 	virtual void SetControlRotation(const FRotator& NewRotation)
 	{
 		StubLog::Emit("set_control_rotation", {NewRotation.Pitch, NewRotation.Yaw, NewRotation.Roll});
@@ -313,6 +352,7 @@ public:
 class UCharacterMovementComponent : public UObject
 {
 public:
+	FActorComponentTickFunction PrimaryComponentTick;
 	FVector Velocity;
 	TEnumAsByte<EMovementMode> MovementMode;
 	FLoggedFloat MaxWalkSpeed{"set_max_walk_speed"};
@@ -562,8 +602,10 @@ public:
 	virtual APawn* TryGetPawnOwner() const { return StubPawn; }
 	UWorld* GetWorld() const { return StubWorld; }
 	virtual void NativeInitializeAnimation() {}
+	virtual void NativeBeginPlay() {}
 	virtual void NativeUpdateAnimation(float) {}
 	virtual void NativeThreadSafeUpdateAnimation(float) {}
+	virtual void NativeUninitializeAnimation() {}
 
 	float Montage_Play(UAnimMontage* MontageToPlay, float InPlayRate = 1.0f)
 	{
@@ -604,14 +646,9 @@ private:
 class USkeletalMeshComponent : public UObject
 {
 public:
+	FActorComponentTickFunction PrimaryComponentTick;
 	UAnimInstance* StubAnim = nullptr;
 	UAnimInstance* GetAnimInstance() const { return StubAnim; }
-};
-
-struct FActorComponentTickFunction
-{
-	bool bCanEverTick = false;
-	ETickingGroup TickGroup = TG_DuringPhysics;
 };
 
 class UActorComponent : public UObject
@@ -626,6 +663,8 @@ public:
 	virtual void BeginPlay() {}
 	virtual void EndPlay(const EEndPlayReason::Type) {}
 	virtual void TickComponent(float, ELevelTick, FActorComponentTickFunction*) {}
+	virtual void RegisterComponentTickFunctions(bool) {}
+	bool SetupActorComponentTickFunction(FTickFunction* TickFunction) { TickFunction->bStubRegistered = true; return true; }
 };
 
 struct UGameplayStatics

@@ -186,6 +186,8 @@ def run_interpreter(module: ir.Module, frames: list[dict], **params) -> list[dic
         it.update(f["dt"])
         for name in f.get("calls", []):
             it.call_entry(name)
+        if f.get("end_play"):
+            it.end_play()
         out.append(_snapshot(it, host))
     return out
 
@@ -201,6 +203,8 @@ def run_python(module: ir.Module, frames: list[dict], source: str | None = None,
         obj.update(f["dt"])
         for name in f.get("calls", []):
             obj.call_entry(name)
+        if f.get("end_play") and hasattr(obj, "end_play"):
+            obj.end_play()
         out.append(_snapshot(obj, host))
     return out
 
@@ -288,6 +292,12 @@ def run_system(modules: dict[str, ir.Module], frames: list[dict], backend: str =
             if p.logic in objs:
                 objs[n].connect(p.name, objs[p.logic])
     steps = schedule or default_schedule(modules)
+    # the engine begins play before the first tick, once every logic exists: actor logics first, then the animation instances
+    for n in sorted(modules, key=lambda k: modules[k].kind != "actor"):
+        begin = getattr(objs[n], "begin_play", None)
+        if begin is not None:
+            hosts[n].load(frames[0] if frames else {})
+            begin()
     out = []
     for f in frames:
         for n in modules:
