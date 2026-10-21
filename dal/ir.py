@@ -120,6 +120,12 @@ class Valid(Expr):
 
 
 @dataclass
+class PeerValid(Expr):
+    """valid(Peer): the peer logic is there (connected)."""
+    peer: str
+
+
+@dataclass
 class CurveEval(Expr):
     """curve.eval(x) / curve3.eval(x): a float, or a vec3 for a vector curve; an unset curve gives zero."""
     curve: Expr
@@ -498,6 +504,40 @@ class Module:
     def find_method(self, name: str) -> "MethodDef | None":
         return next((x for x in self.methods if x.name == name), None)
 
+    def input_reads(self, bodies: list[list[Stmt]]) -> set[str]:
+        """The inputs the statements read, the methods and views they call included."""
+        reads: set[str] = set()
+        called: set[str] = set()
+        todo = list(bodies)
+        while todo:
+            for e in walk_stmt_exprs(todo.pop()):
+                if isinstance(e, InputRef):
+                    reads.add(e.name)
+                elif isinstance(e, (CallMethod, CallView)) and e.name not in called:
+                    called.add(e.name)
+                    x = self.find_method(e.name)
+                    if x is not None:
+                        todo.append(x.body)
+        return reads
+
+    def consume_slots(self) -> tuple[str, ...] | None:
+        """For an actor logic with several tick slots and consume-on-read host inputs (the pre-penetration velocity): the slots whose block reads
+        them, when that is not every slot.  Sampling them at the start of every slot would hand the value to the first block, whether it reads it
+        or not: they are sampled in these slots only.  None: nothing to restrict."""
+        from .hostapi import HOST_ITEMS
+
+        slots = [u.phase for u in self.updates] or [self.default_phase]
+        consume = {i.name for i in self.inputs if i.host is not None and HOST_ITEMS[i.host.item].consume}
+        if len(slots) < 2 or not consume:
+            return None
+        events = [h.body for h in self.handlers if h.event not in ("begin_play", "end_play")]
+        reading: list[str] = []
+        for k, u in enumerate(self.updates):
+            bodies = [u.body, u.pre] + (events if k == 0 or self.slot_events else [])
+            if self.input_reads(bodies) & consume:
+                reading.append(u.phase)
+        return tuple(reading) if len(reading) < len(slots) else None
+
     def find_peer(self, name: str) -> "PeerDef | None":
         return next((p for p in self.peers if p.name == name), None)
 
@@ -654,6 +694,8 @@ def dump_expr(e: Expr) -> str:
         return f"extern:{e.name}({', '.join(dump_expr(a) for a in e.args)})"
     if isinstance(e, Valid):
         return f"valid({dump_expr(e.x)})"
+    if isinstance(e, PeerValid):
+        return f"valid(peer:{e.peer})"
     if isinstance(e, CurveEval):
         return f"{dump_expr(e.curve)}.eval({dump_expr(e.x)})"
     if isinstance(e, Index):

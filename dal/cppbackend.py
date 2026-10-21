@@ -381,6 +381,8 @@ class CppExprGen:
             return f"{ext.cpp}({', '.join(unparen(self.x(a)) for a in e.args)})"  # type: ignore[union-attr]
         if k is ir.HostQuery:
             return f"{query_cpp(e.name)}({', '.join(unparen(self.x(a)) for a in e.args)})"
+        if k is ir.PeerValid:
+            return f"({e.peer} != nullptr)"
         if k is ir.Valid:
             if e.x.ty.is_asset:
                 return f"{self.x(e.x)}.bIsValid" if e.x.ty.by_value else f"IsValid({unparen(self.x(e.x))})"
@@ -706,6 +708,7 @@ class CppGen:
         self.begin_handlers = [k for k, h in enumerate(module.handlers) if h.event == "begin_play"]
         self.end_handlers = [k for k, h in enumerate(module.handlers) if h.event == "end_play"]
         self.phased = module.phases_explicit or len(module.updates) > 1
+        self.consume_only = module.consume_slots() if self.phased else None   # the slots that sample the consume-on-read inputs (None: all)
         self.slots = [u.phase for u in module.updates] or [module.default_phase]
         self.queue_target = module.kind == "anim" and any(x.pub and not x.is_view for x in module.methods)
         self.has_cmds = bool(self.cmds)
@@ -1146,7 +1149,7 @@ class CppGen:
             rp.append(f"{T}DalBindHost();")
         if any(q.startswith("target_") for q in self.queries):
             rp.append(f"{T}bDalTargetsFresh = false;")
-        rp.append(f"{T}DalSampleInputs();")
+        rp.append(f"{T}DalSampleInputs({'Phase' if self.consume_only is not None else ''});")
         if self.has_events:
             if self.m.slot_events:
                 rp.append(f"{T}DalTakeEvents();                                  // slot_events: what was raised since the slot before is handled in this one")
@@ -2226,7 +2229,7 @@ class CppGen:
                 L.append("")
         L.append("protected:")
         L.append(f"{T}/** Game thread: read the host into the input properties. */")
-        L.append(f"{T}void DalSampleInputs();")
+        L.append(f"{T}void DalSampleInputs(const int32 Phase = -1);" if self.consume_only is not None else f"{T}void DalSampleInputs();")
         L.append("")
         if not self.phased:
             queued = " (host commands are queued)" if (not self.actor and self.has_cmds) else ""
@@ -2796,7 +2799,7 @@ class CppGen:
 
     def host_sample(self) -> list[str]:
         m = self.m
-        L = [f"void {self.cls}::DalSampleInputs()", "{"]
+        L = [f"void {self.cls}::DalSampleInputs(" + ("[[maybe_unused]] const int32 Phase" if self.consume_only is not None else "") + ")", "{"]
         host = self.host_items()
         if not host:
             L.append(f"{T}// (no host-bound inputs)")
@@ -2814,10 +2817,15 @@ class CppGen:
         if self.uses(*_CAPSULE_ITEMS):
             L.append(f"{T}const UCapsuleComponent* Capsule = IsValid(Character) ? Character->GetCapsuleComponent() : nullptr;")
         if self.uses(*_CONSUME_ITEMS):
+            gate = ""
+            if self.consume_only is not None:                                 # tick slots that do not read it leave it to the ones that do
+                slots = " || ".join(f"Phase == {self.slots.index(s)}" for s in self.consume_only)
+                L.append(f"{T}const bool bDalConsume = Phase < 0 || {slots};")
+                gate = "bDalConsume && "
             L += [f"{T}// consume-on-read: the movement component hands the pre-penetration velocity out once (DalRuntime)",
                   f"{T}FVector DalPrePenetration = FVector::ZeroVector;",
                   f"{T}bool bDalPrePenetration = false;",
-                  f"{T}if (UDalCharacterMovementComponent* DalMovement = IsValid(Character) ? Cast<UDalCharacterMovementComponent>(Character->GetCharacterMovement()) : nullptr)",
+                  f"{T}if (UDalCharacterMovementComponent* DalMovement = {gate}IsValid(Character) ? Cast<UDalCharacterMovementComponent>(Character->GetCharacterMovement()) : nullptr)",
                   f"{T}{{",
                   f"{T}{T}bDalPrePenetration = DalMovement->TryConsumePrePenetrationAdjustmentVelocity(DalPrePenetration);",
                   f"{T}}}"]
@@ -2873,11 +2881,12 @@ class CppGen:
             if it == "ref_path_child_translation":
                 L.append(f'{T}{name} = DalRefPathChildTranslation(FName(TEXT("{h.arg}")), FName(TEXT("{h.arg2}")));')
                 continue
-            if it == "pre_penetration_velocity":
-                L.append(f"{T}{name} = FVector3f(DalPrePenetration);")
-                continue
-            if it == "pre_penetration_velocity_valid":
-                L.append(f"{T}{name} = bDalPrePenetration;")
+            if it in ("pre_penetration_velocity", "pre_penetration_velocity_valid"):
+                value = f"FVector3f(DalPrePenetration)" if it == "pre_penetration_velocity" else "bDalPrePenetration"
+                if self.consume_only is not None:
+                    L += [f"{T}if (bDalConsume)", f"{T}{{", f"{T}{T}{name} = {value};", f"{T}}}"]
+                else:
+                    L.append(f"{T}{name} = {value};")
                 continue
             if it.startswith("montage_"):
                 slot = f"DalMontage_{h.arg}"

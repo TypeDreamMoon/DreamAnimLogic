@@ -171,6 +171,7 @@ class Checker:
         self.allow_settings_param = False                 # the next name read is the base of a member access
         self.interface_only = False                       # stop after the declarations (the checker run for a peer's interface)
         self.loop_depth = 0                               # how many loops enclose the statement being checked (`break` needs one)
+        self.settings_init = False                        # the default of a settings member is being folded (it may build a settings value)
         self.method_sigs: dict[str, MethodSig] = {}
         self.entry_sigs: dict[int, list[ir.EntryParam]] = {}      # id(EntryDecl) -> its typed parameters
         self.method_calls: dict[str, list[str]] = {}      # call graph of methods and views (recursion check)
@@ -924,7 +925,11 @@ class Checker:
                 continue
             for f in st.fields:
                 if isinstance(f.ty, StructType) and f.ty.is_settings and not f.derived and f.default is not None:
-                    f.default = values.default_of(f.ty)
+                    if f.init_expr is not None:
+                        folded = self.fold(*f.init_expr)                        # built by the declaration: with the same arguments, now that the derived members are known
+                        f.default = values.default_of(f.ty) if folded is None else folded
+                    else:
+                        f.default = values.default_of(f.ty)
 
     def ensure_defaults(self, st: StructType) -> None:
         """Fold the declared member defaults of a struct (its nested structs first); idempotent."""
@@ -949,7 +954,11 @@ class Checker:
             if fd.init is not None and (isinstance(f.ty, (MapType, ArrayType)) or f.ty is CURVE or f.ty is CURVE3):
                 self.err("DAL4052", f"member '{f.name}' of {st.kind} {st.name}: a {f.ty} has no initial value in the declaration (it comes from the data)", fd.pos)
                 continue
-            f.default = self.const_value(fd.init, f.ty, fd.pos, f"member '{f.name}' of {st.kind} {st.name}")
+            self.settings_init = st.kind == "settings"                  # the default of a settings member may build a nested settings value
+            try:
+                f.default = self.const_value(fd.init, f.ty, fd.pos, f"member '{f.name}' of {st.kind} {st.name}", keep=f)
+            finally:
+                self.settings_init = False
         st.defaults_ready = True
         self.folding.discard(st.name)
         self.source = saved
@@ -1046,8 +1055,8 @@ class Checker:
             self.ensure_defaults(ty)
         return zero_value(ty)
 
-    def const_value(self, init: S.Expr | None, ty: Type, pos: Pos, what: str):
-        """Value of a ``= init`` clause (or the zero value)."""
+    def const_value(self, init: S.Expr | None, ty: Type, pos: Pos, what: str, keep: FieldDef | None = None):
+        """Value of a ``= init`` clause (or the zero value).  ``keep`` is the member the clause belongs to: it remembers the expression of a settings value."""
         if init is None:
             return self.zero(ty)
         sc = Scope("const")
@@ -1055,6 +1064,8 @@ class Checker:
         e = self.assignable(ty, e, init.pos, what)
         if ty is ERROR or e.ty is ERROR:
             return 0
+        if keep is not None and isinstance(ty, StructType) and ty.is_settings:
+            keep.init_expr = (e, init.pos)
         v = self.fold(e, init.pos)
         return self.zero(ty) if v is None else v
 
@@ -2162,10 +2173,16 @@ class Checker:
                 return ir.Binary(INT, op, a, b) if both_int else ir.Binary(FLOAT, op, self.widen(a), self.widen(b))
             if ta is tb and ta.is_vector:
                 return ir.Binary(ta, op, a, b)
+            if ta is ROTATOR and tb is ROTATOR:
+                return ir.Binary(ROTATOR, op, a, b)                      # component-wise, as FRotator's operators (no normalisation)
             return fail()
         if op == "*":
             if num:
                 return ir.Binary(INT, op, a, b) if both_int else ir.Binary(FLOAT, op, self.widen(a), self.widen(b))
+            if ta is ROTATOR and tb.is_numeric:
+                return ir.Binary(ROTATOR, op, a, self.widen(b))
+            if ta.is_numeric and tb is ROTATOR:
+                return ir.Binary(ROTATOR, op, b, self.widen(a))          # scalar * rotator is the rotator scaled (FRotator has the one operator*)
             if ta is tb and ta.is_vector:
                 return ir.Binary(ta, op, a, b)
             if ta.is_vector and tb.is_numeric:
@@ -2238,6 +2255,11 @@ class Checker:
     # ---- calls -----------------------------------------------------------------------------------------------------------------------
     def call(self, e: S.CallExpr, sc: Scope) -> ir.Expr:
         name = e.callee
+        if (name == "valid" and name not in self.globals and len(e.args) == 1 and isinstance(e.args[0], S.NameRef) and sc.lookup(e.args[0].name) is None
+                and e.args[0].name in self.globals and self.globals[e.args[0].name].kind == "peer"):
+            if sc.ctx in ("fn", "const"):
+                return self.bad("DAL5042", "valid(peer) looks at the other logics of the actor: use it in update, an entry, a method, a view or a handler", e.pos)
+            return ir.PeerValid(BOOL, e.args[0].name) if e.args[0].name in self.peer_ifaces else ir.Lit(ERROR, 0)       # (an unloadable peer was reported)
         args = [self.ex(a, sc) for a in e.args]
         if any(a.ty is ERROR for a in args):
             return ir.Lit(ERROR, 0)
@@ -2410,8 +2432,9 @@ class Checker:
         return ir.CallPeer(ret if ret is not None else VOID, peer, e.name, conv, queued)
 
     def make_struct(self, e: S.CallExpr, st: StructType, args: list[ir.Expr], sc: Scope) -> ir.Expr:
-        if st.kind == "settings":
-            return self.bad("DAL5004", f"{st.name} is a settings type: its values come from a param or from a member of another settings value, not from code", e.pos)
+        if st.kind == "settings" and not self.settings_init:
+            return self.bad("DAL5004", f"{st.name} is a settings type: its values come from a param or from a member of another settings value, not from code "
+                                       f"(only the declaration of a settings member may build one: Inner: {st.name} = {st.name}(Member: value);)", e.pos)
         names = e.names or [None] * len(args)
         if any(n is None for n in names):
             return self.bad("DAL4054", f"build a struct with named arguments: {st.name}(member: value, ...), not positional ones", e.pos)

@@ -179,6 +179,8 @@ class PyGen:
                 return f"self._peer_call({e.peer!r}, {e.method!r}, {args}, None, {e.queued})"
             default = py_value(e.ty, zero_value(e.ty))
             return f"{py_coercer(e.ty)}(self._peer_call({e.peer!r}, {e.method!r}, {args}, {default}))"
+        if k is ir.PeerValid:
+            return f"(self.peers.get({e.peer!r}) is not None)"
         if k is ir.MakeStruct:
             return f"{e.ty.name}(" + ", ".join(f"{n}={self.val(v)}" for n, v in e.fields) + ")"
         if k is ir.Member:
@@ -552,7 +554,8 @@ class PyGen:
         for s in m.states:
             L.append(f"{INDENT*2}self.{s.name} = {py_value(s.ty, s.default)}")
         L.append("")
-        L.append(f"{INDENT}def _sample(self):")
+        only = m.consume_slots()
+        L.append(f"{INDENT}def _sample(self" + (", phase=None" if only is not None else "") + "):")
         L.append(f'{INDENT*2}"""Read the host-bound and peer-bound inputs (a frame snapshot); overrides win over both."""')
         bound = [i for i in m.inputs if i.host]
         peered = [i for i in m.inputs if i.peer]
@@ -579,7 +582,10 @@ class PyGen:
                 conv = _AS[i.ty]
                 L.append(f"{INDENT*2}if {i.name!r} in ov:")
                 L.append(f"{INDENT*3}self.{i.name} = {conv}(ov[{i.name!r}])")
-                L.append(f"{INDENT*2}else:")
+                if only is not None:                              # the slots whose block does not read it leave it to the ones that do
+                    L.append(f"{INDENT*2}elif phase is None or phase in {tuple(only)!r}:")
+                else:
+                    L.append(f"{INDENT*2}else:")
                 L.append(f"{INDENT*3}if c_{spec.consume} is None:")
                 L.append(f"{INDENT*4}c_{spec.consume} = h.{spec.consume}()")
                 L.append(f"{INDENT*3}self.{i.name} = {conv}(c_{spec.consume}[{spec.part}])")
@@ -617,7 +623,7 @@ class PyGen:
         L.append("")
 
         # ---- the update: one block (as in every earlier version) or one block per tick slot
-        def block_lines(u, first: bool, depth: int) -> list[str]:
+        def block_lines(u, first: bool, depth: int, phase_name: str | None = None) -> list[str]:
             """sample, [peer queue, events, timers, handlers], body, flush -- the steps of one update block."""
             pad = INDENT * depth
             dt = u.dt_name if u is not None else "dt"
@@ -625,7 +631,7 @@ class PyGen:
             if any(h.event == "begin_play" for h in lifecycle):
                 out.append(f"{pad}if not self._begun:")
                 out.append(f"{pad}{INDENT}self.begin_play()")
-            out.append(f"{pad}self._sample()")
+            out.append(f"{pad}self._sample({phase_name!r})" if phase_name is not None and m.consume_slots() is not None else f"{pad}self._sample()")
             if first and queue_target:
                 out.append(f"{pad}self._drain_peer_calls()")
             if (first or m.slot_events) and event_handlers:
@@ -666,7 +672,7 @@ class PyGen:
             for k, (u, name) in enumerate(zip(slots, slot_names)):
                 L.append(f"{INDENT}def _u_{name}(self, {u.dt_name if u is not None else 'dt'}):")
                 L.append(f"{INDENT*2}# update in {name}")
-                L.extend(block_lines(u, k == 0, 2))
+                L.extend(block_lines(u, k == 0, 2, name))
                 L.append("")
         # ---- lifecycle
         if any(h.event == "begin_play" for h in lifecycle):

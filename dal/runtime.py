@@ -131,6 +131,18 @@ class Rotator(tuple):
     yaw = property(lambda s: s[1])
     roll = property(lambda s: s[2])
 
+    # FRotator arithmetic is component-wise and does not normalise: the results are the sums and differences of the angles
+    def __add__(self, o):
+        return Rotator(self[0] + o[0], self[1] + o[1], self[2] + o[2])
+
+    def __sub__(self, o):
+        return Rotator(self[0] - o[0], self[1] - o[1], self[2] - o[2])
+
+    def __mul__(self, s):
+        return Rotator(self[0] * s, self[1] * s, self[2] * s)
+
+    __rmul__ = __mul__
+
     def __repr__(self):
         return f"Rotator({self[0]!r}, {self[1]!r}, {self[2]!r})"
 

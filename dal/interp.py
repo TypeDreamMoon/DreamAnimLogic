@@ -155,6 +155,10 @@ class Evaluator:
             if self.owner is None:
                 raise InterpError("peer calls need a running logic")
             return self.owner.peer_call(e, [self.ev(a, env) for a in e.args])
+        if k is ir.PeerValid:
+            if self.owner is None:
+                raise InterpError("peer queries need a running logic")
+            return self.owner.peers.get(e.peer) is not None
         if k is ir.MakeStruct:
             return vals.new_struct(e.ty, {n: vals.copy_value(self.ev(v, env)) for n, v in e.fields})
         if k is ir.MontageRef:
@@ -430,9 +434,10 @@ class Interpreter:
             raise InterpError(f"{name!r} is not a free input")
         self.values[name] = coerce(d.ty, value)
 
-    def sample_inputs(self) -> None:
+    def sample_inputs(self, phase: str | None = None) -> None:
         h = self.host
         consumed: dict = {}                      # consume-on-read groups: one call to the host per sample
+        only = self.module.consume_slots()       # the tick slots that sample the consume-on-read inputs (None: all of them)
         for i in self.module.inputs:
             if i.peer is not None:
                 if i.name in self.overrides:
@@ -456,6 +461,8 @@ class Interpreter:
             item = i.host.item
             spec = HOST_ITEMS[item]
             if spec.consume:
+                if phase is not None and only is not None and phase not in only:
+                    continue                     # a slot whose block does not read it leaves it to the one that does
                 if spec.consume not in consumed:
                     consumed[spec.consume] = getattr(h, spec.consume)()
                 raw = consumed[spec.consume][spec.part]
@@ -519,7 +526,7 @@ class Interpreter:
         if u is None and not first:
             return
         self._ensure_begun()
-        self.sample_inputs()
+        self.sample_inputs(phase)
         self._dt = float(dt)
         events: list[tuple] = []
         if first:

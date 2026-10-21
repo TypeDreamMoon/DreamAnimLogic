@@ -185,6 +185,7 @@ class FieldDef:
     default: object = None
     derived: bool = False
     expr: object = None
+    init_expr: object = None         # a settings member built by its declaration (Inner: A = A(X: 2.0)): the expression, folded again when the defaults are rebuilt
 
 
 class StructType(Type):
