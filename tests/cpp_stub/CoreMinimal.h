@@ -191,6 +191,7 @@ using FRotator = UE::Math::TRotator<double>;
 using FQuat4f = UE::Math::TQuat<float>;
 using FQuat = UE::Math::TQuat<double>;
 using FTransform3f = UE::Math::TTransform<float>;
+using FTransform = UE::Math::TTransform<double>;
 
 struct FMath
 {
@@ -614,6 +615,8 @@ namespace UE::Math
 		TVector<T> Translation;
 		TVector<T> Scale3D{(T)1, (T)1, (T)1};
 		TTransform() = default;
+		template <class U, class = std::enable_if_t<!std::is_same_v<T, U>>>
+		explicit TTransform(const TTransform<U>& Other) : Rotation(Other.Rotation), Translation(Other.Translation), Scale3D(Other.Scale3D) {}
 		TTransform(const TQuat<T>& InRotation, const TVector<T>& InTranslation, const TVector<T>& InScale3D = TVector<T>((T)1, (T)1, (T)1))
 			: Rotation(InRotation), Translation(InTranslation), Scale3D(InScale3D) {}
 		TVector<T> GetLocation() const { return Translation; }

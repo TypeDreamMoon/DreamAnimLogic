@@ -41,6 +41,7 @@ class MockHost(HostV1):
         self._actions: dict = {}
         self._notifies: dict = {}
         self._curves: dict = {}                  # scripted animation curve values: name -> value
+        self.primitives: dict[str, dict] = {}    # scripted properties of the scene's shapes: name -> {speed, can_step_up, transform}
 
     # ---- reads ---------------------------------------------------------------------------------------------------------
     def action(self, name, ty):
@@ -95,22 +96,84 @@ class MockHost(HostV1):
     def trace_sphere(self, start, end, radius):
         return self._trace(rt.as_vec3(start), rt.as_vec3(end), float(radius))
 
-    def _trace(self, a, b, radius):
-        """Earliest hit of the segment a->b (a sphere of ``radius`` swept along it) with the ground plane and the spheres."""
+    def line_trace(self, start, end, channel):
+        return self._trace(rt.as_vec3(start), rt.as_vec3(end), 0.0)
+
+    def sweep_sphere(self, start, end, radius, channel, responses):
+        return self._trace(rt.as_vec3(start), rt.as_vec3(end), float(radius))
+
+    def sweep_capsule(self, start, end, radius, half_height, channel, responses):
+        return self._trace(rt.as_vec3(start), rt.as_vec3(end), float(radius), float(half_height))
+
+    def overlap_capsule(self, center, radius, half_height, channel, responses):
+        c = rt.as_vec3(center)
+        for off in self._axis_offsets(float(radius), float(half_height)):
+            s = rt.Vec3(c.x, c.y, c.z + off)
+            if self.ground_z is not None and abs(s.z - self.ground_z) < radius:
+                return True
+            for sc, sr in self.spheres:
+                f = s - rt.as_vec3(sc)
+                if rt.dot(f, f) < (sr + radius) ** 2:
+                    return True
+        return False
+
+    # the scene's shapes have names: the ground plane is "Ground", the spheres "Sphere0", "Sphere1", ...; self.primitives scripts their properties
+    def primitive_valid(self, primitive):
+        return primitive is not None
+
+    def primitive_speed(self, primitive):
+        return float(self.primitives.get(primitive, {}).get("speed", 0.0))
+
+    def primitive_can_step_up(self, primitive):
+        return primitive is not None and bool(self.primitives.get(primitive, {}).get("can_step_up", True))
+
+    def primitive_transform(self, primitive):
+        return rt.as_transform(self.primitives.get(primitive, {}).get("transform", rt.Transform()))
+
+    @staticmethod
+    def _axis_offsets(radius, half_height):
+        """Heights of the spheres that stand for the shape: one for a sphere or a line, bottom / middle / top cap for a capsule."""
+        reach = half_height - radius
+        return (0.0,) if reach <= 0.0 else (-reach, 0.0, reach)
+
+    def _trace(self, a, b, radius, half_height=0.0):
+        """Earliest hit of the segment a->b with the scene: a shape (a sphere of ``radius``, or a capsule standing for three of them) swept
+        along it against the ground plane and the spheres.  A shape that starts inside something hits at time 0 (start_penetrating)."""
         d = b - a
         length = rt.length(d)
-        best = None                                   # (t, point, normal)
-        if self.ground_z is not None and d.z != 0.0:
-            gz = self.ground_z + (radius if a.z >= self.ground_z else -radius)
-            t = (gz - a.z) / d.z
-            if 0.0 <= t <= 1.0:
-                p = a + d * t
-                n = rt.Vec3(0.0, 0.0, 1.0 if a.z >= self.ground_z else -1.0)
-                best = (t, rt.Vec3(p.x, p.y, self.ground_z), n)
-        for center, r in self.spheres:
+        best = None                                   # (t, point, normal, primitive, penetrating)
+        for off in self._axis_offsets(radius, half_height):
+            hit = self._trace_one(rt.Vec3(a.x, a.y, a.z + off), d, radius)
+            if hit is not None and (best is None or hit[0] < best[0]):
+                best = hit
+        if best is None:
+            return rt.Hit(False, b, rt.VEC3_ZERO, 0.0, 1.0, location=b)
+        t, point, normal, primitive, penetrating = best
+        return rt.Hit(True, point, normal, t * length, t, location=a + d * t, start_penetrating=penetrating, primitive=primitive, face_normal=normal)
+
+    def _trace_one(self, s, d, radius):
+        best = None
+        if self.ground_z is not None:
+            above = s.z >= self.ground_z
+            if abs(s.z - self.ground_z) < radius:
+                best = (0.0, rt.Vec3(s.x, s.y, self.ground_z), rt.Vec3(0.0, 0.0, 1.0 if above else -1.0), "Ground", True)
+            elif d.z != 0.0:
+                gz = self.ground_z + (radius if above else -radius)
+                t = (gz - s.z) / d.z
+                if 0.0 <= t <= 1.0:
+                    p = s + d * t
+                    best = (t, rt.Vec3(p.x, p.y, self.ground_z), rt.Vec3(0.0, 0.0, 1.0 if above else -1.0), "Ground", False)
+        for i, (center, r) in enumerate(self.spheres):
             c = rt.as_vec3(center)
             rr = r + radius
-            f = a - c
+            f = s - c
+            if rt.dot(f, f) < rr * rr:                # starts inside
+                n = rt.normalize(f)
+                if n == rt.VEC3_ZERO:
+                    n = rt.Vec3(0.0, 0.0, 1.0)
+                if best is None or 0.0 < best[0]:
+                    best = (0.0, c + n * r, n, f"Sphere{i}", True)
+                continue
             qa = rt.dot(d, d)
             if qa <= 0.0:
                 continue
@@ -121,13 +184,10 @@ class MockHost(HostV1):
                 continue
             t = (-qb - math.sqrt(disc)) / (2.0 * qa)
             if 0.0 <= t <= 1.0 and (best is None or t < best[0]):
-                p = a + d * t
+                p = s + d * t
                 n = rt.normalize(p - c)
-                best = (t, c + n * r, n)
-        if best is None:
-            return rt.Hit(False, b, rt.VEC3_ZERO, 0.0, 1.0)
-        t, point, normal = best
-        return rt.Hit(True, point, normal, t * length, t)
+                best = (t, c + n * r, n, f"Sphere{i}", False)
+        return best
 
     # ---- commands -------------------------------------------------------------------------------------------------------------
     def record(self, name, args):

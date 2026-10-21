@@ -96,9 +96,19 @@ enum EMovementMode : int
 
 enum ECollisionChannel : int
 {
-	ECC_WorldStatic,
-	ECC_Visibility,
-	ECC_Camera,
+	ECC_WorldStatic, ECC_WorldDynamic, ECC_Pawn, ECC_Visibility, ECC_Camera, ECC_PhysicsBody, ECC_Vehicle, ECC_Destructible,
+	ECC_EngineTraceChannel1, ECC_EngineTraceChannel2, ECC_EngineTraceChannel3, ECC_EngineTraceChannel4, ECC_EngineTraceChannel5, ECC_EngineTraceChannel6,
+	ECC_GameTraceChannel1, ECC_GameTraceChannel2, ECC_GameTraceChannel3, ECC_GameTraceChannel4, ECC_GameTraceChannel5, ECC_GameTraceChannel6,
+	ECC_GameTraceChannel7, ECC_GameTraceChannel8, ECC_GameTraceChannel9, ECC_GameTraceChannel10, ECC_GameTraceChannel11, ECC_GameTraceChannel12,
+	ECC_GameTraceChannel13, ECC_GameTraceChannel14, ECC_GameTraceChannel15, ECC_GameTraceChannel16, ECC_GameTraceChannel17, ECC_GameTraceChannel18,
+	ECC_MAX,
+};
+
+enum ECollisionResponse : int
+{
+	ECR_Ignore,
+	ECR_Overlap,
+	ECR_Block,
 };
 
 enum ETickingGroup : int
@@ -213,13 +223,21 @@ inline const FGameplayTag FGameplayTag::EmptyTag;
 // ---- the world and traces --------------------------------------------------------------------------------------
 class AActor;
 
+class UPrimitiveComponent;
+class APawn;
+
 struct FHitResult
 {
 	bool bBlockingHit = false;
+	bool bStartPenetrating = false;
+	FVector Location;
 	FVector ImpactPoint;
+	FVector Normal;
 	FVector ImpactNormal;
 	float Distance = 0.0f;
 	float Time = 1.0f;
+	TWeakObjectPtr<UPrimitiveComponent> Component;
+	UPrimitiveComponent* GetComponent() const { return Component.Get(); }
 };
 
 struct FCollisionQueryParams
@@ -230,10 +248,39 @@ struct FCollisionQueryParams
 };
 #define SCENE_QUERY_STAT(QueryName) FName(#QueryName), 0
 
+// the responses of a query: stored and accepted, the stub's scene blocks everything
+struct FCollisionResponseContainer
+{
+	ECollisionResponse Responses[ECC_MAX];
+	FCollisionResponseContainer(ECollisionResponse All = ECR_Block) { for (ECollisionResponse& R : Responses) { R = All; } }
+	void SetResponse(ECollisionChannel Channel, ECollisionResponse NewResponse) { Responses[Channel] = NewResponse; }
+};
+
+struct FCollisionResponseParams
+{
+	FCollisionResponseContainer CollisionResponse;
+	FCollisionResponseParams(ECollisionResponse DefaultResponse = ECR_Block) : CollisionResponse(DefaultResponse) {}
+};
+
 struct FCollisionShape
 {
 	float Radius = 0.0f;
-	static FCollisionShape MakeSphere(float InRadius) { FCollisionShape S; S.Radius = InRadius; return S; }
+	float HalfHeight = 0.0f;
+	static FCollisionShape MakeSphere(float InRadius) { FCollisionShape S; S.Radius = InRadius; S.HalfHeight = InRadius; return S; }
+	static FCollisionShape MakeCapsule(float InRadius, float InHalfHeight) { FCollisionShape S; S.Radius = InRadius; S.HalfHeight = InHalfHeight; return S; }
+};
+
+// a component of the stub scene: the ground plane and the spheres are primitives with scripted properties
+class UPrimitiveComponent : public UObject
+{
+public:
+	std::string StubName;
+	FVector StubVelocity;
+	bool StubCanStepUp = true;
+	FTransform StubTransform;
+	FVector GetComponentVelocity() const { return StubVelocity; }
+	FTransform GetComponentTransform() const { return StubTransform; }
+	bool CanCharacterStepUp(APawn*) const { return StubCanStepUp; }
 };
 
 class UWorld : public UObject
@@ -242,73 +289,134 @@ public:
 	double Time = 0.0;
 	double GetTimeSeconds() const { return Time; }
 
-	// the scene the stub traces against (same analytic scene as dal.mockhost.MockHost)
+	// the scene the stub traces against (same analytic scene as dal.mockhost.MockHost): the ground plane is StubPrims[0], the spheres follow
 	bool HasGround = false;
 	double GroundZ = 0.0;
 	std::vector<std::pair<FVector, double>> Spheres;
+	std::vector<UPrimitiveComponent*> StubPrims;
 	std::vector<AActor*> StubActors;
 
 	bool LineTraceSingleByChannel(FHitResult& OutHit, const FVector& Start, const FVector& End, ECollisionChannel, const FCollisionQueryParams&) const
 	{
-		return Trace(OutHit, Start, End, 0.0);
+		return Trace(OutHit, Start, End, 0.0, 0.0);
 	}
 
-	bool SweepSingleByChannel(FHitResult& OutHit, const FVector& Start, const FVector& End, const FQuat&, ECollisionChannel, const FCollisionShape& Shape, const FCollisionQueryParams&) const
+	bool SweepSingleByChannel(FHitResult& OutHit, const FVector& Start, const FVector& End, const FQuat&, ECollisionChannel, const FCollisionShape& Shape,
+	                          const FCollisionQueryParams&, const FCollisionResponseParams& = FCollisionResponseParams()) const
 	{
-		return Trace(OutHit, Start, End, Shape.Radius);
+		return Trace(OutHit, Start, End, Shape.Radius, Shape.HalfHeight);
+	}
+
+	bool OverlapBlockingTestByChannel(const FVector& Pos, const FQuat&, ECollisionChannel, const FCollisionShape& Shape, const FCollisionQueryParams&,
+	                                  const FCollisionResponseParams& = FCollisionResponseParams()) const
+	{
+		const double Reach = Shape.HalfHeight - Shape.Radius;
+		const int Count = Reach > 0.0 ? 3 : 1;
+		for (int K = 0; K < Count; ++K)
+		{
+			const double Off = Count == 1 ? 0.0 : (K == 0 ? -Reach : (K == 1 ? 0.0 : Reach));
+			const FVector S(Pos.X, Pos.Y, Pos.Z + Off);
+			if (HasGround && std::fabs(S.Z - GroundZ) < Shape.Radius) { return true; }
+			for (const auto& Sphere : Spheres)
+			{
+				const FVector F = S - Sphere.first;
+				const double Rr = Sphere.second + Shape.Radius;
+				if (F.X * F.X + F.Y * F.Y + F.Z * F.Z < Rr * Rr) { return true; }
+			}
+		}
+		return false;
 	}
 
 private:
-	bool Trace(FHitResult& Out, const FVector& A, const FVector& B, double Radius) const
+	struct FCandidate
 	{
-		const double Dx = B.X - A.X, Dy = B.Y - A.Y, Dz = B.Z - A.Z;
-		const double Length = std::sqrt(Dx * Dx + Dy * Dy + Dz * Dz);
-		bool Found = false;
-		double BestT = 0.0;
-		FVector BestPoint, BestNormal;
-		if (HasGround && Dz != 0.0)
+		bool Valid = false;
+		double T = 0.0;
+		FVector Point, Normal;
+		int Prim = 0;
+		bool Penetrating = false;
+	};
+
+	// one sphere of the swept shape against the ground plane and the spheres (the order and the strictness of dal.mockhost)
+	FCandidate TraceOne(const FVector& S, const FVector& D, double Radius) const
+	{
+		FCandidate Best;
+		if (HasGround)
 		{
-			const bool Above = A.Z >= GroundZ;
-			const double Gz = GroundZ + (Above ? Radius : -Radius);
-			const double T = (Gz - A.Z) / Dz;
-			if (T >= 0.0 && T <= 1.0)
+			const bool Above = S.Z >= GroundZ;
+			if (std::fabs(S.Z - GroundZ) < Radius)
 			{
-				Found = true;
-				BestT = T;
-				BestPoint = FVector(A.X + Dx * T, A.Y + Dy * T, GroundZ);
-				BestNormal = FVector(0.0, 0.0, Above ? 1.0 : -1.0);
+				Best = FCandidate{true, 0.0, FVector(S.X, S.Y, GroundZ), FVector(0.0, 0.0, Above ? 1.0 : -1.0), 0, true};
+			}
+			else if (D.Z != 0.0)
+			{
+				const double Gz = GroundZ + (Above ? Radius : -Radius);
+				const double T = (Gz - S.Z) / D.Z;
+				if (T >= 0.0 && T <= 1.0)
+				{
+					Best = FCandidate{true, T, FVector(S.X + D.X * T, S.Y + D.Y * T, GroundZ), FVector(0.0, 0.0, Above ? 1.0 : -1.0), 0, false};
+				}
 			}
 		}
-		for (const auto& S : Spheres)
+		for (size_t I = 0; I < Spheres.size(); ++I)
 		{
-			const FVector& C = S.first;
-			const double Rr = S.second + Radius;
-			const double Fx = A.X - C.X, Fy = A.Y - C.Y, Fz = A.Z - C.Z;
-			const double Qa = Dx * Dx + Dy * Dy + Dz * Dz;
+			const FVector& C = Spheres[I].first;
+			const double R = Spheres[I].second;
+			const double Rr = R + Radius;
+			const double Fx = S.X - C.X, Fy = S.Y - C.Y, Fz = S.Z - C.Z;
+			if (Fx * Fx + Fy * Fy + Fz * Fz < Rr * Rr)
+			{
+				const double Len = std::sqrt(Fx * Fx + Fy * Fy + Fz * Fz);
+				FVector N(0.0, 0.0, 1.0);
+				if (Len > 0.0) { N = FVector(Fx / Len, Fy / Len, Fz / Len); }
+				if (!Best.Valid || 0.0 < Best.T)
+				{
+					Best = FCandidate{true, 0.0, FVector(C.X + N.X * R, C.Y + N.Y * R, C.Z + N.Z * R), N, static_cast<int>(I) + 1, true};
+				}
+				continue;
+			}
+			const double Qa = D.X * D.X + D.Y * D.Y + D.Z * D.Z;
 			if (Qa <= 0.0) { continue; }
-			const double Qb = 2.0 * (Fx * Dx + Fy * Dy + Fz * Dz);
+			const double Qb = 2.0 * (Fx * D.X + Fy * D.Y + Fz * D.Z);
 			const double Qc = Fx * Fx + Fy * Fy + Fz * Fz - Rr * Rr;
 			const double Disc = Qb * Qb - 4.0 * Qa * Qc;
 			if (Disc < 0.0) { continue; }
 			const double T = (-Qb - std::sqrt(Disc)) / (2.0 * Qa);
-			if (T >= 0.0 && T <= 1.0 && (!Found || T < BestT))
+			if (T >= 0.0 && T <= 1.0 && (!Best.Valid || T < Best.T))
 			{
-				const double Px = A.X + Dx * T, Py = A.Y + Dy * T, Pz = A.Z + Dz * T;
+				const double Px = S.X + D.X * T, Py = S.Y + D.Y * T, Pz = S.Z + D.Z * T;
 				double Nx = Px - C.X, Ny = Py - C.Y, Nz = Pz - C.Z;
 				const double N = std::sqrt(Nx * Nx + Ny * Ny + Nz * Nz);
 				if (N > 0.0) { Nx /= N; Ny /= N; Nz /= N; }
-				Found = true;
-				BestT = T;
-				BestPoint = FVector(C.X + Nx * S.second, C.Y + Ny * S.second, C.Z + Nz * S.second);
-				BestNormal = FVector(Nx, Ny, Nz);
+				Best = FCandidate{true, T, FVector(C.X + Nx * R, C.Y + Ny * R, C.Z + Nz * R), FVector(Nx, Ny, Nz), static_cast<int>(I) + 1, false};
 			}
 		}
-		if (!Found) { return false; }
+		return Best;
+	}
+
+	bool Trace(FHitResult& Out, const FVector& A, const FVector& B, double Radius, double HalfHeight) const
+	{
+		const FVector D(B.X - A.X, B.Y - A.Y, B.Z - A.Z);
+		const double Length = std::sqrt(D.X * D.X + D.Y * D.Y + D.Z * D.Z);
+		const double Reach = HalfHeight - Radius;
+		const int Count = Reach > 0.0 ? 3 : 1;
+		FCandidate Best;
+		for (int K = 0; K < Count; ++K)
+		{
+			const double Off = Count == 1 ? 0.0 : (K == 0 ? -Reach : (K == 1 ? 0.0 : Reach));
+			const FCandidate Hit = TraceOne(FVector(A.X, A.Y, A.Z + Off), D, Radius);
+			if (Hit.Valid && (!Best.Valid || Hit.T < Best.T)) { Best = Hit; }
+		}
+		if (!Best.Valid) { return false; }
 		Out.bBlockingHit = true;
-		Out.ImpactPoint = BestPoint;
-		Out.ImpactNormal = BestNormal;
-		Out.Distance = static_cast<float>(BestT * Length);
-		Out.Time = static_cast<float>(BestT);
+		Out.bStartPenetrating = Best.Penetrating;
+		Out.Location = FVector(A.X + D.X * Best.T, A.Y + D.Y * Best.T, A.Z + D.Z * Best.T);
+		Out.ImpactPoint = Best.Point;
+		Out.ImpactNormal = Best.Normal;
+		Out.Normal = Best.Normal;
+		Out.Distance = static_cast<float>(Best.T * Length);
+		Out.Time = static_cast<float>(Best.T);
+		Out.Component = Best.Prim < static_cast<int>(StubPrims.size()) ? StubPrims[static_cast<size_t>(Best.Prim)] : nullptr;
 		return true;
 	}
 };

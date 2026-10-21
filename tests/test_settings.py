@@ -746,8 +746,9 @@ class AlsPackTests(unittest.TestCase):
         inst, rep = self.load("AlsCharacterSettings", "CS_Als_Default")
         same(self, self.data("CS_Als_Default")["props"], inst)
         self.assertEqual(rep.unresolved, [])
-        self.assertEqual(sorted(w.rsplit(".", 1)[-1].split(":")[0] for w in rep.warnings),
-                         ["MantlingTraceChannel", "MantlingTraceResponseChannels", "MantlingTraceResponses"])     # collision settings: not modelled
+        self.assertEqual(sorted(w.rsplit(".", 1)[-1].split(":")[0] for w in rep.warnings), ["MantlingTraceResponses"])     # the response container: derived from the channel list
+        self.assertEqual(inst.Mantling.MantlingTraceChannel, 3)                                                          # Channel.Visibility
+        self.assertEqual(inst.Mantling.MantlingTraceResponseChannels, (0, 1, 7))                                          # WorldStatic, WorldDynamic, Destructible
         self.assertAlmostEqual(inst.Mantling.SlopeAngleThresholdCos, math.cos(math.radians(35.0)), places=6)
         self.assertEqual(inst.InAirRotationMode, 1)
         self.assertEqual((inst.Rolling.Montage, inst.Ragdolling.GetUpFrontMontage), ("AM_Als_Roll", "AM_Als_GetUp_Front"))

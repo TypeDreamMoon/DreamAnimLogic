@@ -5,8 +5,8 @@
 // State/*.h, Settings/*.h.  Names, members and defaults follow the C++ ones so that a .dab reads Main.GroundedState.VelocityBlend...
 // and the data assets exported from the project (CS_Als_Default, AIS_Als_Default, MS_Als_*) load into the settings types below.
 //
-// Not in this sketch: collision channels and response containers (MantlingTraceChannel, ...ResponseChannels, ...Responses --
-// the loader reports them as ignored members) and the camera settings.  The easing option of the mantling settings is the built-in
+// Not in this sketch: the response containers (MantlingTraceResponses, GroundPredictionSweepResponses -- the loader reports them as
+// ignored members; the channel lists they are computed from are declared) and the camera settings.  The easing option of the mantling settings is the built-in
 // BlendOption (EAlphaBlendOption).
 
 // ---- gameplay tags (AlsGameplayTags.h) ------------------------------------------------------------------------------
@@ -188,6 +188,8 @@ settings AlsGeneralMantlingSettings {
     derived SlopeAngleThresholdCos: float = cos(deg_to_rad(SlopeAngleThreshold));       // recomputed after loading (AlsMantlingSettings.cpp:9)
     TargetPrimitiveSpeedThreshold: float = 10.0;
     MantlingHighHeightThreshold: float = 125.0;
+    MantlingTraceChannel: Channel = Channel.Visibility;                                  // the pack also has the response container (ignored: it is derived from this list)
+    MantlingTraceResponseChannels: channel_set;
     GroundedTrace: AlsMantlingTraceSettings;
     InAirTrace: AlsMantlingTraceSettings;
     BlendOutDuration: float = 0.3;
@@ -280,7 +282,12 @@ settings AlsStandingAnimationSettings {
     PivotActivationSpeedThreshold: float = 200.0;
 }
 settings AlsCrouchingAnimationSettings { AnimatedCrouchSpeed: float = 150.0; StrideBlendAmountCurve: curve; }
-settings AlsInAirAnimationSettings { LeanAmountCurve: curve; GroundPredictionAmountCurve: curve; }
+settings AlsInAirAnimationSettings {
+    LeanAmountCurve: curve;
+    GroundPredictionAmountCurve: curve;
+    GroundPredictionSweepChannel: Channel = Channel.Visibility;
+    GroundPredictionResponseChannels: channel_set;
+}
 settings AlsFootLockAnimationSettings { bAllowFootLock: bool = true; ThighAngleLimit: float = 110.0; FootAngleLimit: float = 110.0; }
 settings AlsTransitionsAnimationSettings {
     QuickStopBlendInDuration: float = 0.1;

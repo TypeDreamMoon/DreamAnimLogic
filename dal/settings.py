@@ -162,7 +162,7 @@ def _snake(name: str) -> str:
     return s.lower()
 
 
-_ENUM_PREFIX = re.compile(r"^.*::")
+_ENUM_PREFIX = re.compile(r"^(.*::|EC[CR]_)")
 
 
 class _Loader:
@@ -242,6 +242,8 @@ class _Loader:
         if kind == "array":
             if v is None:
                 return ()
+            if isinstance(v, dict) and isinstance(desc[1], tuple) and desc[1][:2] == ("enum", "Channel"):
+                v = [k for k, x in v.items() if str(x).endswith("Block")]       # a collision response container: the channels that block
             if not isinstance(v, (list, tuple)):
                 raise SettingsError(f"{path}: expected a list, got {type(v).__name__}")
             return tuple(self.decode(desc[1], x, f"{path}[{i}]") for i, x in enumerate(v))

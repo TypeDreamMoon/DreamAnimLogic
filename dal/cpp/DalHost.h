@@ -15,6 +15,8 @@
 
 #include "CoreMinimal.h"
 
+class UPrimitiveComponent;
+
 #define DAL_HOST_VERSION 1
 
 namespace DalHost
@@ -220,7 +222,9 @@ namespace DalHost
 		}
 	} // namespace Cmd
 
-	/** Result of a trace; a miss has bBlocking == false, Point == the trace end, Distance == 0 and Time == 1. */
+	/** Result of a trace; a miss has bBlocking == false, Point == Location == the trace end, Distance == 0 and Time == 1.
+	 *  Point / Normal are the ImpactPoint / ImpactNormal of the FHitResult, FaceNormal its Normal, Location the swept shape's
+	 *  center at the hit; Primitive is the component that was hit. */
 	struct FHit
 	{
 		bool bBlocking = false;
@@ -228,5 +232,9 @@ namespace DalHost
 		FVector3f Normal = FVector3f(0.0f, 0.0f, 0.0f);
 		float Distance = 0.0f;
 		float Time = 1.0f;
+		FVector3f Location = FVector3f(0.0f, 0.0f, 0.0f);
+		bool bStartPenetrating = false;
+		UPrimitiveComponent* Primitive = nullptr;
+		FVector3f FaceNormal = FVector3f(0.0f, 0.0f, 0.0f);
 	};
 } // namespace DalHost

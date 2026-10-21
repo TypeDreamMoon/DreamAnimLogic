@@ -387,6 +387,7 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
         "\tUCameraComponent Camera;",
         "\tUEnhancedInputComponent InputComp;",
         "\tAActor Targets[8];",
+        "\tUPrimitiveComponent Prims[9];",
         "\tPawn.StubMovement = &Move;",
         "\tPawn.StubCapsule = &Capsule;",
         "\tPawn.StubController = &Controller;",
@@ -459,16 +460,31 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
             for k, (tid, loc) in enumerate(f.get("targets", [])[:8]):
                 L.append(f"\t\tTargets[{k}].StubId = {int(tid)}u; Targets[{k}].StubLocation = FVector({_num(loc[0])}, {_num(loc[1])}, {_num(loc[2])}); "
                          f"World.StubActors.push_back(&Targets[{k}]);")
-            world = f.get("world", {})
-            if "ground_z" in world:
-                if world["ground_z"] is None:
-                    L.append("\t\tWorld.HasGround = false;")
-                else:
-                    L.append(f"\t\tWorld.HasGround = true; World.GroundZ = {_num(world['ground_z'])};")
-            if "spheres" in world:
-                L.append("\t\tWorld.Spheres.clear();")
-                for c, r in world["spheres"]:
-                    L.append(f"\t\tWorld.Spheres.push_back({{FVector({_num(c[0])}, {_num(c[1])}, {_num(c[2])}), {_num(r)}}});")
+        world = f.get("world", {})                                    # the scene behind the traces (an anim instance may ask it too)
+        if "ground_z" in world:
+            if world["ground_z"] is None:
+                L.append("\t\tWorld.HasGround = false;")
+            else:
+                L.append(f"\t\tWorld.HasGround = true; World.GroundZ = {_num(world['ground_z'])};")
+        if "spheres" in world:
+            L.append("\t\tWorld.Spheres.clear();")
+            L.append("\t\tWorld.StubPrims.clear();")
+            L.append('\t\tPrims[0].StubName = "Ground"; World.StubPrims.push_back(&Prims[0]);')
+            for k, (c, r) in enumerate(world["spheres"][:8]):
+                L.append(f"\t\tWorld.Spheres.push_back({{FVector({_num(c[0])}, {_num(c[1])}, {_num(c[2])}), {_num(r)}}});")
+                L.append(f'\t\tPrims[{k + 1}].StubName = "Sphere{k}"; World.StubPrims.push_back(&Prims[{k + 1}]);')
+        if world:
+            for k in range(9):                                        # every primitive starts from its defaults again
+                L.append(f"		Prims[{k}].StubVelocity = FVector(); Prims[{k}].StubCanStepUp = true; Prims[{k}].StubTransform = FTransform();")
+        for name, props in world.get("primitives", {}).items():
+            k = 0 if name == "Ground" else int(name[6:]) + 1
+            if k > 8:
+                continue
+            t = props.get("transform", ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0)))
+            L.append(f"\t\tPrims[{k}].StubVelocity = FVector({_num(props.get('speed', 0.0))}, 0.0, 0.0); "
+                     f"Prims[{k}].StubCanStepUp = {'true' if props.get('can_step_up', True) else 'false'}; "
+                     f"Prims[{k}].StubTransform = FTransform(FQuat({_num(t[1][0])}, {_num(t[1][1])}, {_num(t[1][2])}, {_num(t[1][3])}), "
+                     f"FVector({_num(t[0][0])}, {_num(t[0][1])}, {_num(t[0][2])}), FVector({_num(t[2][0])}, {_num(t[2][1])}, {_num(t[2][2])}));")
         # a notify read through host.notify(...) that fired this frame
         for name, fired in f.get("notifies", {}).items():
             if not fired or name not in notify_inputs:

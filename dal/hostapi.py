@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from . import runtime as rt
-from .types import BOOL, FLOAT, HIT, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, Type
+from .types import BOOL, CHANNEL, CHANNEL_SET, FLOAT, HIT, INT, MOVEMENT_MODE, PRIMITIVE, QUAT, ROTATOR, TRANSFORM, VEC2, VEC3, Type
 
 
 # ---- reads ---------------------------------------------------------------------------------------------------
@@ -193,6 +193,7 @@ class Query:
     ret: Type
     doc: str = ""
     ue: str = ""
+    thread_safe: bool = False       # an animation instance may ask it on its worker thread (scene queries, component reads)
 
 
 QUERIES: dict[str, Query] = {
@@ -202,6 +203,24 @@ QUERIES: dict[str, Query] = {
               "World->LineTraceSingleByChannel(Hit, Start, End, DalTraceChannel (ECC_Visibility), IgnoreOwner)"),
         Query("trace_sphere", (VEC3, VEC3, FLOAT), HIT, "sphere sweep from start to end",
               "World->SweepSingleByChannel(Hit, Start, End, FQuat::Identity, DalTraceChannel (ECC_Visibility), Sphere(Radius), IgnoreOwner)"),
+        # v3: queries with a channel and the channels that block; an animation instance may use these (the scene is read-locked in UE)
+        Query("sweep_capsule", (VEC3, VEC3, FLOAT, FLOAT, CHANNEL, CHANNEL_SET), HIT,
+              "sweep a vertical capsule (radius, half height) from start to end; only the listed channels block",
+              "World->SweepSingleByChannel(Hit, Start, End, FQuat::Identity, Channel, FCollisionShape::MakeCapsule(Radius, HalfHeight), IgnoreOwner, Responses)",
+              True),
+        Query("sweep_sphere", (VEC3, VEC3, FLOAT, CHANNEL, CHANNEL_SET), HIT, "sweep a sphere from start to end; only the listed channels block",
+              "World->SweepSingleByChannel(Hit, Start, End, FQuat::Identity, Channel, FCollisionShape::MakeSphere(Radius), IgnoreOwner, Responses)", True),
+        Query("line_trace", (VEC3, VEC3, CHANNEL), HIT, "line trace on a channel",
+              "World->LineTraceSingleByChannel(Hit, Start, End, Channel, IgnoreOwner)", True),
+        Query("overlap_capsule", (VEC3, FLOAT, FLOAT, CHANNEL, CHANNEL_SET), BOOL,
+              "does a vertical capsule at this center overlap anything that blocks (center, radius, half height)",
+              "World->OverlapBlockingTestByChannel(Center, FQuat::Identity, Channel, FCollisionShape::MakeCapsule(Radius, HalfHeight), IgnoreOwner, Responses)", True),
+        Query("is_walkable", (HIT,), BOOL, "can the character stand on what this hit touched (a blocking hit whose normal is flat enough)",
+              "CharacterMovement->IsWalkable(Hit)", True),
+        Query("primitive_valid", (PRIMITIVE,), BOOL, "is the component handle still valid", "IsValid(Component)", True),
+        Query("primitive_speed", (PRIMITIVE,), FLOAT, "speed of the component", "Component->GetComponentVelocity().Size()", True),
+        Query("primitive_can_step_up", (PRIMITIVE,), BOOL, "can the character step onto the component", "Component->CanCharacterStepUp(Pawn)", True),
+        Query("primitive_transform", (PRIMITIVE,), TRANSFORM, "world transform of the component", "Component->GetComponentTransform()", True),
         Query("target_count", (), INT, "number of targetable actors", "actors with the tag DalTargetTag (DalTarget), collected once per tick"),
         Query("target_id", (INT,), INT, "stable id of the i-th target", "AActor::GetUniqueID()"),
         Query("target_location", (INT,), VEC3, "location of the i-th target", "Actor->GetActorLocation()"),
@@ -311,6 +330,45 @@ class HostV1(HostV0):
     def trace_sphere(self, start, end, radius: float):
         """c3.collision ``world.sweep_sphere(start, end, radius, ignore=owner)`` -> ``rt.Hit`` as for ``trace_line``"""
         return rt.Hit()
+
+    # v3 queries: the channel and the blocking channels are accepted; a host without collision channels (Blender) ignores them
+    def sweep_capsule(self, start, end, radius: float, half_height: float, channel, responses):
+        """c3.collision ``world.sweep_capsule(start, end, radius, half_height, ignore=owner)`` -> ``rt.Hit`` (location, start_penetrating,
+        primitive = the shape object, face_normal)"""
+        return rt.Hit()
+
+    def sweep_sphere(self, start, end, radius: float, channel, responses):
+        """c3.collision ``world.sweep_sphere(start, end, radius, ignore=owner)`` -> ``rt.Hit`` as for ``sweep_capsule``"""
+        return rt.Hit()
+
+    def line_trace(self, start, end, channel):
+        """c3.collision ``world.line_trace(start, end, ignore=owner)`` -> ``rt.Hit`` as for ``sweep_capsule``"""
+        return rt.Hit()
+
+    def overlap_capsule(self, center, radius: float, half_height: float, channel, responses) -> bool:
+        """c3.collision ``world.overlaps_capsule(center, radius, half_height, ignore=owner)``"""
+        return False
+
+    def is_walkable(self, hit) -> bool:
+        """c3.movement ``cm._is_walkable(hit)``: a blocking hit that does not start inside the shape and whose normal is flat enough
+        (``normal.z >= max(KINDA_SMALL_NUMBER, walkable_floor_z)``)."""
+        return bool(hit.blocking and not hit.start_penetrating and hit.normal.z >= max(rt.KINDA_SMALL_NUMBER, self.walkable_floor_z))
+
+    def primitive_valid(self, primitive) -> bool:
+        """the handle names a shape of the scene"""
+        return primitive is not None
+
+    def primitive_speed(self, primitive) -> float:
+        """speed of the shape (0: the shapes of the scene are static)"""
+        return 0.0
+
+    def primitive_can_step_up(self, primitive) -> bool:
+        """``Shape.can_step_up`` (True for a shape that has no flag, False for no handle)"""
+        return primitive is not None
+
+    def primitive_transform(self, primitive):
+        """the shape's world transform (identity when it is not known)"""
+        return rt.Transform()
 
     def target_count(self) -> int:
         return 0
@@ -437,10 +495,11 @@ def protocol_markdown() -> str:
     for c in COMMANDS.values():
         params = ", ".join(_param_text(p) + ("?" if i >= c.min_args else "") for i, p in enumerate(c.params))
         out.append(f"| `{c.name}` | {params or '-'} | `{c.ue}` |")
-    out += ["", "## Queries (`host.name(args)` expressions, actor logic only)", "", "| query | arguments | result | Unreal |", "|---|---|---|---|"]
+    out += ["", "## Queries (`host.name(args)` expressions; actor logic, an animation instance only the thread-safe ones marked †)", "",
+            "| query | arguments | result | Unreal |", "|---|---|---|---|"]
     for q in QUERIES.values():
         params = ", ".join(t.name for t in q.params)
-        out.append(f"| `{q.name}` | {params or '-'} | {q.ret.name} | `{q.ue}` |")
+        out.append(f"| `{q.name}`{' †' if q.thread_safe else ''} | {params or '-'} | {q.ret.name} | `{q.ue}` |")
     out += ["", "## Events (`on ...` handlers; `HostV1.poll_events`)", "", "| event | tuple |", "|---|---|"]
     for name, doc in EVENTS.items():
         out.append(f"| `{name}` | {doc} |")

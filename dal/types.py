@@ -60,7 +60,8 @@ ERROR = _ErrorType()
 # v1 / v2: the result of a trace.  A value type usable in locals, function parameters and results;
 # it cannot be stored (state / input / param / const) because Unreal cannot reflect it.
 HIT = Type("hit")
-HIT_MEMBERS = {"blocking": "bool", "point": "vec3", "normal": "vec3", "distance": "float", "time": "float"}
+HIT_MEMBERS = {"blocking": "bool", "point": "vec3", "normal": "vec3", "distance": "float", "time": "float",
+               "location": "vec3", "start_penetrating": "bool", "primitive": "primitive", "face_normal": "vec3"}
 
 # v3: a QST transform (UE FTransform3f): location (vec3), rotation (quat), scale (vec3); a value type that can be stored
 TRANSFORM = Type("transform")
@@ -124,7 +125,8 @@ SEQUENCE = AssetType("sequence", False, "UAnimSequenceBase")
 MONTAGE_ASSET = AssetType("montage", False, "UAnimMontage")
 CURVE = AssetType("curve", True, "UCurveFloat")
 CURVE3 = AssetType("curve3", True, "UCurveVector")
-ASSET_TYPES: dict[str, AssetType] = {t.name: t for t in (SEQUENCE, MONTAGE_ASSET, CURVE, CURVE3)}
+PRIMITIVE = AssetType("primitive", False, "UPrimitiveComponent")      # an opaque handle of a component a trace hit
+ASSET_TYPES: dict[str, AssetType] = {t.name: t for t in (SEQUENCE, MONTAGE_ASSET, CURVE, CURVE3, PRIMITIVE)}
 
 # the type of `none` before the context gives it one
 NONE_T = Type("none")
@@ -135,20 +137,38 @@ class MapType(Type):
 
     is_container = True
 
+    _interned: dict = {}
+
     def __init__(self, key: Type, value: Type):
         Type.__init__(self, f"map<{key.name},{value.name}>")
         self.key = key
         self.value = value
+
+    @classmethod
+    def of(cls, key: Type, value: Type) -> "MapType":
+        found = cls._interned.get((id(key), id(value)))
+        if found is None or found.key is not key or found.value is not value:
+            found = cls._interned[(id(key), id(value))] = cls(key, value)
+        return found
 
 
 class ArrayType(Type):
     """array<T>: a read-only list inside a settings type."""
 
     is_container = True
+    _interned: dict = {}
 
     def __init__(self, elem: Type):
         Type.__init__(self, f"array<{elem.name}>")
         self.elem = elem
+
+    @classmethod
+    def of(cls, elem: Type) -> "ArrayType":
+        """The one array<elem> type (types are compared by identity)."""
+        found = cls._interned.get(id(elem))
+        if found is None or found.elem is not elem:
+            found = cls._interned[id(elem)] = cls(elem)
+        return found
 
 
 @dataclass
@@ -231,7 +251,13 @@ MOVEMENT_MODE = make_movement_mode()
 BLEND_OPTION_MEMBERS = ["Linear", "Cubic", "HermiteCubic", "Sinusoidal", "QuadraticInOut", "CubicInOut", "QuarticInOut", "QuinticInOut",
                         "CircularIn", "CircularOut", "CircularInOut", "ExpIn", "ExpOut", "ExpInOut", "Custom"]
 BLEND_OPTION = EnumType("BlendOption", BLEND_OPTION_MEMBERS, builtin=True, cpp_type="EAlphaBlendOption", cpp_prop_type="EAlphaBlendOption")
-BUILTIN_ENUMS: dict[str, EnumType] = {"MovementMode": MOVEMENT_MODE, "BlendOption": BLEND_OPTION}
+# the collision channels of ECollisionChannel (the engine trace channels that have no name here are EngineTraceChannel1..6)
+CHANNEL_MEMBERS = (["WorldStatic", "WorldDynamic", "Pawn", "Visibility", "Camera", "PhysicsBody", "Vehicle", "Destructible"]
+                   + [f"EngineTraceChannel{i}" for i in range(1, 7)] + [f"GameTraceChannel{i}" for i in range(1, 19)])
+CHANNEL = EnumType("Channel", CHANNEL_MEMBERS, builtin=True, cpp_type="ECollisionChannel", cpp_prop_type="TEnumAsByte<ECollisionChannel>",
+                   cpp_members={m: f"ECC_{m}" for m in CHANNEL_MEMBERS})
+BUILTIN_ENUMS: dict[str, EnumType] = {"MovementMode": MOVEMENT_MODE, "BlendOption": BLEND_OPTION, "Channel": CHANNEL}
+CHANNEL_SET = ArrayType.of(CHANNEL)         # `channel_set`: the channels that block a query (the same type as array<Channel>)
 
 
 def py_member_name(member: str) -> str:

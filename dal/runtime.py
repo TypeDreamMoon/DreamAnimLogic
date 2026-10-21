@@ -156,21 +156,32 @@ class Quat(tuple):
 
 
 class Hit(tuple):
-    """Result of a host trace (UE ``FHitResult``, reduced): blocking, point, normal, distance, time (0..1 along the trace)."""
+    """Result of a host trace (UE ``FHitResult``, reduced): blocking, point (ImpactPoint), normal (ImpactNormal), distance, time
+    (0..1 along the trace), location (the swept shape's center at the hit), start_penetrating, primitive (the handle of the
+    component that was hit: a name here, None for a miss) and face_normal (FHitResult::Normal)."""
 
     __slots__ = ()
 
-    def __new__(cls, blocking=False, point=(0.0, 0.0, 0.0), normal=(0.0, 0.0, 0.0), distance=0.0, time=1.0):
-        return tuple.__new__(cls, (bool(blocking), as_vec3(point), as_vec3(normal), float(distance), float(time)))
+    def __new__(cls, blocking=False, point=(0.0, 0.0, 0.0), normal=(0.0, 0.0, 0.0), distance=0.0, time=1.0,
+                location=None, start_penetrating=False, primitive=None, face_normal=None):
+        point, normal = as_vec3(point), as_vec3(normal)
+        return tuple.__new__(cls, (bool(blocking), point, normal, float(distance), float(time),
+                                   point if location is None else as_vec3(location), bool(start_penetrating),
+                                   None if primitive is None else primitive, normal if face_normal is None else as_vec3(face_normal)))
 
     blocking = property(lambda s: s[0])
     point = property(lambda s: s[1])
     normal = property(lambda s: s[2])
     distance = property(lambda s: s[3])
     time = property(lambda s: s[4])
+    location = property(lambda s: s[5])
+    start_penetrating = property(lambda s: s[6])
+    primitive = property(lambda s: s[7])
+    face_normal = property(lambda s: s[8])
 
     def __repr__(self):
-        return f"Hit(blocking={self[0]!r}, point={self[1]!r}, normal={self[2]!r}, distance={self[3]!r}, time={self[4]!r})"
+        return (f"Hit(blocking={self[0]!r}, point={self[1]!r}, normal={self[2]!r}, distance={self[3]!r}, time={self[4]!r}, "
+                f"location={self[5]!r}, start_penetrating={self[6]!r}, primitive={self[7]!r}, face_normal={self[8]!r})")
 
 
 class Transform(tuple):
@@ -230,6 +241,43 @@ class MovementMode(IntEnum):
     Swimming = 4
     Flying = 5
     Custom = 6
+
+
+class Channel(IntEnum):
+    """The collision channels of queries; same order as UE ``ECollisionChannel`` (the engine trace channels count up from 8)."""
+
+    WorldStatic = 0
+    WorldDynamic = 1
+    Pawn = 2
+    Visibility = 3
+    Camera = 4
+    PhysicsBody = 5
+    Vehicle = 6
+    Destructible = 7
+    EngineTraceChannel1 = 8
+    EngineTraceChannel2 = 9
+    EngineTraceChannel3 = 10
+    EngineTraceChannel4 = 11
+    EngineTraceChannel5 = 12
+    EngineTraceChannel6 = 13
+    GameTraceChannel1 = 14
+    GameTraceChannel2 = 15
+    GameTraceChannel3 = 16
+    GameTraceChannel4 = 17
+    GameTraceChannel5 = 18
+    GameTraceChannel6 = 19
+    GameTraceChannel7 = 20
+    GameTraceChannel8 = 21
+    GameTraceChannel9 = 22
+    GameTraceChannel10 = 23
+    GameTraceChannel11 = 24
+    GameTraceChannel12 = 25
+    GameTraceChannel13 = 26
+    GameTraceChannel14 = 27
+    GameTraceChannel15 = 28
+    GameTraceChannel16 = 29
+    GameTraceChannel17 = 30
+    GameTraceChannel18 = 31
 
 
 class BlendOption(IntEnum):

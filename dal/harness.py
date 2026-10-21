@@ -53,6 +53,7 @@ class ScriptedHost(MockHost):
         world = frame.get("world", {})
         self.ground_z = world.get("ground_z")
         self.spheres = [(tuple(c), r) for c, r in world.get("spheres", [])]
+        self.primitives = {k: dict(v) for k, v in world.get("primitives", {}).items()}
 
 
 def load_standins(module: ir.Module) -> dict[str, Callable]:
@@ -149,6 +150,7 @@ def random_frames(module: ir.Module, count: int, seed: int = 1) -> list[dict]:
     """Random frames covering every input of the module (host-bound and free)."""
     rng = random.Random(seed)
     rng_v2 = random.Random(seed * 7919 + 13)               # the later host items draw from their own stream (earlier sequences stay as they were)
+    asks_world = module.kind != "actor" and any(isinstance(e, ir.HostQuery) for _label, body in module.bodies() for e in ir.walk_stmt_exprs(body))
     frames: list[dict] = []
     t = 0.0
     for _ in range(count):
@@ -201,6 +203,13 @@ def random_frames(module: ir.Module, count: int, seed: int = 1) -> list[dict]:
             f["targets"] = [(rng.randrange(1, 50), tuple(rng.uniform(-500, 500) for _ in range(3))) for _ in range(rng.randrange(0, 5))]
             f["world"] = {"ground_z": rng.choice([None, 0.0, -50.0]),
                           "spheres": [(tuple(rng.uniform(-300, 300) for _ in range(3)), rng.uniform(10, 80)) for _ in range(rng.randrange(0, 3))]}
+        elif asks_world:                              # an animation instance that asks the scene (the thread-safe queries)
+            f["world"] = {"ground_z": rng_v2.choice([None, 0.0, -50.0]),
+                          "spheres": [(tuple(rng_v2.uniform(-300, 300) for _ in range(3)), rng_v2.uniform(10, 80)) for _ in range(rng_v2.randrange(0, 3))]}
+        if "world" in f:
+            f["world"]["primitives"] = {name: {"speed": rng_v2.choice([0.0, 0.0, rng_v2.uniform(0.0, 400.0)]), "can_step_up": rng_v2.random() < 0.7,
+                                               "transform": _rand_value(rng_v2, TRANSFORM, 100.0)}
+                                        for name in ["Ground"] + [f"Sphere{k}" for k in range(len(f["world"]["spheres"]))]}
         frames.append(f)
     return frames
 

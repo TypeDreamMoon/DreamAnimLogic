@@ -60,6 +60,10 @@ from .types import (
     zero_value,
 )
 
+_SCENE_QUERIES = ("sweep_capsule", "sweep_sphere", "line_trace", "overlap_capsule")          # the v3 queries that ask the physics scene
+_COMPONENT_QUERIES = ("primitive_valid", "primitive_speed", "primitive_can_step_up", "primitive_transform")
+_NEW_HIT_MEMBERS = ("location", "start_penetrating", "primitive", "face_normal")
+
 T = "\t"
 
 LIFECYCLE = ("begin_play", "end_play")
@@ -79,7 +83,8 @@ KIND_PARENT = {
 }
 
 TRANSFORM_GETTER = {"location": "GetLocation", "rotation": "GetRotation", "scale": "GetScale3D"}
-HIT_MEMBER_CPP = {"blocking": "bBlocking", "point": "Point", "normal": "Normal", "distance": "Distance", "time": "Time"}
+HIT_MEMBER_CPP = {"blocking": "bBlocking", "point": "Point", "normal": "Normal", "distance": "Distance", "time": "Time",
+                  "location": "Location", "start_penetrating": "bStartPenetrating", "primitive": "Primitive", "face_normal": "FaceNormal"}
 
 
 def camel(name: str) -> str:
@@ -173,9 +178,9 @@ def cpp_type(ty: Type) -> str:
     if isinstance(ty, AssetType):
         return f"TObjectPtr<{ty.cpp_class}>"
     if isinstance(ty, MapType):
-        return f"TMap<{cpp_type(ty.key)}, {cpp_type(ty.value)}>"
+        return f"TMap<{cpp_prop_type(ty.key)}, {cpp_prop_type(ty.value)}>"
     if isinstance(ty, ArrayType):
-        return f"TArray<{cpp_type(ty.elem)}>"
+        return f"TArray<{cpp_prop_type(ty.elem)}>"
     raise ValueError(ty)
 
 
@@ -191,7 +196,7 @@ def holds_tags(ty: Type) -> bool:
 
 
 _ASSET_HEADERS = {"sequence": "Animation/AnimSequenceBase.h", "montage": "Animation/AnimMontage.h",
-                  "curve": "Curves/CurveFloat.h", "curve3": "Curves/CurveVector.h"}
+                  "curve": "Curves/CurveFloat.h", "curve3": "Curves/CurveVector.h", "primitive": "Components/PrimitiveComponent.h"}
 
 
 def asset_headers(ty: Type, out: list[str]) -> None:
@@ -232,6 +237,13 @@ def cpp_param(ty: Type, name: str, unused: bool = False) -> str:
 
 def cpp_params(params, unused: bool = False) -> str:
     return ", ".join(cpp_param(t, n, unused) for n, t in params)
+
+
+def enum_cast(ty: Type) -> str | None:
+    """The engine enum a TEnumAsByte<...> property is cast to when it is read (EMovementMode, ECollisionChannel), or None."""
+    if isinstance(ty, EnumType) and ty.cpp_prop_type != ty.cpp_type:
+        return ty.cpp_type
+    return None
 
 
 def cpp_prop_type(ty: Type) -> str:
@@ -324,8 +336,8 @@ class CppExprGen:
                 return BUILTIN_CONSTS[e.name].cpp
             return f"Dal_K_{e.name}"
         if k in (ir.ParamRef, ir.InputRef, ir.StateRef):
-            if e.ty is MOVEMENT_MODE:
-                return f"static_cast<EMovementMode>({e.name})"
+            if enum_cast(e.ty):
+                return f"static_cast<{enum_cast(e.ty)}>({e.name})"
             if k is ir.ParamRef and isinstance(e.ty, StructType) and e.ty.asset_root:
                 return f"DalSettings_{e.name}()"                    # the data asset (or the class defaults when none is assigned)
             return e.name
@@ -417,7 +429,7 @@ class CppExprGen:
         base = self.x(e.x)
         if isinstance(e.x.ty, StructType):
             text = f"{base}.{e.comps}"
-            return f"static_cast<EMovementMode>({text})" if e.ty is MOVEMENT_MODE else text
+            return f"static_cast<{enum_cast(e.ty)}>({text})" if enum_cast(e.ty) else text
         if e.x.ty is HIT:
             return f"{base}.{HIT_MEMBER_CPP[e.comps]}"
         if e.x.ty is SPRING or e.x.ty is SPRING3:
@@ -585,6 +597,12 @@ class CppGen:
                     used_queries.add(e.name)
         self.cmds = [n for n in COMMANDS if n in used_cmds]
         self.queries = [n for n in QUERIES if n in used_queries]
+        self.world_queries = [n for n in self.queries if n.startswith("trace_") or n in _SCENE_QUERIES]
+        # the new members of a hit are filled by every trace of the program, the old trace queries included, but only when the
+        # program can read them (so that programs of the earlier versions generate exactly what they did)
+        self.rich_hits = bool(set(self.queries) & set(_SCENE_QUERIES)) or any(
+            isinstance(e, ir.Member) and e.x.ty is HIT and e.comps in _NEW_HIT_MEMBERS
+            for _label, body in module.bodies() for e in ir.walk_stmt_exprs(body))
         self.event_handlers = [h for h in module.handlers if h.event not in LIFECYCLE]
         self.has_events = bool(self.event_handlers)
         self.begin_handlers = [k for k, h in enumerate(module.handlers) if h.event == "begin_play"]
@@ -593,7 +611,7 @@ class CppGen:
         self.slots = [u.phase for u in module.updates] or [module.default_phase]
         self.queue_target = module.kind == "anim" and any(x.pub and not x.is_view for x in module.methods)
         self.has_cmds = bool(self.cmds)
-        self.hosth = self.actor or self.has_events or self.has_cmds         # DalHost.h is part of the output
+        self.hosth = self.actor or self.has_events or self.has_cmds or bool(self.world_queries)       # DalHost.h is part of the output
         kinds = {h.event for h in module.handlers}
         self.bind_begin = bool(kinds & {"notify", "notify_begin"}) or (self.actor and bool(self.notify_names()))
         self.bind_end = "notify_end" in kinds
@@ -756,7 +774,8 @@ class CppGen:
 
     @property
     def needs_pawn_helper(self) -> bool:
-        return bool(self.cmds and any(EXEC[c][0][0] in (_G_PAWN, _G_MOVEMENT, _G_CHARACTER) for c in self.cmds)) or self.bind_input
+        return (bool(self.cmds and any(EXEC[c][0][0] in (_G_PAWN, _G_MOVEMENT, _G_CHARACTER) for c in self.cmds)) or self.bind_input
+                or "is_walkable" in self.queries or "primitive_can_step_up" in self.queries)
 
     # ---- header -------------------------------------------------------------------------------------------
     def banner(self) -> list[str]:
@@ -1171,6 +1190,7 @@ class CppGen:
         if "trace_sphere" in q:
             out.append(Method("DalHost::FHit", "DalTraceSphere", "const FVector3f& DalStart, const FVector3f& DalEnd, const float DalRadius",
                               doc="host.trace_sphere: a sphere sweep from start to end.", body=self.trace_body(True)))
+        out.extend(self.new_query_methods())
         if targets:
             out.append(Method("void", "DalRefreshTargets", doc="Collect the actors tagged DalTargetTag, once per tick.", body=[
                 "if (bDalTargetsFresh)",
@@ -1219,6 +1239,104 @@ class CppGen:
                 "return -1;"]))
         return out
 
+    def new_query_methods(self) -> list[Method]:
+        out: list[Method] = []
+        q = self.queries
+        chan = "const ECollisionChannel DalChannel"
+        resp = "const TArray<TEnumAsByte<ECollisionChannel>>& DalResponses"
+        vec = "const FVector3f& DalStart, const FVector3f& DalEnd"
+        if "sweep_capsule" in q:
+            out.append(Method("DalHost::FHit", "DalSweepCapsule", f"{vec}, const float DalRadius, const float DalHalfHeight, {chan}, {resp}",
+                              doc="host.sweep_capsule: a vertical capsule swept from start to end; only the listed channels block.",
+                              body=self.scene_body("MakeCapsule(DalRadius, DalHalfHeight)")))
+        if "sweep_sphere" in q:
+            out.append(Method("DalHost::FHit", "DalSweepSphere", f"{vec}, const float DalRadius, {chan}, {resp}",
+                              doc="host.sweep_sphere: a sphere swept from start to end; only the listed channels block.",
+                              body=self.scene_body("MakeSphere(DalRadius)")))
+        if "line_trace" in q:
+            out.append(Method("DalHost::FHit", "DalLineTrace", f"{vec}, {chan}",
+                              doc="host.line_trace: the first blocking hit on a channel, the owner ignored.", body=self.scene_body(None)))
+        if "overlap_capsule" in q:
+            ignore = "GetOwner()" if self.actor else "GetOwningActor()"
+            out.append(Method("bool", "DalOverlapCapsule", f"const FVector3f& DalCenter, const float DalRadius, const float DalHalfHeight, {chan}, {resp}",
+                              doc="host.overlap_capsule: does a vertical capsule at this center overlap anything that blocks.", body=[
+                "const UWorld* DalWorld = GetWorld();",
+                "if (DalWorld == nullptr)",
+                "{",
+                "\treturn false;",
+                "}",
+                f"FCollisionQueryParams DalParams(SCENE_QUERY_STAT(DalOverlap), false, {ignore});",
+                *self.response_lines(),
+                "return DalWorld->OverlapBlockingTestByChannel(FVector(DalCenter), FQuat::Identity, DalChannel, "
+                "FCollisionShape::MakeCapsule(DalRadius, DalHalfHeight), DalParams, DalResponseParams);"]))
+        if "is_walkable" in q:
+            out.append(Method("bool", "DalIsWalkable", "const DalHost::FHit& DalHit",
+                              doc="host.is_walkable: a blocking hit that does not start inside the shape and whose normal is flat enough to stand on.", body=[
+                "const ACharacter* DalCharacter = Cast<ACharacter>(DalGetPawn());",
+                "const UCharacterMovementComponent* DalMovement = DalCharacter != nullptr ? DalCharacter->GetCharacterMovement() : nullptr;",
+                "if (!DalHit.bBlocking || DalHit.bStartPenetrating || DalMovement == nullptr)",
+                "{",
+                "\treturn false;",
+                "}",
+                "return DalHit.Normal.Z >= UE_KINDA_SMALL_NUMBER && DalHit.Normal.Z >= DalMovement->GetWalkableFloorZ();"]))
+        if "primitive_valid" in q:
+            out.append(Method("bool", "DalPrimitiveValid", "const UPrimitiveComponent* DalPrimitive", body=["return IsValid(DalPrimitive);"]))
+        if "primitive_speed" in q:
+            out.append(Method("float", "DalPrimitiveSpeed", "const UPrimitiveComponent* DalPrimitive",
+                              body=["return DalPrimitive != nullptr ? static_cast<float>(DalPrimitive->GetComponentVelocity().Size()) : 0.0f;"]))
+        if "primitive_can_step_up" in q:
+            out.append(Method("bool", "DalPrimitiveCanStepUp", "const UPrimitiveComponent* DalPrimitive",
+                              body=["return DalPrimitive != nullptr && DalPrimitive->CanCharacterStepUp(DalGetPawn());"]))
+        if "primitive_transform" in q:
+            out.append(Method("FTransform3f", "DalPrimitiveTransform", "const UPrimitiveComponent* DalPrimitive",
+                              body=["return DalPrimitive != nullptr ? FTransform3f(DalPrimitive->GetComponentTransform()) : FTransform3f();"]))
+        return out
+
+    def response_lines(self) -> list[str]:
+        return [
+            "FCollisionResponseParams DalResponseParams(ECR_Ignore);",
+            "for (const TEnumAsByte<ECollisionChannel> DalBlocking : DalResponses)",
+            "{",
+            "\tDalResponseParams.CollisionResponse.SetResponse(DalBlocking, ECR_Block);",
+            "}",
+        ]
+
+    def scene_body(self, shape: str | None) -> list[str]:
+        """A sweep (shape given) or line trace on a channel; the blocking channels are the ones listed (a line trace uses the channel only)."""
+        ignore = "GetOwner()" if self.actor else "GetOwningActor()"
+        out = [
+            "DalHost::FHit DalResult;",
+            "DalResult.Point = DalEnd;",
+            "DalResult.Location = DalEnd;",
+            "const UWorld* DalWorld = GetWorld();",
+            "if (DalWorld == nullptr)",
+            "{",
+            "\treturn DalResult;",
+            "}",
+            "FHitResult DalHit;",
+            f"FCollisionQueryParams DalParams(SCENE_QUERY_STAT(DalTrace), false, {ignore});",
+        ]
+        if shape is None:
+            out.append("const bool bDalBlocked = DalWorld->LineTraceSingleByChannel(DalHit, FVector(DalStart), FVector(DalEnd), DalChannel, DalParams);")
+        else:
+            out += self.response_lines()
+            out.append("const bool bDalBlocked = DalWorld->SweepSingleByChannel(DalHit, FVector(DalStart), FVector(DalEnd), FQuat::Identity, "
+                       f"DalChannel, FCollisionShape::{shape}, DalParams, DalResponseParams);")
+        out += ["if (bDalBlocked)", "{", "\tDalResult.bBlocking = true;"] + [f"\t{line}" for line in self.hit_lines()] + ["}", "return DalResult;"]
+        return out
+
+    def hit_lines(self) -> list[str]:
+        return [
+            "DalResult.Point = FVector3f(DalHit.ImpactPoint);",
+            "DalResult.Normal = FVector3f(DalHit.ImpactNormal);",
+            "DalResult.Distance = DalHit.Distance;",
+            "DalResult.Time = DalHit.Time;",
+            "DalResult.Location = FVector3f(DalHit.Location);",
+            "DalResult.bStartPenetrating = DalHit.bStartPenetrating;",
+            "DalResult.Primitive = DalHit.GetComponent();",
+            "DalResult.FaceNormal = FVector3f(DalHit.Normal);",
+        ]
+
     def trace_body(self, sweep: bool) -> list[str]:
         out = [
             "DalHost::FHit DalResult;",
@@ -1236,6 +1354,10 @@ class CppGen:
                        "DalTraceChannel, FCollisionShape::MakeSphere(DalRadius), DalParams);")
         else:
             out.append("const bool bDalBlocked = DalWorld->LineTraceSingleByChannel(DalHit, FVector(DalStart), FVector(DalEnd), DalTraceChannel, DalParams);")
+        if self.rich_hits:
+            out.insert(2, "DalResult.Location = DalEnd;")
+            out += ["if (bDalBlocked)", "{", "\tDalResult.bBlocking = true;"] + [f"\t{line}" for line in self.hit_lines()] + ["}", "return DalResult;"]
+            return out
         out += [
             "if (bDalBlocked)",
             "{",
@@ -1527,8 +1649,9 @@ class CppGen:
             L.append('#include "NativeGameplayTags.h"')
         for inc in self.data_includes(None):
             L.append(f'#include "{inc}"')
-        if (any(i.ty is MOVEMENT_MODE for i in [*m.params, *m.inputs, *m.states]) or self.uses("movement_mode")
-                or any(q.startswith("trace_") for q in self.queries)):
+        if (any(enum_cast(d.ty) or (isinstance(d.ty, (MapType, ArrayType)) and enum_cast(getattr(d.ty, "elem", None))) for d in [*m.params, *m.inputs, *m.states])
+                or any(enum_cast(f.ty) or enum_cast(getattr(f.ty, "elem", None)) for s in m.structs if s.origin is None for f in s.fields)
+                or self.uses("movement_mode") or self.world_queries):
             L.append('#include "Engine/EngineTypes.h"')
         if self.bind_begin or self.bind_end:
             L.append('#include "Animation/AnimNotifies/AnimNotify.h"')
@@ -1793,9 +1916,15 @@ class CppGen:
             add("GameFramework/SpringArmComponent.h")
         if self.camera:
             add("Camera/CameraComponent.h")
-        if any(q.startswith("trace_") for q in self.queries):
+        if self.world_queries:
             add("CollisionQueryParams.h")
             add("Engine/HitResult.h")
+            add("Engine/World.h")
+        if self.rich_hits or any(q in _COMPONENT_QUERIES for q in self.queries):
+            add("Components/PrimitiveComponent.h")
+        if "is_walkable" in self.queries or "primitive_can_step_up" in self.queries:
+            add("GameFramework/Character.h")
+            add("GameFramework/CharacterMovementComponent.h")
         if any(q.startswith("target_") for q in self.queries):
             add("GameFramework/Actor.h")
             add("Kismet/GameplayStatics.h")
@@ -2211,8 +2340,8 @@ class CppGen:
             pu = i.peer
             assert pu is not None
             value = f"{pu.peer}->" + ".".join(pu.path)
-            if i.ty is MOVEMENT_MODE:
-                value = f"static_cast<EMovementMode>({value})"
+            if enum_cast(i.ty):
+                value = f"static_cast<{enum_cast(i.ty)}>({value})"
             L.append(f"{T}{i.name} = {pu.peer} != nullptr ? {value} : {cpp_value(i.ty, i.default)};")
         L.append("}")
         return L

@@ -33,6 +33,7 @@ from .names import CPP_KEYWORDS, PY_RESERVED, reserved_reason
 from .types import (
     VOID,
     ASSET_TYPES,
+    CHANNEL_SET,
     ArrayType,
     AssetType,
     CURVE,
@@ -130,7 +131,7 @@ STRUCT_API = frozenset({"copy", "to_plain", "flatten", "from_value", "load"})
 
 _SWIZZLE = {"x": 0, "y": 1, "z": 2}
 _MONTAGE_STATE = {"playing": BOOL, "active": BOOL, "position": FLOAT}   # Light1.playing ... ('section' has the montage's own enum)
-_HIT_TYPES = {"bool": BOOL, "vec3": VEC3, "float": FLOAT, "quat": QUAT}
+_HIT_TYPES = {"bool": BOOL, "vec3": VEC3, "float": FLOAT, "quat": QUAT, "primitive": ASSET_TYPES["primitive"]}
 _ACTION_TYPES = (BOOL, FLOAT, VEC2, VEC3)
 
 
@@ -251,7 +252,7 @@ class Checker:
             if value is HIT or value is MONTAGE or value in SPRING_MEMBERS or isinstance(value, (MapType, ArrayType)):
                 self.err("DAL4052", f"a table cannot hold {value}", pos)
                 return ERROR
-            return MapType(key, value)
+            return MapType.of(key, value)
         if name.startswith("array<") and name.endswith(">"):
             elem = self.resolve_type(name[6:-1], pos)
             if elem is ERROR:
@@ -259,7 +260,9 @@ class Checker:
             if elem is HIT or elem is MONTAGE or elem in SPRING_MEMBERS or isinstance(elem, (MapType, ArrayType)):
                 self.err("DAL4052", f"a list cannot hold {elem}", pos)
                 return ERROR
-            return ArrayType(elem)
+            return ArrayType.of(elem)
+        if name == "channel_set":
+            return CHANNEL_SET
         if name in ASSET_TYPES:
             return ASSET_TYPES[name]
         if name in BASIC_TYPES:
@@ -1762,9 +1765,10 @@ class Checker:
         q = QUERIES.get(e.name)
         if q is None:
             return self.bad("DAL3060", f"unknown host query 'host.{e.name}'" + self.suggest(e.name, QUERIES), e.pos)
-        if self.kind != "actor":
-            return self.bad("DAL5041", f"host.{e.name}() asks the world synchronously and is only available in actor logic (logic Name : actor;); "
-                                       "an anim instance runs on a worker thread", e.pos)
+        if self.kind != "actor" and not q.thread_safe:
+            safe = ", ".join(n for n, x in QUERIES.items() if x.thread_safe)
+            return self.bad("DAL5041", f"host.{e.name}() asks the game world and is only available in actor logic (logic Name : actor;); "
+                                       f"an anim instance runs on a worker thread and may ask only the thread-safe queries: {safe}", e.pos)
         if sc.ctx in ("fn", "const", "view"):
             return self.bad("DAL5042" if sc.ctx != "view" else "DAL5044",
                             "host queries are not allowed in functions, views or constants; call them in update, an entry, a method or a handler "
