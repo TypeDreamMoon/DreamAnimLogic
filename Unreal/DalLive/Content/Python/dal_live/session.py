@@ -194,6 +194,9 @@ class Session:
                     if fn is not None:
                         fn(*args)
             interp.update(dt)
+            module = self.module
+            if module is not None and module.kind == "anim" and (module.post_update is not None or module.post_flush):
+                interp.post_update()               # the block after the graph update (the interpreter has no graph: right after update); its commands are deferred like the others
             after = getattr(self.host, "after_update", None)
             if after is not None:
                 after(self)

@@ -282,6 +282,18 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(len(self.host.calls), 2)
         self.assertEqual(s.snapshot()["N"], 3)
 
+    def test_an_anim_post_update_runs_after_the_update_and_its_commands_wait_like_the_others(self):
+        source = "logic Pu : anim post_flush;\nstate N: int;\nstate P: int;\nupdate(dt) { N += 1; }\npost_update { P = N * 10; host.set_gravity_scale(P * 1.0); }\n"
+        with open(self.path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(source)
+        s = self.session()
+        s.tick(1 / 60)
+        self.assertEqual((s.snapshot()["N"], s.snapshot()["P"]), (1, 10))        # the block ran in the same tick, after the update
+        self.assertEqual(self.host.calls, [])                                    # its command is queued for the start of the next one
+        s.tick(1 / 60)
+        self.assertEqual(self.host.calls, [("set_gravity_scale", (10.0,))])
+        self.assertEqual(s.snapshot()["P"], 20)
+
     def test_actor_logic_commands_run_at_the_end_of_the_same_update(self):
         with open(self.path, "w", encoding="utf-8", newline="\n") as f:
             f.write(ANIM_SOURCE.replace("logic Cmd;", "logic Cmd : actor;"))
