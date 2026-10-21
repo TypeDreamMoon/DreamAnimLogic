@@ -1,0 +1,940 @@
+{
+ "schema": "als-goldens/1",
+ "engine": "5.8.2-56702186+++UE5+Release-5.8",
+ "project": "DreamAnimTestHost",
+ "als_plugin_version": "4.18",
+ "generator": "gen_goldens.py",
+ "files": {
+  "als_math.json": {
+   "bytes": 287980,
+   "errors": 0,
+   "functions": [
+    {
+     "function": "UAlsMath::Clamp01",
+     "python": "AlsMath.clamp01",
+     "cases": 211,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsMath::LerpClamped",
+     "python": "AlsMath.lerp_clamped",
+     "cases": 218,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsMath::DamperExactAlpha",
+     "python": "AlsMath.damper_exact_alpha",
+     "cases": 270,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsMath::SpringDamperFloat",
+     "python": "AlsMath.spring_damper_float",
+     "cases": 158,
+     "sequences": 11,
+     "sequence_steps": 513
+    },
+    {
+     "function": "UAlsMath::CalculateMovementDirection",
+     "python": "AlsMath.calculate_movement_direction",
+     "cases": 286,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsMath::TryCalculatePoleVector",
+     "python": "AlsMath.try_calculate_pole_vector",
+     "cases": 157,
+     "sequences": 0,
+     "sequence_steps": 0
+    }
+   ]
+  },
+  "als_rotation.json": {
+   "bytes": 299204,
+   "errors": 0,
+   "functions": [
+    {
+     "function": "UAlsRotation::RemapAngleForCounterClockwiseRotation",
+     "python": "AlsRotation.remap_angle_for_counter_clockwise_rotation",
+     "cases": 246,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsRotation::LerpAngle",
+     "python": "AlsRotation.lerp_angle",
+     "cases": 327,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsRotation::LerpRotation",
+     "python": "AlsRotation.lerp_rotation",
+     "cases": 160,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsRotation::InterpolateAngleConstant",
+     "python": "AlsRotation.interpolate_angle_constant",
+     "cases": 233,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsRotation::DamperExactAngle",
+     "python": "AlsRotation.damper_exact_angle",
+     "cases": 210,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsRotation::DamperExactRotation",
+     "python": "AlsRotation.damper_exact_rotation",
+     "cases": 123,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsRotation::InterpolateQuaternionFast",
+     "python": "AlsRotation.interpolate_quaternion_fast",
+     "cases": 139,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsRotation::GetTwist",
+     "python": "AlsRotation.get_twist",
+     "cases": 165,
+     "sequences": 0,
+     "sequence_steps": 0
+    }
+   ]
+  },
+  "als_vector.json": {
+   "bytes": 418558,
+   "errors": 0,
+   "functions": [
+    {
+     "function": "UAlsVector::ClampMagnitude01(FVector)",
+     "python": "AlsVector.clamp_magnitude01",
+     "cases": 167,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsVector::ClampMagnitude012D",
+     "python": "AlsVector.clamp_magnitude012d",
+     "cases": 171,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsVector::RadianToDirection",
+     "python": "AlsVector.radian_to_direction",
+     "cases": 174,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsVector::RadianToDirectionXY",
+     "python": "AlsVector.radian_to_direction_xy",
+     "cases": 174,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsVector::AngleToDirection",
+     "python": "AlsVector.angle_to_direction",
+     "cases": 178,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsVector::AngleToDirectionXY",
+     "python": "AlsVector.angle_to_direction_xy",
+     "cases": 178,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsVector::DirectionToAngle",
+     "python": "AlsVector.direction_to_angle",
+     "cases": 175,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsVector::DirectionToAngleXY",
+     "python": "AlsVector.direction_to_angle_xy",
+     "cases": 177,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsVector::PerpendicularClockwiseXY",
+     "python": "AlsVector.perpendicular_clockwise_xy",
+     "cases": 110,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsVector::PerpendicularCounterClockwiseXY",
+     "python": "AlsVector.perpendicular_counter_clockwise_xy",
+     "cases": 110,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsVector::AngleBetweenSkipNormalization",
+     "python": "AlsVector.angle_between_skip_normalization",
+     "cases": 186,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsVector::AngleBetweenSignedXY",
+     "python": "AlsVector.angle_between_signed_xy",
+     "cases": 188,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsVector::SlerpSkipNormalization",
+     "python": "AlsVector.slerp_skip_normalization",
+     "cases": 151,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsVector::SpringDamperVector",
+     "python": "AlsVector.spring_damper_vector",
+     "cases": 110,
+     "sequences": 4,
+     "sequence_steps": 185
+    }
+   ]
+  },
+  "als_utility.json": {
+   "bytes": 16802,
+   "errors": 0,
+   "functions": [
+    {
+     "function": "UAlsUtility::NameToDisplayString",
+     "python": "AlsUtility.name_to_display_string",
+     "cases": 83,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsUtility::GetSimpleTagName",
+     "python": "AlsUtility.get_simple_tag_name",
+     "cases": 32,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsUtility::GetChildTags",
+     "python": "AlsUtility.get_child_tags",
+     "cases": 30,
+     "sequences": 0,
+     "sequence_steps": 0
+    }
+   ]
+  },
+  "ue_math.json": {
+   "bytes": 325078,
+   "errors": 0,
+   "functions": [
+    {
+     "function": "FRotator::NormalizeAxis",
+     "python": "MathLibrary.normalize_axis",
+     "cases": 58,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FRotator::ClampAxis",
+     "python": "MathLibrary.clamp_axis",
+     "cases": 58,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::ClampAngle",
+     "python": "MathLibrary.clamp_angle",
+     "cases": 37,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::UnwindDegrees (via FVector::UnwindEuler)",
+     "python": "MathLibrary.vector_unwind_euler",
+     "cases": 83,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::FInterpTo",
+     "python": "MathLibrary.f_interp_to",
+     "cases": 43,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::FInterpConstantTo",
+     "python": "MathLibrary.f_interp_to_constant",
+     "cases": 41,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::VInterpTo",
+     "python": "MathLibrary.v_interp_to",
+     "cases": 28,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::VInterpConstantTo",
+     "python": "MathLibrary.v_interp_to_constant",
+     "cases": 28,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::Vector2DInterpTo",
+     "python": "MathLibrary.vector2d_interp_to",
+     "cases": 21,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::Vector2DInterpConstantTo",
+     "python": "MathLibrary.vector2d_interp_to_constant",
+     "cases": 21,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::RInterpTo",
+     "python": "MathLibrary.r_interp_to",
+     "cases": 36,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::RInterpConstantTo",
+     "python": "MathLibrary.r_interp_to_constant",
+     "cases": 34,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FQuat::Slerp",
+     "python": "MathLibrary.quat_slerp",
+     "cases": 54,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FQuat::Inverse",
+     "python": "MathLibrary.quat_inversed",
+     "cases": 27,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FQuat::operator*",
+     "python": "MathLibrary.multiply_quat_quat",
+     "cases": 37,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FQuat::GetNormalized",
+     "python": "MathLibrary.quat_normalized",
+     "cases": 24,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FRotator::Quaternion",
+     "python": "MathLibrary.conv_rotator_to_quaternion",
+     "cases": 55,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FQuat::Rotator",
+     "python": "MathLibrary.quat_rotator",
+     "cases": 43,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FQuat::RotateVector",
+     "python": "MathLibrary.quat_rotate_vector",
+     "cases": 37,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FQuat::UnrotateVector",
+     "python": "MathLibrary.quat_unrotate_vector",
+     "cases": 36,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FRotationMatrix::MakeFromX(Target - Start).Rotator()",
+     "python": "MathLibrary.find_look_at_rotation",
+     "cases": 45,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FVector::ToOrientationRotator (Vector.Rotation())",
+     "python": "MathLibrary.conv_vector_to_rotator",
+     "cases": 45,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FVector::ToOrientationQuat",
+     "python": "MathLibrary.conv_vector_to_quaternion",
+     "cases": 36,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "(A - B).GetNormalized()",
+     "python": "MathLibrary.normalized_delta_rotator",
+     "cases": 40,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::Sin",
+     "python": "MathLibrary.sin",
+     "cases": 35,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::Cos",
+     "python": "MathLibrary.cos",
+     "cases": 34,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::Tan",
+     "python": "MathLibrary.tan",
+     "cases": 33,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::Asin",
+     "python": "MathLibrary.asin",
+     "cases": 35,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::Acos",
+     "python": "MathLibrary.acos",
+     "cases": 38,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::Atan",
+     "python": "MathLibrary.atan",
+     "cases": 34,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::Atan2",
+     "python": "MathLibrary.atan2",
+     "cases": 72,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::Exp",
+     "python": "MathLibrary.exp",
+     "cases": 36,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::Loge",
+     "python": "MathLibrary.loge",
+     "cases": 35,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::Sqrt",
+     "python": "MathLibrary.sqrt",
+     "cases": 35,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::Pow",
+     "python": "MathLibrary.multiply_multiply_float_float",
+     "cases": 35,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::DegreesToRadians",
+     "python": "MathLibrary.degrees_to_radians",
+     "cases": 33,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::RadiansToDegrees",
+     "python": "MathLibrary.radians_to_degrees",
+     "cases": 33,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::Lerp",
+     "python": "MathLibrary.lerp",
+     "cases": 33,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::Clamp",
+     "python": "MathLibrary.f_clamp",
+     "cases": 33,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::GetMappedRangeValueClamped",
+     "python": "MathLibrary.map_range_clamped",
+     "cases": 33,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::GetMappedRangeValueUnclamped",
+     "python": "MathLibrary.map_range_unclamped",
+     "cases": 31,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::GetRangePct",
+     "python": "MathLibrary.normalize_to_range",
+     "cases": 32,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::Frac",
+     "python": "MathLibrary.fraction",
+     "cases": 33,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::Sign",
+     "python": "MathLibrary.sign_of_float",
+     "cases": 33,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::Square",
+     "python": "MathLibrary.square",
+     "cases": 32,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FMath::Abs",
+     "python": "MathLibrary.abs",
+     "cases": 17,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FVector::GetSafeNormal",
+     "python": "MathLibrary.normal",
+     "cases": 36,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FVector::GetClampedToMaxSize",
+     "python": "MathLibrary.vector_clamp_size_max",
+     "cases": 31,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FVector::Dist",
+     "python": "MathLibrary.vector_distance",
+     "cases": 21,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FVector::ProjectOnToNormal",
+     "python": "MathLibrary.vector_project_on_to_normal",
+     "cases": 27,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FVector::DotProduct",
+     "python": "MathLibrary.dot_vector_vector",
+     "cases": 20,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FVector::CrossProduct",
+     "python": "MathLibrary.cross_vector_vector",
+     "cases": 20,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FQuat::FindBetweenVectors",
+     "python": "MathLibrary.quat_find_between_vectors",
+     "cases": 31,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FQuat::MakeFromRotationVector",
+     "python": "MathLibrary.quat_make_from_rotation_vector",
+     "cases": 30,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FQuat::GetAngle",
+     "python": "MathLibrary.quat_get_angle",
+     "cases": 24,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FQuat::AngularDistance",
+     "python": "MathLibrary.quat_angular_distance",
+     "cases": 22,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FQuat::GetRotationAxis",
+     "python": "MathLibrary.quat_get_rotation_axis",
+     "cases": 23,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "FVector::RotateAngleAxis",
+     "python": "MathLibrary.rotate_angle_axis",
+     "cases": 22,
+     "sequences": 0,
+     "sequence_steps": 0
+    }
+   ]
+  },
+  "als_montage.json": {
+   "bytes": 61189,
+   "errors": 0,
+   "functions": [
+    {
+     "function": "UAlsMontageUtility::ExtractRootTransformFromMontage",
+     "python": "AlsMontageUtility.extract_root_transform_from_montage",
+     "cases": 228,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsMontageUtility::ExtractLastRootTransformFromMontage",
+     "python": "AlsMontageUtility.extract_last_root_transform_from_montage",
+     "cases": 12,
+     "sequences": 0,
+     "sequence_steps": 0
+    },
+    {
+     "function": "UAlsMontageUtility::ExtractRootMotionFromMontage",
+     "python": "AlsMontageUtility.extract_root_motion_from_montage",
+     "cases": 120,
+     "sequences": 0,
+     "sequence_steps": 0
+    }
+   ],
+   "montages": [
+    "/ALS/ALS/Animations/Actions/Mantle/AM_Als_Mantle_High",
+    "/ALS/ALS/Animations/Actions/Mantle/AM_Als_Mantle_Low",
+    "/ALS/ALS/Animations/Actions/Mantle/AM_Als_Mantle_Low_BothArms",
+    "/ALS/ALS/Animations/Actions/Mantle/AM_Als_Mantle_Low_Box",
+    "/ALS/ALS/Animations/Actions/Mantle/AM_Als_Mantle_Low_Left",
+    "/ALS/ALS/Animations/Actions/Mantle/AM_Als_Mantle_Low_Right",
+    "/ALS/ALS/Animations/Actions/Roll/AM_Als_Roll",
+    "/ALS/ALS/Animations/Actions/GetUp/AM_Als_GetUp_Back",
+    "/ALS/ALS/Animations/Actions/GetUp/AM_Als_GetUp_Front",
+    "/MoverExamples/Characters/Mannequins/Animations/Manny/VaultOver_Montage",
+    "/MoverExamples/Characters/Mannequins/Animations/Manny/MM_Dash_Forward_Montage",
+    "/MoverExamples/Characters/Mannequins/Animations/Manny/MM_Death_Front_03_ExtractedRM_Montage"
+   ],
+   "skipped_montages": []
+  }
+ },
+ "total_bytes_of_data_files": 1408811,
+ "not_callable_from_python": [
+  {
+   "name": "UAlsMath::DamperExact<ValueType>",
+   "reason": "C++ template, no UFUNCTION; it is FMath::Lerp(Current, Target, DamperExactAlpha(DeltaTime, HalfLife)) - use DamperExactAlpha goldens"
+  },
+  {
+   "name": "UAlsMath::SpringDamper<ValueType, StateType>",
+   "reason": "C++ template, no UFUNCTION; covered through SpringDamperFloat / SpringDamperVector"
+  },
+  {
+   "name": "UAlsRotation::RemapAngleForCounterClockwiseRotation<ValueType>",
+   "reason": "C++ template (the float overload RemapAngleForCounterClockwiseRotation(float) IS covered)"
+  },
+  {
+   "name": "UAlsRotation::RemapRotationForCounterClockwiseRotation(VectorRegister4Double)",
+   "reason": "SIMD register API, not reflected; its effect is covered through LerpRotation / DamperExactRotation"
+  },
+  {
+   "name": "UAlsVector::ClampMagnitude01(FVector3f)",
+   "reason": "plain C++ overload without UFUNCTION (the FVector overload IS covered)"
+  },
+  {
+   "name": "UAlsUtility::BoolToString",
+   "reason": "constexpr C++ helper without UFUNCTION (returns \"True\" / \"False\")"
+  },
+  {
+   "name": "UAlsUtility::TryGetMovementBaseAngularVelocity",
+   "reason": "needs a FBasedMovementInfo (live physics body), no UFUNCTION"
+  },
+  {
+   "name": "UAlsUtility::GetAnimationCurveValueFromCharacter",
+   "reason": "needs a live ACharacter with an anim instance (skipped on purpose)"
+  },
+  {
+   "name": "UAlsUtility::GetFirstPlayerPingSeconds",
+   "reason": "needs a world with a player controller (skipped on purpose)"
+  },
+  {
+   "name": "UAlsMontageUtility::StopMontagesWithSlot / StopMontagesWithAnySharedSlots",
+   "reason": "need a live UAnimInstance with playing montages (side effects, no return value)"
+  },
+  {
+   "name": "UAlsConstants::*",
+   "reason": "constant FName getters (bone / curve / slot names), no math; not part of T1"
+  },
+  {
+   "name": "UAlsDebugUtility::*",
+   "reason": "debug drawing / display flags, no math"
+  }
+ ],
+ "engine_functions_reachability": [
+  {
+   "engine_function": "FMath::UnwindDegrees",
+   "python": "only through FVector::UnwindEuler (MathLibrary.vector_unwind_euler)",
+   "reachable_names_found": [
+    "vector_unwind_euler"
+   ]
+  },
+  {
+   "engine_function": "FRotator::NormalizeAxis",
+   "python": "MathLibrary.normalize_axis",
+   "reachable_names_found": [
+    "normalize_axis"
+   ]
+  },
+  {
+   "engine_function": "FRotator::ClampAxis",
+   "python": "MathLibrary.clamp_axis",
+   "reachable_names_found": [
+    "clamp_axis"
+   ]
+  },
+  {
+   "engine_function": "FMath::FInterpTo",
+   "python": "MathLibrary.f_interp_to (double)",
+   "reachable_names_found": [
+    "f_interp_to"
+   ]
+  },
+  {
+   "engine_function": "FMath::FInterpConstantTo",
+   "python": "MathLibrary.f_interp_to_constant (double)",
+   "reachable_names_found": [
+    "f_interp_to_constant"
+   ]
+  },
+  {
+   "engine_function": "FMath::VInterpTo / VInterpConstantTo",
+   "python": "MathLibrary.v_interp_to / v_interp_to_constant",
+   "reachable_names_found": [
+    "v_interp_to",
+    "v_interp_to_constant"
+   ]
+  },
+  {
+   "engine_function": "FMath::Vector2DInterpTo / ConstantTo",
+   "python": "MathLibrary.vector2d_interp_to / vector2d_interp_to_constant",
+   "reachable_names_found": [
+    "vector2d_interp_to",
+    "vector2d_interp_to_constant"
+   ]
+  },
+  {
+   "engine_function": "FMath::RInterpTo / RInterpConstantTo",
+   "python": "MathLibrary.r_interp_to / r_interp_to_constant",
+   "reachable_names_found": [
+    "r_interp_to",
+    "r_interp_to_constant"
+   ]
+  },
+  {
+   "engine_function": "FMath::QInterpTo / QInterpConstantTo",
+   "python": "NOT exposed (no MathLibrary function)",
+   "reachable_names_found": []
+  },
+  {
+   "engine_function": "FQuat::Slerp",
+   "python": "MathLibrary.quat_slerp",
+   "reachable_names_found": [
+    "quat_slerp"
+   ]
+  },
+  {
+   "engine_function": "FQuat::FastLerp",
+   "python": "NOT exposed directly; only inside UAlsRotation::InterpolateQuaternionFast",
+   "reachable_names_found": []
+  },
+  {
+   "engine_function": "FQuat::Inverse / operator* / GetNormalized",
+   "python": "MathLibrary.quat_inversed / multiply_quat_quat / quat_normalized",
+   "reachable_names_found": [
+    "quat_inversed",
+    "multiply_quat_quat",
+    "quat_normalized"
+   ]
+  },
+  {
+   "engine_function": "FRotator::Quaternion / FQuat::Rotator",
+   "python": "MathLibrary.conv_rotator_to_quaternion / quat_rotator",
+   "reachable_names_found": [
+    "conv_rotator_to_quaternion",
+    "quat_rotator"
+   ]
+  },
+  {
+   "engine_function": "FRotator::GetNormalized / FRotator::Normalize",
+   "python": "NOT exposed (only per component via normalize_axis / normalized_delta_rotator)",
+   "reachable_names_found": []
+  },
+  {
+   "engine_function": "FindLookAtRotation / FVector::ToOrientationRotator / ToOrientationQuat",
+   "python": "MathLibrary.find_look_at_rotation / conv_vector_to_rotator / conv_vector_to_quaternion",
+   "reachable_names_found": [
+    "find_look_at_rotation",
+    "conv_vector_to_rotator",
+    "conv_vector_to_quaternion"
+   ]
+  },
+  {
+   "engine_function": "FMath::FindDeltaAngleDegrees",
+   "python": "NOT exposed",
+   "reachable_names_found": []
+  },
+  {
+   "engine_function": "FMath::InvExpApprox",
+   "python": "NOT exposed; reachable only through UAlsMath::DamperExactAlpha and the spring dampers",
+   "reachable_names_found": []
+  },
+  {
+   "engine_function": "FMath::InvSqrt",
+   "python": "NOT exposed (MathLibrary.sqrt only); reachable through UAlsVector::ClampMagnitude01",
+   "reachable_names_found": []
+  },
+  {
+   "engine_function": "FMath::SinCos(float)",
+   "python": "NOT exposed; reachable through UAlsVector::RadianToDirection*/AngleToDirection*",
+   "reachable_names_found": []
+  },
+  {
+   "engine_function": "FMath::Acos / Asin / Atan / Atan2 / Sin / Cos / Tan / Exp / Loge / Sqrt (double)",
+   "python": "MathLibrary.* (double overloads only; ALS uses the float overloads)",
+   "reachable_names_found": [
+    "acos",
+    "asin",
+    "atan",
+    "atan2",
+    "sin",
+    "cos",
+    "tan",
+    "exp",
+    "loge",
+    "sqrt"
+   ]
+  },
+  {
+   "engine_function": "FMath::Pow",
+   "python": "MathLibrary.multiply_multiply_float_float",
+   "reachable_names_found": [
+    "multiply_multiply_float_float"
+   ]
+  },
+  {
+   "engine_function": "FMath::Fmod",
+   "python": "NOT exposed under a stable name",
+   "reachable_names_found": []
+  },
+  {
+   "engine_function": "FMath::SpringDamper",
+   "python": "only through UAlsMath::SpringDamperFloat / UAlsVector::SpringDamperVector (MathLibrary.float_spring_interp is a different API)",
+   "reachable_names_found": []
+  },
+  {
+   "engine_function": "SpringMath::CriticalSpringDamper / HalfLifeToSmoothingTime / FMath::ExponentialSmoothingApprox",
+   "python": "NOT exposed",
+   "reachable_names_found": []
+  },
+  {
+   "engine_function": "FQuat::GetTwistAngle / ToSwingTwist",
+   "python": "NOT exposed (UAlsRotation::GetTwist covers the twist part)",
+   "reachable_names_found": []
+  },
+  {
+   "engine_function": "FAlphaBlend::AlphaToBlendOption (DAL blend_alpha)",
+   "python": "NOT exposed",
+   "reachable_names_found": []
+  },
+  {
+   "engine_function": "FTransform ops (transform_position, relative_transform, ...)",
+   "python": "partly: MathLibrary.transform_location / inverse_transform_location / compose_transforms / convert_transform_to_relative (not covered here)",
+   "reachable_names_found": [
+    "transform_location",
+    "compose_transforms"
+   ]
+  }
+ ]
+}
