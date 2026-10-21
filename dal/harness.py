@@ -268,6 +268,8 @@ def _random_hook(rng: random.Random, event: str) -> tuple:
         v = lambda: tuple(rng.uniform(-300, 300) for _ in range(3))
         return (event, (rng.random() < 0.8, v(), tuple(rng.choice([-1.0, 0.0, 0.5, 1.0]) for _ in range(3)), rng.uniform(0, 100),
                         rng.uniform(0, 1), v(), rng.random() < 0.2, None, v()))
+    if event == "physics_rotation":
+        return (event, rng.choice([0.0, 0.008, 1 / 60, rng.uniform(0.001, 0.1)]))
     return (event,)
 
 

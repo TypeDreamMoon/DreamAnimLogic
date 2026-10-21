@@ -1363,13 +1363,14 @@ class CppGen:
         kinds = {"notify": "Notify", "notify_begin": "NotifyBegin", "notify_end": "NotifyEnd", "notify_tick": "NotifyTick",
                  "montage_ended": "MontageEnded", "montage_blending_out": "MontageBlendingOut", "input": "Input",
                  "movement_mode_changed": "MovementModeChanged", "jumped": "Jumped", "landed": "Landed",
-                 "crouch_started": "CrouchStarted", "crouch_ended": "CrouchEnded", "teleported": "Teleported"}
+                 "crouch_started": "CrouchStarted", "crouch_ended": "CrouchEnded", "teleported": "Teleported",
+                 "physics_rotation": "PhysicsRotation"}
         for k, h in enumerate(m.handlers):
             if h.event in LIFECYCLE:
                 continue
             if h.event in HOOK_EVENTS:
                 args = {"movement_mode_changed": "static_cast<EMovementMode>(DalEvent.ModeA), static_cast<EMovementMode>(DalEvent.ModeB)",
-                        "landed": "DalEvent.Hit"}.get(h.event, "") if h.params else ""
+                        "landed": "DalEvent.Hit", "physics_rotation": "DalEvent.Value.X"}.get(h.event, "") if h.params else ""
                 out += [f"\t// on {h.event}", f"\tif (DalEvent.Kind == DalHost::EEventKind::{kinds[h.event]})", "\t{", f"\t\tDalHandler_{k}({args});", "\t}"]
                 continue
             what = f"on {h.event} {h.name}" + (f" {h.phase}" if h.phase else "")

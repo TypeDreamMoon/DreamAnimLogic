@@ -344,6 +344,7 @@ EVENTS: dict[str, str] = {
     "crouch_started": "the character crouched: ('crouch_started',)",
     "crouch_ended": "the character stood up from a crouch: ('crouch_ended',)",
     "teleported": "the character was moved without sweeping (a teleport): ('teleported',)",
+    "physics_rotation": "the movement component finished its rotation update: ('physics_rotation', delta time)",
 }
 
 # the events without a name (`on jumped { ... }`): their handlers take these parameters, whose names the program chooses
@@ -354,6 +355,7 @@ HOOK_EVENTS: dict[str, tuple[Type, ...]] = {
     "crouch_started": (),
     "crouch_ended": (),
     "teleported": (),
+    "physics_rotation": (FLOAT,),
 }
 
 

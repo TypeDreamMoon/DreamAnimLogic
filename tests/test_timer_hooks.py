@@ -136,6 +136,15 @@ class HookTests(unittest.TestCase):
         self.assertEqual((out[2]["J"], out[2]["Crouches"]), (1001, 101))
         self.assertEqual((out[3]["Mode"], out[3]["Prev"]), (0, 3))
 
+    def test_physics_rotation_carries_the_delta_time(self):
+        src = ACTOR + "state Tm: float;\nstate N: int;\non physics_rotation(d) { Tm += d; N += 1; }"
+        out = run_both(src, [fr(events=[("physics_rotation", 0.25)]), fr(events=[("physics_rotation", 0.5), ("physics_rotation", 0.125)]), fr()])
+        self.assertEqual([f["Tm"] for f in out], [0.25, 0.875, 0.875])
+        self.assertEqual([f["N"] for f in out], [1, 3, 3])
+        out = run_both(ACTOR + "state N: int;\non physics_rotation { N += 1; }", [fr(events=[("physics_rotation",)])])      # a host that leaves the value out
+        self.assertEqual(out[0]["N"], 1)
+        self.assertEqual(errors(ACTOR + "on physics_rotation(a, b) { }"), [("DAL4041", 2, 21)])
+
     def test_a_handler_without_a_parameter_list_ignores_the_payload(self):
         out = run_both(ACTOR + "state N: int;\non movement_mode_changed { N += 1; }\non landed { N += 10; }",
                        [fr(events=[("movement_mode_changed", 1, 3), ("landed", rt.Hit(True))])])
@@ -228,6 +237,13 @@ class CppCompileTests(unittest.TestCase):
         for seed in (1, 2, 3):
             effects += self.run_case(module, harness.random_frames(module, 150, seed), warnings_as_errors=True)
         self.assertGreater(effects, 0)
+
+    def test_physics_rotation_matches_python(self):
+        module = compile_ok(ACTOR + "state Tm: float;\nstate N: int;\non physics_rotation(d) { Tm += d; N += 1; if (N > 3) { host.jump(); } }")
+        for seed in (1, 2):
+            self.run_case(module, harness.random_frames(module, 80, seed), warnings_as_errors=True)
+        frames = [fr(0.125, events=[("physics_rotation", 0.25)]), fr(0.125, events=[("physics_rotation", 0.5)] * 4)]
+        self.assertEqual(self.run_case(module, frames, warnings_as_errors=True), 2)                  # N passes 3 twice
 
     def test_hooks_through_a_scripted_session(self):
         module = compile_ok(HOOKS)

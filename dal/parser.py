@@ -13,7 +13,7 @@ from .lexer import RESERVED_WORDS, Token, tokenize
 
 ASSIGN_OPS = ("=", "+=", "-=", "*=", "/=")
 
-HOOK_EVENTS = ("movement_mode_changed", "jumped", "landed", "crouch_started", "crouch_ended", "teleported")     # `on jumped { ... }`: no name
+HOOK_EVENTS = ("movement_mode_changed", "jumped", "landed", "crouch_started", "crouch_ended", "teleported", "physics_rotation")     # `on jumped { ... }`: no name
 HANDLER_EVENTS = ("notify", "notify_begin", "notify_end", "notify_tick", "montage_ended", "montage_blending_out", "input") + HOOK_EVENTS
 LIFECYCLE_EVENTS = ("begin_play", "end_play")         # `on begin_play { ... }`: no name, not an event of the queue
 PHASES = ("pre_movement", "after_movement", "after_anim")

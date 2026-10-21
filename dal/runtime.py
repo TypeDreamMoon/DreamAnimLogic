@@ -1430,6 +1430,7 @@ HOOK_ARGS = {                                   # event -> ((converter, value wh
     "crouch_started": (),
     "crouch_ended": (),
     "teleported": (),
+    "physics_rotation": ((float, 0.0),),
 }
 
 

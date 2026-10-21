@@ -62,6 +62,7 @@ namespace DalHost
 		CrouchStarted,
 		CrouchEnded,
 		Teleported,
+		PhysicsRotation,                       // Value.X: the delta time of the rotation update
 	};
 
 	enum class EInputPhase : uint8

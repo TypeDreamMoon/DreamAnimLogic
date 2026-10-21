@@ -338,7 +338,7 @@ def entry_call(module: ir.Module, target: str, item) -> str:
 
 
 _HOOK_KINDS = {"movement_mode_changed": "MovementModeChanged", "jumped": "Jumped", "landed": "Landed", "crouch_started": "CrouchStarted",
-               "crouch_ended": "CrouchEnded", "teleported": "Teleported"}
+               "crouch_ended": "CrouchEnded", "teleported": "Teleported", "physics_rotation": "PhysicsRotation"}
 
 
 def hook_event(ev, owner: str = "Pawn") -> str:
@@ -347,6 +347,8 @@ def hook_event(ev, owner: str = "Pawn") -> str:
     parts = [f"DalHost::FEvent E; E.Kind = DalHost::EEventKind::{_HOOK_KINDS[kind]};"]
     if kind == "movement_mode_changed":
         parts.append(f"E.ModeA = {int(ev[1])}; E.ModeB = {int(ev[2]) if len(ev) > 2 else 0};")
+    elif kind == "physics_rotation" and len(ev) > 1:
+        parts.append(f"E.Value = FVector3f({_num(ev[1])}f, 0.0f, 0.0f);")
     elif kind == "landed" and len(ev) > 1:
         h = list(ev[1]) + [None] * (9 - len(ev[1]))
         v3 = lambda v: f"FVector3f({_num(v[0])}f, {_num(v[1])}f, {_num(v[2])}f)"
