@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import keyword
+from dataclasses import dataclass
 
 
 class Type:
@@ -30,6 +31,11 @@ class Type:
     @property
     def is_vector(self) -> bool:
         return self is VEC2 or self is VEC3
+
+    # v3 families (overridden by the subclasses below)
+    is_struct = False       # a struct or settings value (named members)
+    is_tags = False         # a gameplay tag value
+    is_asset = False        # an opaque asset reference (sequence, montage, curve ...)
 
 
 FLOAT = Type("float")
@@ -88,6 +94,67 @@ class EnumType(Type):
         return self.members.index(member)
 
 
+@dataclass
+class FieldDef:
+    """A member of a struct or settings type.  ``default`` is a runtime value (never None for a stored member
+    except an empty asset reference); a ``derived`` member is computed from the others (``expr``, an IR expression)."""
+
+    name: str
+    ty: "Type"
+    default: object = None
+    derived: bool = False
+    expr: object = None
+
+
+class StructType(Type):
+    """A ``struct`` (mutable value type) or a ``settings`` type (read-only data with curves, maps, assets).
+
+    ``fields`` is filled by the checker after every type name is known; ``origin`` is the key of the library
+    file that declares it (None = the file being compiled)."""
+
+    is_struct = True
+
+    def __init__(self, name: str, kind: str = "struct"):
+        Type.__init__(self, name)
+        self.kind = kind
+        self.fields: list[FieldDef] = []
+        self.origin: str | None = None
+        self.cpp_type = "F" + name
+        self.defaults_ready = False
+
+    @property
+    def is_settings(self) -> bool:
+        return self.kind == "settings"
+
+    def field(self, name: str) -> "FieldDef | None":
+        return next((f for f in self.fields if f.name == name), None)
+
+
+class TagType(Type):
+    """A tag set: ``tags AlsGait = "Als.Gait" { Walking, Running }``.  Values are the full tag names (str); '' is no tag."""
+
+    is_tags = True
+
+    def __init__(self, name: str, prefix: str, members: list[str]):
+        Type.__init__(self, name)
+        self.prefix = prefix
+        self.members = list(members)
+        self.origin: str | None = None
+        self.cpp_namespace = name + "Tags"
+
+    def full_name(self, member: str) -> str:
+        return "" if member == "None" else f"{self.prefix}.{member}"
+
+    def member_of(self, full: str) -> str | None:
+        """The declared member for a full tag name ('None' for the empty tag), or None if it is not a member."""
+        if full == "":
+            return "None"
+        for m in self.members:
+            if self.full_name(m) == full:
+                return m
+        return None
+
+
 def make_movement_mode() -> EnumType:
     members = ["None", "Walking", "NavWalking", "Falling", "Swimming", "Flying", "Custom"]
     return EnumType(
@@ -131,4 +198,10 @@ def zero_value(ty: Type):
         return 0
     if ty is HIT:
         return rt.Hit(False, rt.Vec3(0.0, 0.0, 0.0), rt.Vec3(0.0, 0.0, 0.0), 0.0, 1.0)
+    if isinstance(ty, TagType):
+        return ""
+    if isinstance(ty, StructType):
+        from . import values
+
+        return values.default_of(ty)
     raise ValueError(f"no zero value for {ty}")

@@ -13,9 +13,10 @@ from typing import Callable
 
 from . import ir
 from . import runtime as rt
+from . import values as vals
 from .builtins import BUILTINS, CONSTRUCTORS
 from .hostapi import HostV1
-from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, EnumType, Type, zero_value
+from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, EnumType, StructType, TagType, Type, zero_value
 
 
 class InterpError(Exception):
@@ -49,6 +50,8 @@ def coerce(ty: Type, v):
         return int(v)
     if ty is HIT:
         return rt.as_hit(v)
+    if isinstance(ty, (StructType, TagType)):
+        return vals.coerce(ty, v)
     raise InterpError(f"cannot coerce to {ty}")
 
 
@@ -127,6 +130,8 @@ class Evaluator:
             if self.owner is None:
                 raise InterpError("host queries need a running logic")
             return self.owner.host_query(e, [self.ev(a, env) for a in e.args])
+        if k is ir.MakeStruct:
+            return vals.new_struct(e.ty, {n: vals.copy_value(self.ev(v, env)) for n, v in e.fields})
         if k is ir.MontageRef:
             return e.name
         raise InterpError(f"cannot evaluate {k.__name__}")
@@ -174,6 +179,8 @@ class Evaluator:
 
     def member(self, e: ir.Member, env: dict):
         v = self.ev(e.x, env)
+        if isinstance(e.x.ty, StructType):
+            return getattr(v, e.comps)
         comps = e.comps
         if comps in HIT_MEMBERS:
             return getattr(v, comps)
@@ -187,20 +194,26 @@ class Evaluator:
         for s in stmts:
             k = type(s)
             if k is ir.Let:
-                env[s.name] = self.ev(s.init, env)
+                env[s.name] = vals.copy_value(self.ev(s.init, env))
             elif k is ir.Assign:
-                v = self.ev(s.value, env)
+                v = vals.copy_value(self.ev(s.value, env))
                 if s.kind == "local":
                     env[s.name] = v
                 else:
                     self.owner.values[s.name] = v
+            elif k is ir.AssignField:
+                v = vals.copy_value(self.ev(s.value, env))
+                target = env[s.name] if s.kind == "local" else self.owner.values[s.name]
+                for member in s.path[:-1]:
+                    target = getattr(target, member)
+                setattr(target, s.path[-1], v)
             elif k is ir.If:
                 if self.ev(s.cond, env):
                     self.run_block(s.then, env)
                 else:
                     self.run_block(s.orelse, env)
             elif k is ir.Return:
-                raise _ReturnValue(None if s.value is None else self.ev(s.value, env))
+                raise _ReturnValue(None if s.value is None else vals.copy_value(self.ev(s.value, env)))
             elif k is ir.Command:
                 self.owner.emit_command(s.name, [command_arg(a, self.ev(a, env)) for a in s.args])
             elif k is ir.For:
@@ -254,9 +267,9 @@ class Interpreter:
         self.values.clear()
         self.values.update(self._params)
         for i in self.module.inputs:
-            self.values[i.name] = i.default
+            self.values[i.name] = vals.copy_value(i.default)
         for s in self.module.states:
-            self.values[s.name] = s.default
+            self.values[s.name] = vals.copy_value(s.default)
         self._dt = 0.0
         self._pending = []
         self._cmds = []
@@ -373,7 +386,7 @@ class Interpreter:
     def snapshot(self) -> dict[str, object]:
         out: dict[str, object] = {}
         for i in self.module.inputs:
-            out[i.name] = rt.to_plain(self.values[i.name])
+            rt.flatten_into(out, i.name, self.values[i.name])
         for s in self.module.states:
-            out[s.name] = rt.to_plain(self.values[s.name])
+            rt.flatten_into(out, s.name, self.values[s.name])
         return out

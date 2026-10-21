@@ -38,6 +38,7 @@ using int64 = std::int64_t;
 
 // reflection macros are empty outside UHT
 #define UCLASS(...)
+#define USTRUCT(...)
 #define UENUM(...)
 #define UPROPERTY(...)
 #define UFUNCTION(...)

@@ -114,6 +114,12 @@ class CallExtern(Expr):
 
 
 @dataclass
+class MakeStruct(Expr):
+    """Name(member: value, ...): a struct value; members that are not listed keep their declared defaults."""
+    fields: list[tuple[str, Expr]]
+
+
+@dataclass
 class MontageRef(Expr):
     """A declared montage as a command argument (compile-time only)."""
     name: str
@@ -145,6 +151,15 @@ class Let(Stmt):
 class Assign(Stmt):
     kind: str              # 'state' | 'local'
     name: str
+    value: Expr
+
+
+@dataclass
+class AssignField(Stmt):
+    """S.a.b = v: assign a member of a struct state or local variable (``path`` are the member names)."""
+    kind: str              # 'state' | 'local'
+    name: str
+    path: tuple[str, ...]
     value: Expr
 
 
@@ -301,6 +316,7 @@ class Module:
     source_sha256: str = ""
     standin_source: str = ""                                    # Python stand-in file text (bundled by the Python backend)
     standin_filename: str = ""
+    structs: list = field(default_factory=list)                 # StructType, dependencies first (library structs included)
     libs: list[LibRef] = field(default_factory=list)            # libraries used, dependencies first
     is_library: bool = False                                    # a file without `logic`: only shared declarations
 
@@ -354,6 +370,8 @@ def children(e: Expr) -> list[Expr]:
         return [e.c, e.a, e.b]
     if isinstance(e, (Make, CallFn, CallBuiltin, CallExtern, HostQuery)):
         return list(e.args)
+    if isinstance(e, MakeStruct):
+        return [v for _n, v in e.fields]
     return []
 
 
@@ -379,7 +397,7 @@ def walk_stmt_exprs(stmts: list[Stmt]):
     for s in stmts:
         if isinstance(s, Let):
             yield from walk_exprs(s.init)
-        elif isinstance(s, Assign):
+        elif isinstance(s, (Assign, AssignField)):
             yield from walk_exprs(s.value)
         elif isinstance(s, If):
             yield from walk_exprs(s.cond)
@@ -433,6 +451,8 @@ def dump_expr(e: Expr) -> str:
         return f"{e.name}[{e.sig_index}]({', '.join(dump_expr(a) for a in e.args)})"
     if isinstance(e, CallExtern):
         return f"extern:{e.name}({', '.join(dump_expr(a) for a in e.args)})"
+    if isinstance(e, MakeStruct):
+        return f"{e.ty.name}({', '.join(f'{n}: {dump_expr(v)}' for n, v in e.fields)})"
     if isinstance(e, MontageRef):
         return f"montage:{e.name}"
     if isinstance(e, HostQuery):
@@ -449,6 +469,8 @@ def dump_stmts(stmts: list[Stmt], indent: int = 1) -> list[str]:
             out.append(f"{pad}{kw} {s.name}: {s.ty} = {dump_expr(s.init)}")
         elif isinstance(s, Assign):
             out.append(f"{pad}{s.kind}:{s.name} = {dump_expr(s.value)}")
+        elif isinstance(s, AssignField):
+            out.append(f"{pad}{s.kind}:{s.name}.{'.'.join(s.path)} = {dump_expr(s.value)}")
         elif isinstance(s, If):
             out.append(f"{pad}if {dump_expr(s.cond)}")
             out.extend(dump_stmts(s.then, indent + 1))
@@ -471,6 +493,8 @@ def dump(m: Module) -> str:
         out.append(f"use {lib.filename!r}")
     for en in m.enums:
         out.append(f"enum {en.name} {{{', '.join(en.members)}}}")
+    for st in m.structs:
+        out.append(f"{st.kind} {st.name} {{" + "; ".join(f"{f.name}: {f.ty}" for f in st.fields) + "}")
     for mt in m.montages:
         out.append(f"montage {mt.name} {{{', '.join(mt.sections)}}}")
     for a in m.actions:

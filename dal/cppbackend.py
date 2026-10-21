@@ -46,6 +46,7 @@ from .types import (
     VEC2,
     VEC3,
     EnumType,
+    StructType,
     Type,
 )
 
@@ -145,6 +146,8 @@ def cpp_type(ty: Type) -> str:
         return "DalHost::FHit"
     if isinstance(ty, EnumType):
         return ty.cpp_type
+    if isinstance(ty, StructType):
+        return ty.cpp_type
     raise ValueError(ty)
 
 
@@ -169,7 +172,29 @@ def cpp_value(ty: Type, v) -> str:
         return "FQuat4f(%s)" % ", ".join(fmt_float(c) for c in v)
     if isinstance(ty, EnumType):
         return ty.cpp_members[ty.members[int(v)]]
+    if isinstance(ty, StructType):
+        return cpp_struct_value(ty, v)
     raise ValueError(ty)
+
+
+def _plain_equal(a, b) -> bool:
+    from . import runtime as rt
+
+    if isinstance(a, rt.Struct) and isinstance(b, rt.Struct):
+        return all(_plain_equal(getattr(a, n), getattr(b, n)) for n in a._FIELDS)
+    return rt.to_plain(a) == rt.to_plain(b)
+
+
+def cpp_struct_value(ty: StructType, v, var: str = "Dal_S") -> str:
+    """C++ expression for a constant struct value: the plain default constructor when nothing differs from the declared
+    defaults, otherwise an immediately-invoked lambda that sets the members that do."""
+    from . import values
+
+    diffs = [f for f in ty.fields if not _plain_equal(getattr(v, f.name), values.member_default(f))]
+    if not diffs:
+        return f"{ty.cpp_type}()"
+    sets = " ".join(f"{var}.{f.name} = {cpp_value(f.ty, getattr(v, f.name))};" for f in diffs)
+    return f"[]() {{ {ty.cpp_type} {var}; {sets} return {var}; }}()"
 
 
 def _is_nonzero_number(e: ir.Expr) -> bool:
@@ -185,6 +210,7 @@ _COMP_CPP = {"x": "X", "y": "Y", "z": "Z", "w": "W", "pitch": "Pitch", "yaw": "Y
 class CppExprGen:
     def __init__(self, module: ir.Module):
         self.m = module
+        self.struct_depth = 0
 
     def x(self, e: ir.Expr) -> str:
         k = type(e)
@@ -230,10 +256,22 @@ class CppExprGen:
             return f"{ext.cpp}({', '.join(unparen(self.x(a)) for a in e.args)})"  # type: ignore[union-attr]
         if k is ir.HostQuery:
             return f"{query_cpp(e.name)}({', '.join(unparen(self.x(a)) for a in e.args)})"
+        if k is ir.MakeStruct:
+            return self.make_struct(e)
         raise AssertionError(k)
+
+    def make_struct(self, e: ir.MakeStruct) -> str:
+        var = f"Dal_S{self.struct_depth}"
+        self.struct_depth += 1
+        sets = " ".join(f"{var}.{n} = {unparen(self.x(v))};" for n, v in e.fields)
+        self.struct_depth -= 1
+        return f"([&]() {{ {cpp_type(e.ty)} {var}; {sets} return {var}; }})()" if sets else f"{cpp_type(e.ty)}()"
 
     def member(self, e: ir.Member) -> str:
         base = self.x(e.x)
+        if isinstance(e.x.ty, StructType):
+            text = f"{base}.{e.comps}"
+            return f"static_cast<EMovementMode>({text})" if e.ty is MOVEMENT_MODE else text
         if e.x.ty is HIT:
             return f"{base}.{HIT_MEMBER_CPP[e.comps]}"
         if len(e.comps) == 1 or e.comps in ("pitch", "yaw", "roll"):
@@ -428,6 +466,8 @@ class CppGen:
                 out.append(f"{pad}{const}{cpp_type(s.ty)} {s.name} = {unparen(self.ex.x(s.init))};")
             elif isinstance(s, ir.Assign):
                 out.append(f"{pad}{s.name} = {unparen(self.ex.x(s.value))};")
+            elif isinstance(s, ir.AssignField):
+                out.append(f"{pad}{s.name}{''.join('.' + m for m in s.path)} = {unparen(self.ex.x(s.value))};")
             elif isinstance(s, ir.If):
                 out.extend(self.if_chain(s, depth))
             elif isinstance(s, ir.Return):
@@ -877,6 +917,15 @@ class CppGen:
         return out
 
     # ---- declarations shared by the logic header and the library headers -----------------------------------------
+    def struct_decl(self, st: StructType) -> list[str]:
+        out = ["USTRUCT(BlueprintType)", f"struct {st.cpp_type}", "{", f"{T}GENERATED_BODY()"]
+        for f in st.fields:
+            out.append("")
+            out.append(f'{T}UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "DAL")')
+            out.append(f"{T}{cpp_prop_type(f.ty)} {f.name} = {cpp_value(f.ty, f.default)};")
+        out.append("};")
+        return out
+
     def enum_decl(self, en: EnumType) -> list[str]:
         out = ["UENUM(BlueprintType)", f"enum class {en.cpp_type} : uint8", "{"]
         for mem in en.members:
@@ -928,6 +977,10 @@ class CppGen:
         for en in m.enums:
             if en.origin == origin:
                 L.extend(self.enum_decl(en))
+                L.append("")
+        for st in m.structs:
+            if st.origin == origin:
+                L.extend(self.struct_decl(st))
                 L.append("")
         consts = [c for c in m.consts if c.origin == origin]
         funcs = [f for f in m.funcs if f.origin == origin]
@@ -990,6 +1043,10 @@ class CppGen:
         for en in m.enums:
             if en.origin is None:
                 L.extend(self.enum_decl(en))
+                L.append("")
+        for st in m.structs:
+            if st.origin is None:
+                L.extend(self.struct_decl(st))
                 L.append("")
         if self.actor:
             L.append("UCLASS(ClassGroup = (Dal), Meta = (BlueprintSpawnableComponent))")

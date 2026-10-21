@@ -122,9 +122,11 @@ class Parser:
             return self.parse_action()
         if t.kind == "IDENT" and t.text == "use":
             return self.parse_use()
+        if t.kind == "IDENT" and t.text == "struct":
+            return self.parse_struct()
         raise self.error(
             "DAL2001",
-            "expected a declaration (use, logic, enum, const, param, input, state, fn, extern, update, entry, "
+            "expected a declaration (use, logic, enum, struct, const, param, input, state, fn, extern, update, entry, "
             f"on, timer, window, buffer, combo, montage, action), found {self.describe(t)}",
         )
 
@@ -136,6 +138,35 @@ class Parser:
         self.advance()
         self.expect_op(";", "after the use path")
         return S.UseDecl(kw.pos, str(s.value), s.pos)
+
+    def parse_fields(self, what: str, allow_derived: bool = False) -> list[S.FieldDecl]:
+        """`{ name: type [= init]; ... }` -- the members of a struct (or settings) declaration."""
+        self.expect_op("{", f"after the {what} name")
+        fields: list[S.FieldDecl] = []
+        while not self.tok.is_op("}"):
+            if self.tok.kind == "EOF":
+                raise self.error("DAL2001", f"expected '}}' to close the {what}, found end of file")
+            derived = False
+            if allow_derived and self.is_word("derived") and self.peek().kind == "IDENT":
+                self.advance()
+                derived = True
+            f = self.ident("a member name")
+            self.expect_op(":", "after the member name")
+            type_name, type_pos = self.parse_type_name()
+            init = None
+            if self.tok.is_op("="):
+                self.advance()
+                init = self.parse_expr()
+            self.expect_op(";", "after the member")
+            fields.append(S.FieldDecl(f.text, type_name, f.pos, type_pos, init, derived))
+        self.advance()
+        return fields
+
+    def parse_struct(self) -> S.StructDecl:
+        kw = self.advance()      # struct (a reserved word, so it is never a name)
+        name = self.ident("a struct name")
+        fields = self.parse_fields("struct")
+        return S.StructDecl(kw.pos, name.text, fields, name_pos=name.pos)
 
     def parse_type_name(self) -> tuple[str, Pos]:
         t = self.tok
@@ -355,23 +386,36 @@ class Parser:
             if nxt.kind == "OP" and nxt.text in ASSIGN_OPS:
                 return self.parse_assign()
             if nxt.is_op("."):
-                # v.x = ... is not supported: values are immutable
+                # a.b.c = value;  (a member of a struct state / variable)
                 j = self.i
                 while self.tokens[j].kind == "IDENT" and self.tokens[j + 1].is_op(".") and self.tokens[j + 2].kind == "IDENT":
                     j += 2
                 after = self.tokens[j + 1]
                 if after.kind == "OP" and after.text in ASSIGN_OPS and j > self.i:
-                    raise self.error(
-                        "DAL2010",
-                        "cannot assign to a component; vectors are values: build a new one, e.g. v = vec2(a, b)",
-                        t.pos,
-                    )
+                    return self.parse_member_assign()
         if t.kind in ("INT", "FLOAT", "STRING") or t.kind == "IDENT" or t.is_op("("):
             raise self.error(
                 "DAL2011",
                 f"expected a statement (let, var, assignment, if, return), found an expression starting with {self.describe(t)}",
             )
         raise self.error("DAL2001", f"expected a statement, found {self.describe(t)}")
+
+    def parse_member_assign(self) -> S.MemberAssignStmt:
+        name = self.advance()
+        path: list[str] = []
+        path_pos: list[Pos] = []
+        while self.tok.is_op("."):
+            self.advance()
+            f = self.tok
+            if f.kind != "IDENT":
+                raise self.error("DAL2001", f"expected a member name after '.', found {self.describe(f)}")
+            self.advance()
+            path.append(f.text)
+            path_pos.append(f.pos)
+        op = self.advance()
+        value = self.parse_expr()
+        self.expect_op(";", "after the assignment")
+        return S.MemberAssignStmt(name.pos, name.text, path, op.text, value, name.pos, path_pos)
 
     def parse_let(self) -> S.LetStmt:
         kw = self.advance()
@@ -727,15 +771,27 @@ class Parser:
                 if isinstance(expr, S.NameRef):
                     self.advance()
                     args: list[S.Expr] = []
+                    names: list[str | None] = []
+                    name_pos: list[Pos | None] = []
                     if not self.tok.is_op(")"):
                         while True:
+                            a = self.tok
+                            if a.kind == "IDENT" and self.peek().is_op(":") and a.text not in RESERVED_WORDS:
+                                self.advance()
+                                self.advance()
+                                names.append(a.text)
+                                name_pos.append(a.pos)
+                            else:
+                                names.append(None)
+                                name_pos.append(None)
                             args.append(self.parse_expr())
                             if self.tok.is_op(","):
                                 self.advance()
                                 continue
                             break
                     self.expect_op(")", "to close the argument list")
-                    expr = S.CallExpr(expr.pos, expr.name, args)
+                    named = any(n is not None for n in names)
+                    expr = S.CallExpr(expr.pos, expr.name, args, names if named else None, name_pos if named else None)
                     continue
                 raise self.error("DAL2004", "only functions can be called; write f(x), not x.f(...)", t.pos)
             break

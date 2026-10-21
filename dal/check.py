@@ -24,6 +24,7 @@ from .builtins import (
 from .errors import DalError, Diagnostic, Pos, SourceFile
 from .hostapi import COMMANDS, HOST_ITEMS, QUERIES
 from .interp import eval_const
+from . import values
 from .lexer import RESERVED_WORDS
 from .libs import LIBRARY_DECLS
 from .names import CPP_KEYWORDS, PY_RESERVED, reserved_reason
@@ -43,6 +44,8 @@ from .types import (
     VEC2,
     VEC3,
     EnumType,
+    FieldDef,
+    StructType,
     Type,
     zero_value,
 )
@@ -93,6 +96,9 @@ class Scope:
         return out
 
 
+# attributes of the generated struct classes (dal.runtime.Struct): a member may not hide them
+STRUCT_API = frozenset({"copy", "to_plain", "flatten", "from_value", "load"})
+
 _SWIZZLE = {"x": 0, "y": 1, "z": 2}
 _MONTAGE_STATE = {"playing": BOOL, "active": BOOL, "position": FLOAT}   # Light1.playing ... ('section' has the montage's own enum)
 _HIT_TYPES = {"bool": BOOL, "vec3": VEC3, "float": FLOAT}
@@ -123,6 +129,10 @@ class Checker:
         self.later: dict[str, str] = {}   # declared variables, for better messages in constant expressions
         self.later_fns: set[str] = set()  # functions declared later in the file
         self.invalid_names: set[str] = set()  # declared with an unusable name; uses are not reported again
+        self.structs: dict[str, StructType] = {}          # struct and settings types by name
+        self.struct_decls: dict[str, S.StructDecl] = {}
+        self.folding: set[str] = set()
+        self.struct_cached: set[str] = set()              # struct types reused from another compilation unit (already complete)
         self.kind = "anim"
 
     def focus(self, d) -> None:
@@ -180,7 +190,9 @@ class Checker:
             return BASIC_TYPES[name]
         if name in self.enums:
             return self.enums[name]
-        cands = list(BASIC_TYPES) + list(self.enums)
+        if name in self.structs:
+            return self.structs[name]
+        cands = list(BASIC_TYPES) + list(self.enums) + list(self.structs)
         self.err("DAL3041", f"unknown type '{name}'" + self.suggest(name, cands), pos)
         return ERROR
 
@@ -238,6 +250,15 @@ class Checker:
                 self.declare_montage(d)
         for d in decls:
             self.focus(d)
+            if isinstance(d, S.StructDecl):
+                self.declare_struct(d)
+        for d in decls:
+            self.focus(d)
+            if isinstance(d, S.StructDecl):
+                self.declare_struct_members(d)
+        self.order_structs()
+        for d in decls:
+            self.focus(d)
             if isinstance(d, S.ActionDecl):
                 self.declare_action(d)
 
@@ -259,6 +280,10 @@ class Checker:
             self.focus(d)
             if isinstance(d, S.ConstDecl):
                 self.declare_const(d)
+            elif isinstance(d, S.StructDecl):
+                st = self.structs.get(d.name)
+                if st is not None and self.struct_decls.get(d.name) is d:
+                    self.ensure_defaults(st)
 
         # 3. signatures of functions and externs, then the variable declarations
         for d in decls:
@@ -314,6 +339,112 @@ class Checker:
             raise DalError(self.diags)
         m.enums = self.user_enums
         return m
+
+    # ---- structs ----------------------------------------------------------------------------------------------
+    def declare_struct(self, d: S.StructDecl) -> None:
+        if not self.declare_global(d.name, "struct", d.name_pos or d.pos, what="a struct name"):
+            return
+        origin = self.origin_of(d)
+        cached = self.ctx.types.get((origin, d.name)) if (self.ctx is not None and origin is not None) else None
+        st = cached if cached is not None else StructType(d.name, "struct")
+        st.origin = origin
+        self.structs[d.name] = st
+        self.struct_decls[d.name] = d
+        self.globals[d.name].obj = st
+        if cached is not None:
+            self.struct_cached.add(d.name)
+        elif self.ctx is not None and origin is not None:
+            self.ctx.types[(origin, d.name)] = st
+
+    def struct_member_ok(self, st: StructType, ty: Type) -> bool:
+        if ty is HIT or ty is MONTAGE:
+            return False
+        if isinstance(ty, StructType):
+            return st.kind == "settings" or ty.kind == "struct"
+        return True
+
+    def declare_struct_members(self, d: S.StructDecl) -> None:
+        st = self.structs.get(d.name)
+        if st is None or self.struct_decls.get(d.name) is not d:
+            return
+        if d.name in self.struct_cached:
+            return                                       # shared with another compilation unit: already complete
+        seen: dict[str, Pos] = {}
+        for fd in d.fields:
+            ty = self.resolve_type(fd.type_name, fd.type_pos)
+            if fd.name in seen:
+                self.err("DAL3001", f"member '{fd.name}' is declared twice in {st.kind} {d.name} (first on line {seen[fd.name].line})", fd.pos)
+                continue
+            seen[fd.name] = fd.pos
+            if not self.valid_ident(fd.name, fd.pos, "a member name") or fd.name in STRUCT_API:
+                if fd.name in STRUCT_API:
+                    self.err("DAL3004", f"'{fd.name}' cannot be a member name: it is an attribute of the generated struct classes", fd.pos)
+                continue
+            if ty is not ERROR and not self.struct_member_ok(st, ty):
+                what = "hit results cannot be stored" if ty is HIT else f"a {ty} cannot be a member of a {st.kind}"
+                self.err("DAL4050", f"member '{fd.name}' of {st.kind} {d.name}: {what}", fd.type_pos)
+                ty = ERROR
+            st.fields.append(FieldDef(fd.name, ty))
+
+    def order_structs(self) -> None:
+        """Dependencies first (a struct member of struct type needs its type declared before); reports DAL4053 for cycles."""
+        order: list[StructType] = []
+        state: dict[str, int] = {}
+        reported = False
+
+        def visit(st: StructType, path: list[str]) -> None:
+            nonlocal reported
+            if state.get(st.name, 0) == 2:
+                return
+            state[st.name] = 1
+            for f in st.fields:
+                if not isinstance(f.ty, StructType):
+                    continue
+                if state.get(f.ty.name, 0) == 1:
+                    # this member closes a cycle: report it once and cut it, so that no default value is infinite
+                    if not reported:
+                        d = self.struct_decls.get(f.ty.name)
+                        if d is not None:
+                            self.focus(d)
+                            cycle = (path + [st.name])
+                            cycle = cycle[cycle.index(f.ty.name):] + [f.ty.name]
+                            self.err("DAL4053", f"{f.ty.kind} {f.ty.name} contains itself: " + " -> ".join(cycle), d.name_pos or d.pos)
+                        reported = True
+                    f.ty = ERROR
+                else:
+                    visit(f.ty, path + [st.name])
+            state[st.name] = 2
+            order.append(st)
+
+        for d in self.unit.decls:
+            if isinstance(d, S.StructDecl):
+                st = self.structs.get(d.name)
+                if st is not None and self.struct_decls.get(d.name) is d:
+                    visit(st, [])
+        self.module.structs = order
+
+    def ensure_defaults(self, st: StructType) -> None:
+        """Fold the declared member defaults of a struct (its nested structs first); idempotent."""
+        if st.defaults_ready or st.name in self.folding:
+            return
+        d = self.struct_decls.get(st.name)
+        if d is None or d.name in self.struct_cached:
+            st.defaults_ready = True
+            return
+        self.folding.add(st.name)
+        saved = self.source
+        self.focus(d)
+        by_name = {fd.name: fd for fd in d.fields}
+        for f in st.fields:
+            fd = by_name.get(f.name)
+            if f.ty is ERROR or fd is None:
+                continue
+            if isinstance(f.ty, StructType):
+                self.ensure_defaults(f.ty)
+            f.default = self.const_value(fd.init, f.ty, fd.pos, f"member '{f.name}' of {st.kind} {st.name}")
+        st.defaults_ready = True
+        self.folding.discard(st.name)
+        self.source = saved
 
     # ---- declarations ---------------------------------------------------------------------------------------
     def declare_enum(self, d: S.EnumDecl) -> None:
@@ -378,17 +509,25 @@ class Checker:
                 return None
         return v
 
+    def zero(self, ty: Type):
+        """The default value of a type; a struct's declared member defaults are folded first."""
+        if ty is ERROR:
+            return 0
+        if isinstance(ty, StructType):
+            self.ensure_defaults(ty)
+        return zero_value(ty)
+
     def const_value(self, init: S.Expr | None, ty: Type, pos: Pos, what: str):
         """Value of a ``= init`` clause (or the zero value)."""
         if init is None:
-            return zero_value(ty) if ty is not ERROR else 0
+            return self.zero(ty)
         sc = Scope("const")
         e = self.ex(init, sc)
         e = self.assignable(ty, e, init.pos, what)
         if ty is ERROR or e.ty is ERROR:
             return 0
         v = self.fold(e, init.pos)
-        return zero_value(ty) if v is None else v
+        return self.zero(ty) if v is None else v
 
     def declare_param(self, d: S.ParamDecl) -> None:
         ok = self.declare_global(d.name, "param", d.name_pos or d.pos, what="a parameter name")
@@ -411,7 +550,7 @@ class Checker:
         value = None
         if d.binding is not None:
             host = self.check_binding(d, ty)
-            value = zero_value(ty) if ty is not ERROR else 0
+            value = self.zero(ty)
         else:
             value = self.const_value(d.default, ty, d.pos, f"input '{d.name}'")
         if ok and ty is not ERROR:
@@ -566,6 +705,8 @@ class Checker:
             return self.let_stmt(s, sc)
         if isinstance(s, S.AssignStmt):
             return self.assign_stmt(s, sc)
+        if isinstance(s, S.MemberAssignStmt):
+            return self.member_assign_stmt(s, sc)
         if isinstance(s, S.IfStmt):
             c = self.ex(s.cond, sc)
             if c.ty is not BOOL and c.ty is not ERROR:
@@ -641,6 +782,78 @@ class Checker:
             value = self.binary(s.op[0], cur, value, s.pos, name_pos)
         value = self.assignable(target_ty, value, s.value.pos, f"'{s.name}'")
         return ir.Assign(kind, s.name, value)
+
+    def member_assign_stmt(self, s: S.MemberAssignStmt, sc: Scope) -> ir.Stmt | None:
+        """`S.a.b = v;` -- the target is a struct state or a `var` whose members are followed down the path."""
+        name_pos = s.name_pos or s.pos
+        loc = sc.lookup(s.name)
+        if loc is not None:
+            if not loc.mutable:
+                self.err("DAL5001", f"'{s.name}' is not assignable: declare it with 'var' to change it later", name_pos)
+                self.ex(s.value, sc)
+                return None
+            kind, base_ty = "local", loc.ty
+        else:
+            sym = self.globals.get(s.name)
+            if sym is None and s.name in self.invalid_names:
+                self.ex(s.value, sc)
+                return None
+            if sym is None:
+                self.err("DAL3040", f"undefined name '{s.name}'" + self.suggest(s.name, list(self.globals) + sc.visible_names()), name_pos)
+                self.ex(s.value, sc)
+                return None
+            if sym.kind != "state":
+                why = {
+                    "input": "inputs are read-only inside the logic; copy it into a state or a local if you need to change it",
+                    "param": "params are tunable constants for the logic",
+                    "const": "constants cannot change",
+                }.get(sym.kind, f"a {sym.kind} cannot be assigned")
+                self.err("DAL5001", f"cannot assign to {sym.kind} '{s.name}': {why}", name_pos)
+                self.ex(s.value, sc)
+                return None
+            if sc.ctx == "fn":
+                self.err("DAL5010", "functions are pure and cannot write state; return a value and assign it in update/entry", name_pos)
+                self.ex(s.value, sc)
+                return None
+            kind = "state"
+            st = self.module.find_state(s.name)
+            base_ty = st.ty if st else ERROR
+        cur_ty = base_ty
+        for i, member in enumerate(s.path):
+            pos = s.path_pos[i] if i < len(s.path_pos) else name_pos
+            if cur_ty is ERROR:
+                self.ex(s.value, sc)
+                return None
+            if cur_ty in (VEC2, VEC3, ROTATOR, QUAT):
+                self.err("DAL2010", "cannot assign to a component; vectors are values: build a new one, e.g. v = vec2(a, b)", s.pos)
+                self.ex(s.value, sc)
+                return None
+            if not isinstance(cur_ty, StructType):
+                self.err("DAL4030", f"type {cur_ty} has no members", pos)
+                self.ex(s.value, sc)
+                return None
+            if cur_ty.is_settings:
+                self.err("DAL5004", f"{cur_ty.name} is a settings value and read-only; copy what you need into a state", pos)
+                self.ex(s.value, sc)
+                return None
+            fd = cur_ty.field(member)
+            if fd is None:
+                self.err("DAL4030", f"{cur_ty.kind} {cur_ty.name} has no member '{member}'" + self.suggest(member, [x.name for x in cur_ty.fields])
+                         + f" (members: {', '.join(x.name for x in cur_ty.fields) or 'none'})", pos)
+                self.ex(s.value, sc)
+                return None
+            cur_ty = fd.ty
+        value = self.ex(s.value, sc)
+        if s.op != "=":
+            base_ref = ir.LocalRef(base_ty, s.name) if kind == "local" else ir.StateRef(base_ty, s.name)
+            cur: ir.Expr = base_ref
+            walk_ty = base_ty
+            for member in s.path:
+                walk_ty = walk_ty.field(member).ty        # type: ignore[union-attr]
+                cur = ir.Member(walk_ty, cur, member)
+            value = self.binary(s.op[0], cur, value, s.pos, name_pos)
+        value = self.assignable(cur_ty, value, s.value.pos, f"'{s.name}.{'.'.join(s.path)}'")
+        return ir.AssignField(kind, s.name, tuple(s.path), value)
 
     def return_stmt(self, s: S.ReturnStmt, sc: Scope) -> ir.Stmt:
         if sc.ctx == "fn":
@@ -722,6 +935,8 @@ class Checker:
             return {"param": ir.ParamRef, "input": ir.InputRef, "state": ir.StateRef}[k](ty, name)
         if k == "enum":
             return self.bad("DAL3030", f"enum '{name}' is a type; write {name}.<Member> to name a value", e.pos)
+        if k == "struct":
+            return self.bad("DAL3030", f"{self.structs[name].kind} '{name}' is a type; write {name}(...) to build a value", e.pos)
         if k == "montage":
             return self.bad("DAL3030", f"montage '{name}' is not a value: write {name}.playing, {name}.position, {name}.section or "
                                        f"{name}.<Section>, or pass it to a host.montage_* command", e.pos)
@@ -787,6 +1002,12 @@ class Checker:
                 return self.bad("DAL4030", f"{b.ty} has no component '{[c for c in f if _SWIZZLE[c] >= dim][0]}'", e.field_pos)
             ty = {1: FLOAT, 2: VEC2, 3: VEC3}[len(f)]
             return ir.Member(ty, b, f)
+        if isinstance(b.ty, StructType):
+            fd = b.ty.field(f)
+            if fd is None:
+                return self.bad("DAL4030", f"{b.ty.kind} {b.ty.name} has no member '{f}'" + self.suggest(f, [x.name for x in b.ty.fields])
+                                + f" (members: {', '.join(x.name for x in b.ty.fields) or 'none'})", e.field_pos)
+            return ir.Member(fd.ty, b, f)
         if b.ty is ROTATOR:
             if f in ("pitch", "yaw", "roll"):
                 return ir.Member(FLOAT, b, f)
@@ -1046,6 +1267,8 @@ class Checker:
                 return ir.Binary(BOOL, op, a, b)
             if ta is tb and ta in (VEC2, VEC3, ROTATOR, QUAT):
                 return self.bad("DAL4001", f"{ta} values cannot be compared with '{op}'; compare lengths or components, e.g. is_nearly_zero(length(a - b))", op_pos)
+            if ta is tb and isinstance(ta, StructType):
+                return self.bad("DAL4001", f"{ta.kind} values cannot be compared with '{op}'; compare the members you care about", op_pos)
             return fail()
         if op in ("&&", "||"):
             if ta is BOOL and tb is BOOL:
@@ -1094,6 +1317,8 @@ class Checker:
             args = [self.widen(a) if w else a for a, w in zip(args, widen)]
             return ir.CallBuiltin(b.sigs[idx].ret, name, idx, args)
         sym = self.globals.get(name)
+        if sym is not None and sym.kind == "struct":
+            return self.make_struct(e, self.structs[name], args, sc)
         if sym is None and sc.ctx == "const" and name in self.later_fns:
             return self.bad("DAL5002", f"a constant expression cannot call '{name}'; only built-in functions are allowed", e.pos)
         if sym is None:
@@ -1122,6 +1347,32 @@ class Checker:
                 return ir.CallFn(ret, name, conv)
             return ir.CallExtern(ret, name, conv)
         return self.bad("DAL3031", f"'{name}' is a {sym.kind}, not a function", e.pos)
+
+    def make_struct(self, e: S.CallExpr, st: StructType, args: list[ir.Expr], sc: Scope) -> ir.Expr:
+        if st.kind == "settings":
+            return self.bad("DAL5004", f"{st.name} is a settings type: its values come from a param or from a member of another settings value, not from code", e.pos)
+        names = e.names or [None] * len(args)
+        if any(n is None for n in names):
+            return self.bad("DAL4054", f"build a struct with named arguments: {st.name}(member: value, ...), not positional ones", e.pos)
+        self.ensure_defaults(st)
+        given: dict[str, ir.Expr] = {}
+        ok = True
+        for i, (n, a) in enumerate(zip(names, args)):
+            apos = (e.name_pos[i] if e.name_pos and e.name_pos[i] else e.args[i].pos)
+            fd = st.field(n)       # type: ignore[arg-type]
+            if fd is None:
+                self.err("DAL4030", f"struct {st.name} has no member '{n}'" + self.suggest(n, [x.name for x in st.fields])
+                         + f" (members: {', '.join(x.name for x in st.fields) or 'none'})", apos)
+                ok = False
+                continue
+            if n in given:
+                self.err("DAL4056", f"member '{n}' is given twice", apos)
+                ok = False
+                continue
+            given[n] = self.assignable(fd.ty, a, e.args[i].pos, f"member '{n}' of {st.name}")     # type: ignore[index]
+        if not ok:
+            return ir.Lit(ERROR, 0)
+        return ir.MakeStruct(st, [(f.name, given[f.name]) for f in st.fields if f.name in given])
 
     def no_overload(self, name: str, sigs, args: list[ir.Expr]) -> str:
         given = ", ".join(a.ty.name for a in args)
@@ -1187,6 +1438,7 @@ class Checker:
         first_pos = decl_pos.get(externs[0].name, Pos(1, 1, 2))
         taken = {self.module.name, "_rt"}
         taken |= {e.name for e in self.user_enums}
+        taken |= {s.name for s in self.module.structs}
         taken |= {f"_fn_{f.name}" for f in self.module.funcs}
         taken |= {f"_K_{c.name}" for c in self.module.consts}
         for node in tree.body:

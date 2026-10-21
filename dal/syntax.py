@@ -45,6 +45,8 @@ class MemberRef(Expr):
 class CallExpr(Expr):
     callee: str
     args: list[Expr]
+    names: list[str | None] | None = None        # struct construction: Name(member: value, ...)
+    name_pos: list[Pos | None] | None = None
 
 
 @dataclass
@@ -118,6 +120,17 @@ class CmdStmt(Stmt):
     name: str
     args: list[Expr]
     name_pos: Pos = None  # type: ignore[assignment]
+
+
+@dataclass
+class MemberAssignStmt(Stmt):
+    """GroundedState.VelocityBlend.ForwardAmount = f;  -- a member of a struct state or variable."""
+    name: str
+    path: list[str]
+    op: str
+    value: Expr
+    name_pos: Pos = None  # type: ignore[assignment]
+    path_pos: list[Pos] = field(default_factory=list)
 
 
 @dataclass
@@ -342,6 +355,24 @@ class ComboDecl(Decl):
 
 
 # ---- v3 declarations ----------------------------------------------------------------------------------------
+
+@dataclass
+class FieldDecl:
+    """One member of a struct (or settings) declaration."""
+    name: str
+    type_name: str
+    pos: Pos
+    type_pos: Pos
+    init: Expr | None = None
+    derived: bool = False
+
+
+@dataclass
+class StructDecl(Decl):
+    """struct AlsFootState { bValid: bool; Left: AlsFootSide; ThighAxis: vec3 = vec3(0.0, 0.0, -1.0); }"""
+    name: str
+    fields: list[FieldDecl]
+
 
 @dataclass
 class UseDecl(Decl):

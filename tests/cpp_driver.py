@@ -24,7 +24,7 @@ import tempfile
 
 from dal import ir
 from dal.cppbackend import CppGen, CppOptions, generate_cpp
-from dal.types import BOOL, FLOAT, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, EnumType
+from dal.types import BOOL, FLOAT, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, EnumType, StructType, TagType
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STUB = os.path.join(HERE, "cpp_stub")
@@ -101,12 +101,33 @@ def _lit(ty, v):
         return f"static_cast<EMovementMode>({int(v)})"
     if isinstance(ty, EnumType):
         return f"static_cast<{ty.cpp_type}>({int(v)})"
+    if isinstance(ty, TagType):
+        return _tag_lit(ty, v)
+    if isinstance(ty, StructType):
+        sets = " ".join(f"S.{f.name} = {_lit(f.ty, v[f.name])};" for f in ty.fields if f.name in v)
+        return f"[&]() {{ {ty.cpp_type} S; {sets} return S; }}()"
     raise ValueError(ty)
+
+
+def _tag_lit(ty, v):
+    member = ty.member_of(v)
+    return "FGameplayTag::EmptyTag" if member in (None, "None") and v == "" else f"{ty.cpp_namespace}::{member}"
+
+
+def leaves(name, ty):
+    """(path, leaf type) of every leaf of a state / input: struct members are flattened with '.'."""
+    if isinstance(ty, StructType):
+        for f in ty.fields:
+            yield from leaves(f"{name}.{f.name}", f.ty)
+    else:
+        yield name, ty
 
 
 def _print_value(name, ty):
     """C++ statement printing ``Obj.name`` as 'name v0 v1 ...' (nan / inf spelled out)."""
     ref = f"Obj.{name}"
+    if isinstance(ty, TagType):
+        return f'PvS("{name}", {ref}.ToString());'
     if ty is FLOAT:
         comps = [ref]
     elif ty is INT or ty is BOOL:
@@ -184,6 +205,11 @@ def make_driver(module: ir.Module, frames: list[dict]) -> str:
         '		else { std::printf(" %.17g", V); }',
         "	}",
         '\tstd::printf("\\n");',
+        "}",
+        "",
+        "[[maybe_unused]] static void PvS(const char* Name, const std::string& Value)",
+        "{",
+        '	std::printf("%s %s\\n", Name, Value.empty() ? "-" : Value.c_str());',
         "}",
         "",
         "static void Pcmds()",
@@ -320,10 +346,9 @@ def make_driver(module: ir.Module, frames: list[dict]) -> str:
         for call in f.get("calls", []):
             L.append(f"\t\tObj.{call}();")
         L.append(f'\t\tstd::printf("FRAME {n}\\n");')
-        for i in module.inputs:
-            L.append("\t\t" + _print_value(i.name, i.ty))
-        for s in module.states:
-            L.append("\t\t" + _print_value(s.name, s.ty))
+        for d in [*module.inputs, *module.states]:
+            for path, ty in leaves(d.name, d.ty):
+                L.append("\t\t" + _print_value(path, ty))
         L.append("\t\tPcmds();")
         L.append("\t}")
     if not actor and has_cmds:
@@ -344,8 +369,9 @@ def parse_output(module: ir.Module, text: str) -> list[dict]:
     For anim logic with commands the last element is ``{"__final__": True, "__cmds__": ...}``: the commands the last
     update queued, run by one more NativeUpdateAnimation (an anim instance runs them one update late).
     """
-    types = {i.name: i.ty for i in module.inputs}
-    types.update({s.name: s.ty for s in module.states})
+    types = {}
+    for d in [*module.inputs, *module.states]:
+        types.update(dict(leaves(d.name, d.ty)))
     frames: list[dict] = []
     for line in text.splitlines():
         parts = line.split()
@@ -368,7 +394,9 @@ def parse_output(module: ir.Module, text: str) -> list[dict]:
             continue
         name, vals = parts[0], parts[1:]
         ty = types[name]
-        if ty is FLOAT:
+        if isinstance(ty, TagType):
+            frames[-1][name] = "" if vals[0] == "-" else vals[0]
+        elif ty is FLOAT:
             frames[-1][name] = float(vals[0])
         elif ty is INT or isinstance(ty, EnumType):
             frames[-1][name] = int(vals[0])

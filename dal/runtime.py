@@ -220,6 +220,14 @@ def as_hit(v):
     return v if type(v) is Hit else Hit(*v)
 
 
+def as_tag(v):
+    return "" if v is None else str(v)
+
+
+def as_asset(v):
+    return v
+
+
 # ---- arithmetic with defined edge cases ---------------------------------------
 
 def fdiv(a, b):
@@ -863,6 +871,63 @@ def exponential_smoothing(cur, target, dt, smoothing_time):
     return target
 
 
+# ---- struct values --------------------------------------------------------------------
+
+class Struct:
+    """Base class of struct and settings values: the generated classes and the interpreter's classes derive from it.
+
+    Subclasses define ``__slots__`` and ``_FIELDS`` (the member names in declaration order), ``_TYPE_NAME`` and
+    ``_IMMUTABLE`` (settings are shared, never copied).
+    """
+
+    __slots__ = ()
+    _FIELDS: tuple = ()
+    _TYPE_NAME = ""
+    _IMMUTABLE = False
+
+    def copy(self):
+        new = object.__new__(type(self))
+        for n in self._FIELDS:
+            v = getattr(self, n)
+            setattr(new, n, v.copy() if isinstance(v, Struct) and not v._IMMUTABLE else v)
+        return new
+
+    def to_plain(self) -> dict:
+        """The value as nested plain data (dicts for structs, tuples for vectors)."""
+        return {n: (v.to_plain() if isinstance(v, Struct) else to_plain(v)) for n in self._FIELDS for v in (getattr(self, n),)}
+
+    def flatten(self, prefix: str, out: dict) -> None:
+        for n in self._FIELDS:
+            v = getattr(self, n)
+            if isinstance(v, Struct):
+                v.flatten(prefix + "." + n, out)
+            else:
+                out[prefix + "." + n] = to_plain(v)
+
+    def __repr__(self):
+        return f"{self._TYPE_NAME}(" + ", ".join(f"{n}={getattr(self, n)!r}" for n in self._FIELDS) + ")"
+
+    _SPEC: tuple = ()          # (member, converter) -- how from_value turns a loose value into the member's representation
+
+    @classmethod
+    def from_value(cls, v):
+        """A value of this class from another instance (a peer's copy of the same struct), a dict, or None (the defaults)."""
+        if type(v) is cls:
+            return v if cls._IMMUTABLE else v.copy()
+        if v is None:
+            return cls()
+        items = {n: getattr(v, n) for n in v._FIELDS} if isinstance(v, Struct) else v
+        return cls(**{n: conv(items[n]) for n, conv in cls._SPEC if n in items})
+
+
+def flatten_into(out: dict, name: str, value) -> None:
+    """Add a state / input value to a flat snapshot: struct members become ``Name.Member`` entries."""
+    if isinstance(value, Struct):
+        value.flatten(name, out)
+    else:
+        out[name] = to_plain(value)
+
+
 # ---- plain-data helpers --------------------------------------------------------
 
 def to_plain(v):
@@ -937,7 +1002,7 @@ class LogicBase:
         if unknown:
             raise TypeError(f"{self.DAL_NAME}: unknown param(s) {unknown}; known: {sorted(known)}")
         for name, type_name, default in self.DAL_PARAMS:
-            setattr(self, name, coerce_by_name(type_name, params[name]) if name in params else default)
+            setattr(self, name, self._coerce(type_name, params[name]) if name in params else default)
 
     def set_input(self, name: str, value) -> None:
         """Set a free input (an input without a host binding)."""
@@ -945,9 +1010,15 @@ class LogicBase:
             if n == name:
                 if host_spec is not None:
                     raise ValueError(f"input {name!r} is bound to {host_spec}; use .overrides[{name!r}] to force a value")
-                setattr(self, name, coerce_by_name(type_name, value))
+                setattr(self, name, self._coerce(type_name, value))
                 return
         raise KeyError(f"{self.DAL_NAME} has no input {name!r}")
+
+    DAL_TYPES: dict = {}          # type name -> converter, for the struct / tag types the class uses
+
+    def _coerce(self, type_name: str, value):
+        conv = self.DAL_TYPES.get(type_name)
+        return conv(value) if conv is not None else coerce_by_name(type_name, value)
 
     def sample_inputs(self) -> None:
         self._sample()
@@ -1003,7 +1074,7 @@ class LogicBase:
         """Inputs then states as plain data (floats / ints / bools / tuples)."""
         out = {}
         for n, _t, _h in self.DAL_INPUTS:
-            out[n] = to_plain(getattr(self, n))
+            flatten_into(out, n, getattr(self, n))
         for n, _t in self.DAL_STATES:
-            out[n] = to_plain(getattr(self, n))
+            flatten_into(out, n, getattr(self, n))
         return out

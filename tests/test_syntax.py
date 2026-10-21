@@ -152,10 +152,29 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(col, len("state X: float") + 1)
         self.assertIn("';'", msg)
 
-    def test_component_assignment_is_rejected_with_advice(self):
-        code, line, col, msg = parse_error("logic A;\nupdate(dt) { V.x = 1.0; }")
-        self.assertEqual(code, "DAL2010")
-        self.assertIn("vec2", msg)
+    def test_member_assignment_parses_and_the_checker_rejects_components_with_advice(self):
+        # a.b = v parses as a member assignment (struct members, v3); assigning to a component of a vector is a type error
+        unit = parse("logic A;\nupdate(dt) { V.x = 1.0; S.a.b += 2.0; }")
+        first, second = unit.decls[1].body
+        self.assertIsInstance(first, S.MemberAssignStmt)
+        self.assertEqual((first.name, first.path, first.op), ("V", ["x"], "="))
+        self.assertEqual((second.name, second.path, second.op), ("S", ["a", "b"], "+="))
+        import dal
+        with self.assertRaises(DalError) as cm:
+            dal.check_source("logic A;\nstate V: vec2;\nupdate(dt) { V.x = 1.0; }", "t.dal")
+        self.assertEqual(cm.exception.first.code, "DAL2010")
+        self.assertIn("vec2", cm.exception.first.message)
+
+    def test_struct_declarations_and_named_arguments(self):
+        unit = parse("struct P { a: float = 1.0; b: vec3; }\nlogic A;\nstate S: P = P(a: 2.0, b: vec3(1.0, 2.0, 3.0));")
+        st = unit.decls[0]
+        self.assertIsInstance(st, S.StructDecl)
+        self.assertEqual([(f.name, f.type_name) for f in st.fields], [("a", "float"), ("b", "vec3")])
+        call = unit.decls[2].init
+        self.assertEqual(call.names, ["a", "b"])
+        self.assertEqual(parse("logic A;\nconst C: float = f(1.0, 2.0);").decls[1].init.names, None)
+        self.assertEqual(parse_error("struct P { a: float }")[0], "DAL2001")
+        self.assertEqual(parse_error("struct { }")[0], "DAL2001")
 
     def test_reserved_words_and_keywords_are_not_identifiers(self):
         self.assertEqual(parse_error("logic A;\nstate while: float;")[0], "DAL2002")

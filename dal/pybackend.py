@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from . import ir
 from .builtins import BUILTIN_CONSTS, BUILTINS
-from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, EnumType, Type, py_member_name
+from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, EnumType, StructType, TagType, Type, py_member_name
 
 INDENT = "    "
 
@@ -47,7 +47,24 @@ def py_value(ty: Type, v) -> str:
         return "_rt.Quat(%s)" % ", ".join(repr(float(c)) for c in v)
     if isinstance(ty, EnumType):
         return f"{py_enum_class(ty)}.{py_member_name(ty.members[int(v)])}"
+    if isinstance(ty, TagType):
+        return repr(str(v))
+    if isinstance(ty, StructType):
+        return f"{ty.name}(" + ", ".join(f"{f.name}={py_value(f.ty, getattr(v, f.name))}" for f in ty.fields) + ")"
     raise ValueError(f"cannot emit a {ty} constant")
+
+
+def py_coercer(ty: Type) -> str:
+    """A callable (as source) that converts a loose value to the runtime representation of ``ty``."""
+    if ty in _AS:
+        return _AS[ty]
+    if isinstance(ty, StructType):
+        return f"{ty.name}.from_value"
+    if isinstance(ty, TagType):
+        return "_rt.as_tag"
+    if isinstance(ty, EnumType):
+        return py_enum_class(ty)
+    return "_rt.as_asset"
 
 
 def _is_nonzero_number(e: ir.Expr) -> bool:
@@ -77,6 +94,21 @@ class PyGen:
     def __init__(self, m: ir.Module):
         self.m = m
 
+    # ---- value semantics of structs -------------------------------------------------------
+    @staticmethod
+    def is_place(e: ir.Expr) -> bool:
+        """An expression that names storage (so its struct value must be copied before it is stored)."""
+        if isinstance(e, (ir.StateRef, ir.InputRef, ir.ParamRef, ir.LocalRef, ir.ConstRef)):
+            return True
+        return isinstance(e, ir.Member) and PyGen.is_place(e.x)
+
+    def val(self, e: ir.Expr) -> str:
+        """The expression as a value to store: structs read from storage are copied."""
+        text = unparen(self.x(e))
+        if isinstance(e.ty, StructType) and not e.ty.is_settings and self.is_place(e):
+            return f"{self.x(e)}.copy()"
+        return text
+
     # ---- expressions ----------------------------------------------------------------
     def x(self, e: ir.Expr) -> str:
         k = type(e)
@@ -101,8 +133,14 @@ class PyGen:
         if k is ir.Binary:
             return self.binary(e)
         if k is ir.Cond:
+            if isinstance(e.ty, StructType):
+                return f"({self.val(e.a)} if {self.x(e.c)} else {self.val(e.b)})"
             return f"({self.x(e.a)} if {self.x(e.c)} else {self.x(e.b)})"
+        if k is ir.MakeStruct:
+            return f"{e.ty.name}(" + ", ".join(f"{n}={self.val(v)}" for n, v in e.fields) + ")"
         if k is ir.Member:
+            if isinstance(e.x.ty, StructType):
+                return f"{self.x(e.x)}.{e.comps}"
             if e.comps in HIT_MEMBERS or len(e.comps) == 1 or e.comps in ("pitch", "yaw", "roll"):
                 return f"{self.x(e.x)}.{e.comps}"
             return f"_rt.swizzle({self.x(e.x)}, {e.comps!r})"
@@ -169,10 +207,13 @@ class PyGen:
         out: list[str] = []
         for s in body:
             if isinstance(s, ir.Let):
-                out.append(f"{pad}{s.name} = {unparen(self.x(s.init))}")
+                out.append(f"{pad}{s.name} = {self.val(s.init)}")
             elif isinstance(s, ir.Assign):
                 target = f"self.{s.name}" if s.kind == "state" else s.name
-                out.append(f"{pad}{target} = {unparen(self.x(s.value))}")
+                out.append(f"{pad}{target} = {self.val(s.value)}")
+            elif isinstance(s, ir.AssignField):
+                target = (f"self.{s.name}" if s.kind == "state" else s.name) + "".join("." + m for m in s.path)
+                out.append(f"{pad}{target} = {self.val(s.value)}")
             elif isinstance(s, ir.If):
                 kw = "if"
                 cur = s
@@ -188,13 +229,61 @@ class PyGen:
                         out.extend(self.stmts(cur.orelse, depth + 1) or [f"{pad}{INDENT}pass"])
                     break
             elif isinstance(s, ir.Return):
-                out.append(f"{pad}return" + (f" {unparen(self.x(s.value))}" if s.value is not None else ""))
+                out.append(f"{pad}return" + (f" {self.val(s.value)}" if s.value is not None else ""))
             elif isinstance(s, ir.Command):
                 out.append(f"{pad}self._cmd({', '.join([repr(s.name)] + [self.cmd_arg(a) for a in s.args])})")
             elif isinstance(s, ir.For):
                 out.append(f"{pad}for {s.var} in range({s.lo}, {s.hi}):")
                 out.extend(self.stmts(s.body, depth + 1) or [f"{pad}{INDENT}pass"])
         return out
+
+    def value_types(self) -> list[Type]:
+        """Struct and tag types the class stores or accepts (params, inputs, states), in declaration order."""
+        seen: list[Type] = []
+        for d in [*self.m.params, *self.m.inputs, *self.m.states]:
+            if isinstance(d.ty, (StructType, TagType)) and d.ty not in seen:
+                seen.append(d.ty)
+        return seen
+
+    # ---- struct classes ---------------------------------------------------------------------
+    def struct_class(self, st: StructType) -> list[str]:
+        L = ["", f"class {st.name}(_rt.Struct):"]
+        names = [f.name for f in st.fields]
+        slots = "".join(repr(n) + ", " for n in names)
+        L.append(f"{INDENT}__slots__ = ({slots})")
+        L.append(f"{INDENT}_FIELDS = __slots__")
+        L.append(f'{INDENT}_TYPE_NAME = "{st.name}"')
+        if st.is_settings:
+            L.append(f"{INDENT}_IMMUTABLE = True")
+        if names:
+            conv = "".join(f"({f.name!r}, {py_coercer(f.ty)}), " for f in st.fields)
+            L.append(f"{INDENT}_SPEC = ({conv})")
+        factories = [f for f in st.fields if isinstance(f.ty, StructType) and not f.ty.is_settings]
+        if factories:
+            # a nested struct is made on demand; the factory is a lambda so that its body sees the module-level class
+            # names, not the constructor parameter of the same name
+            L.append("")
+            for f in factories:
+                L.append(f"{INDENT}_new_{f.name} = staticmethod(lambda: {py_value(f.ty, f.default)})")
+        L.append("")
+        params = ["self"]
+        body: list[str] = []
+        for f in st.fields:
+            if isinstance(f.ty, StructType) and not f.ty.is_settings:
+                params.append(f"{f.name}=None")
+                body.append(f"{INDENT*2}self.{f.name} = self._new_{f.name}() if {f.name} is None else {f.name}")
+            else:
+                params.append(f"{f.name}={py_value(f.ty, f.default) if f.default is not None else 'None'}")
+                body.append(f"{INDENT*2}self.{f.name} = {f.name}")
+        L.append(f"{INDENT}def __init__({', '.join(params)}):")
+        L.extend(body or [f"{INDENT*2}pass"])
+        if not st.is_settings:
+            L.append("")
+            L.append(f"{INDENT}def copy(self):")
+            args = ", ".join(f"self.{f.name}.copy()" if isinstance(f.ty, StructType) and not f.ty.is_settings else f"self.{f.name}" for f in st.fields)
+            L.append(f"{INDENT*2}return {st.name}({args})")
+        L.append("")
+        return L
 
     # ---- module -------------------------------------------------------------------------------
     def module(self) -> str:
@@ -216,6 +305,9 @@ class PyGen:
             for i, mem in enumerate(en.members):
                 L.append(f"{INDENT}{py_member_name(mem)} = {i}")
             L.append("")
+
+        for st in m.structs:
+            L.extend(self.struct_class(st))
 
         if m.standin_source:
             L.append("")
@@ -266,6 +358,9 @@ class PyGen:
             L.append(f"{INDENT*2}({s.name!r}, {s.ty.name!r}),")
         L.append(f"{INDENT})")
         L.append(f"{INDENT}DAL_ENTRIES = ({''.join(repr(e.name) + ', ' for e in m.entries)})")
+        coerced = [t for t in self.value_types() if isinstance(t, (StructType, TagType))]
+        if coerced:
+            L.append(f"{INDENT}DAL_TYPES = {{" + ", ".join(f"{t.name!r}: {py_coercer(t)}" for t in coerced) + "}")
         traffic = bool(m.handlers) or m.uses_commands
         if m.kind != "anim" or m.handlers or m.montages or m.actions:
             L.append(f"{INDENT}DAL_KIND = {m.kind!r}")

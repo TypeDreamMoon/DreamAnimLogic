@@ -32,7 +32,7 @@ from .hostapi import HOST_ITEMS
 from .mockhost import MockHost
 from .interp import Interpreter
 from .pybackend import generate_python, load_class
-from .types import BOOL, FLOAT, INT, QUAT, ROTATOR, VEC2, VEC3, EnumType, Type
+from .types import BOOL, FLOAT, INT, QUAT, ROTATOR, VEC2, VEC3, EnumType, StructType, TagType, Type
 
 
 class ScriptedHost(MockHost):
@@ -82,6 +82,10 @@ def _rand_value(rng: random.Random, ty: Type, scale: float = 10.0):
         return _rand_quat(rng)
     if isinstance(ty, EnumType):
         return rng.randrange(len(ty.members))
+    if isinstance(ty, TagType):
+        return ty.full_name(rng.choice(ty.members + ["None"]))
+    if isinstance(ty, StructType):
+        return {f.name: _rand_value(rng, f.ty, scale) for f in ty.fields if not f.derived and not f.ty.is_asset and f.ty.name not in ("curve", "curve3")}
     raise ValueError(ty)
 
 
