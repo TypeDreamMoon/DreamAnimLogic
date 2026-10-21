@@ -9,6 +9,9 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Math/SpringMath.h"
+#include "AlphaBlend.h"
+#include "Curves/CurveFloat.h"
 
 #define DAL_MATH_VERSION 1
 
@@ -198,6 +201,67 @@ namespace DalMath
 			return 0.0f;
 		}
 		return FMath::RadiansToDegrees(FMath::Acos(FVector3f::DotProduct(NA, NB)));
+	}
+
+	[[nodiscard]] inline FQuat4f FastLerp(const FQuat4f& A, const FQuat4f& B, float Alpha) { return FQuat4f::FastLerp(A, B, Alpha); }
+	[[nodiscard]] inline FQuat4f QuatFromAxisAngle(const FVector3f& Axis, float Rad) { return FQuat4f(Axis, Rad); }
+	[[nodiscard]] inline FQuat4f QuatFromRotationVector(const FVector3f& V) { return FQuat4f::MakeFromRotationVector(V); }
+	[[nodiscard]] inline FQuat4f ToOrientationQuat(const FVector3f& V) { return V.ToOrientationQuat(); }
+	[[nodiscard]] inline FQuat4f GetTwist(const FQuat4f& Q, const FVector3f& Axis)
+	{
+		FQuat4f Swing, Twist;
+		Q.ToSwingTwist(Axis, Swing, Twist);
+		return Twist;
+	}
+	[[nodiscard]] inline float TwistAngle(const FQuat4f& Q, const FVector3f& Axis) { return Q.GetTwistAngle(Axis); }
+
+	// ---- transforms ------------------------------------------------------------------------------
+
+	[[nodiscard]] inline FVector3f TransformPosition(const FTransform3f& T, const FVector3f& V) { return T.TransformPosition(V); }
+	[[nodiscard]] inline FVector3f InverseTransformPosition(const FTransform3f& T, const FVector3f& V) { return T.InverseTransformPosition(V); }
+	[[nodiscard]] inline FQuat4f TransformRotation(const FTransform3f& T, const FQuat4f& Q) { return T.TransformRotation(Q); }
+	[[nodiscard]] inline FQuat4f InverseTransformRotation(const FTransform3f& T, const FQuat4f& Q) { return T.InverseTransformRotation(Q); }
+	[[nodiscard]] inline FVector3f TransformVectorNoScale(const FTransform3f& T, const FVector3f& V) { return T.TransformVectorNoScale(V); }
+	[[nodiscard]] inline FTransform3f RelativeTransform(const FTransform3f& A, const FTransform3f& B) { return A.GetRelativeTransform(B); }
+	[[nodiscard]] inline FTransform3f RelativeTransformReverse(const FTransform3f& A, const FTransform3f& B) { return A.GetRelativeTransformReverse(B); }
+	[[nodiscard]] inline FTransform3f InverseTransform(const FTransform3f& T) { return T.Inverse(); }
+	[[nodiscard]] inline FTransform3f Compose(const FTransform3f& A, const FTransform3f& B) { return A * B; }
+	[[nodiscard]] inline FTransform3f WithScale(FTransform3f T, const FVector3f& Scale) { T.SetScale3D(Scale); return T; }
+
+	[[nodiscard]] inline FVector3f ProjectOnNormal(const FVector3f& V, const FVector3f& N) { return V.ProjectOnToNormal(N); }
+	[[nodiscard]] inline FVector3f SafeNormal2D(const FVector3f& V) { return V.GetSafeNormal2D(); }
+	[[nodiscard]] inline float Size2D(const FVector3f& V) { return V.Size2D(); }
+	[[nodiscard]] inline float HalfLifeToSmoothingTime(float HalfLife) { return SpringMath::HalfLifeToSmoothingTime(HalfLife); }
+
+	/** FAlphaBlend::AlphaToBlendOption: the eased alpha; EAlphaBlendOption::Custom reads the curve over its time range. */
+	[[nodiscard]] inline float BlendAlpha(float Alpha, EAlphaBlendOption Option, const UCurveFloat* Curve)
+	{
+		return FAlphaBlend::AlphaToBlendOption(Alpha, Option, const_cast<UCurveFloat*>(Curve));
+	}
+
+	/** The result of CriticalSpringDamper: the new value and its velocity (DAL types `spring` and `spring3`). */
+	struct FSpring
+	{
+		float Value = 0.0f;
+		float Velocity = 0.0f;
+	};
+
+	struct FSpring3
+	{
+		FVector3f Value = FVector3f(0.0f, 0.0f, 0.0f);
+		FVector3f Velocity = FVector3f(0.0f, 0.0f, 0.0f);
+	};
+
+	[[nodiscard]] inline FSpring CriticalSpringDamper(float X, float V, float Target, float SmoothingTime, float Dt)
+	{
+		SpringMath::CriticalSpringDamper(X, V, Target, SmoothingTime, Dt);
+		return FSpring{X, V};
+	}
+
+	[[nodiscard]] inline FSpring3 CriticalSpringDamper(FVector3f X, FVector3f V, const FVector3f& Target, float SmoothingTime, float Dt)
+	{
+		SpringMath::CriticalSpringDamper(X, V, Target, SmoothingTime, Dt);
+		return FSpring3{X, V};
 	}
 
 	[[nodiscard]] inline FRotator3f DeltaRotator(const FRotator3f& A, const FRotator3f& B)

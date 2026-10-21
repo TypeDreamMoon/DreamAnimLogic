@@ -11,9 +11,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from . import runtime as rt
-from .types import BOOL, FLOAT, INT, QUAT, ROTATOR, VEC2, VEC3, Type
+from .types import BLEND_OPTION, BOOL, CURVE, FLOAT, INT, QUAT, ROTATOR, SPRING, SPRING3, TRANSFORM, VEC2, VEC3, Type
 
-_TYPES = {"float": FLOAT, "int": INT, "bool": BOOL, "vec2": VEC2, "vec3": VEC3, "rotator": ROTATOR, "quat": QUAT}
+_TYPES = {"float": FLOAT, "int": INT, "bool": BOOL, "vec2": VEC2, "vec3": VEC3, "rotator": ROTATOR, "quat": QUAT, "spring": SPRING, "spring3": SPRING3, "BlendOption": BLEND_OPTION, "curve": CURVE, "transform": TRANSFORM}
 
 
 @dataclass(frozen=True)
@@ -143,6 +143,37 @@ _b("delta_rotator", ["rotator rotator -> rotator"], "(A - B).GetNormalized()", d
 _b("normalize_rotator", ["rotator -> rotator"], "FRotator::GetNormalized")
 _b("look_at", ["vec3 vec3 -> rotator"], "(To - From).ToOrientationRotator()", doc="look_at(from, to): yaw / pitch that face `to` (roll 0)")
 _b("angle_between", ["vec3 vec3 -> float"], "Acos(Dot(GetSafeNormal(A), GetSafeNormal(B)))", doc="angle in degrees, 0 if either vector is zero")
+_b("fast_lerp", ["quat quat float -> quat"], "FQuat::FastLerp", doc="shortest-route linear blend, not normalized")
+_b("quat_from_axis_angle", ["vec3 float -> quat"], "FQuat(Axis, AngleRad)", doc="quat_from_axis_angle(axis, radians); the axis must be a unit vector")
+_b("quat_from_rotation_vector", ["vec3 -> quat"], "FQuat::MakeFromRotationVector", doc="the rotation about v by |v| radians")
+_b("to_orientation_quat", ["vec3 -> quat"], "FVector::ToOrientationQuat", doc="the rotation that turns +X to the vector, without roll")
+_b("get_twist", ["quat vec3 -> quat"], "FQuat::ToSwingTwist (the twist)", doc="get_twist(q, axis): the part of q that rotates about the axis")
+_b("twist_angle", ["quat vec3 -> float"], "FQuat::GetTwistAngle", doc="twist_angle(q, axis) in radians, [-pi, pi]")
+
+# ---- transforms -------------------------------------------------------------------------
+_b("transform_position", ["transform vec3 -> vec3"], "FTransform::TransformPosition", doc="rotate(scale * v) + location")
+_b("inverse_transform_position", ["transform vec3 -> vec3"], "FTransform::InverseTransformPosition")
+_b("transform_rotation", ["transform quat -> quat"], "FTransform::TransformRotation", doc="rotation * q")
+_b("inverse_transform_rotation", ["transform quat -> quat"], "FTransform::InverseTransformRotation")
+_b("transform_vector_no_scale", ["transform vec3 -> vec3"], "FTransform::TransformVectorNoScale")
+_b("relative_transform", ["transform transform -> transform"], "FTransform::GetRelativeTransform", doc="relative_transform(a, b): a in the space of b")
+_b("relative_transform_reverse", ["transform transform -> transform"], "FTransform::GetRelativeTransformReverse", doc="inverse(a) * b")
+_b("inverse", ["transform -> transform"], "FTransform::Inverse", cpp="InverseTransform")
+_b("compose", ["transform transform -> transform"], "FTransform::operator*", doc="compose(a, b) = a * b: apply a first, then b")
+_b("with_scale", ["transform vec3 -> transform"], "FTransform::SetScale3D")
+
+# ---- vectors, more ----------------------------------------------------------------------
+_b("project_on_normal", ["vec3 vec3 -> vec3"], "FVector::ProjectOnToNormal", doc="project_on_normal(v, n): n * dot(v, n)")
+_b("safe_normal_2d", ["vec3 -> vec3"], "FVector::GetSafeNormal2D", cpp="SafeNormal2D", doc="the horizontal direction (z = 0), zero for a vertical vector")
+_b("size_2d", ["vec3 -> float"], "FVector::Size2D", cpp="Size2D", doc="the length of the horizontal part")
+
+_b("blend_alpha", ["float BlendOption curve -> float"], "FAlphaBlend::AlphaToBlendOption",
+   doc="blend_alpha(alpha, option, curve): the eased alpha in [0, 1]; the curve is used by BlendOption.Custom")
+
+# ---- springs --------------------------------------------------------------------------------
+_b("half_life_to_smoothing_time", ["float -> float"], "SpringMath::HalfLifeToSmoothingTime")
+_b("critical_spring_damper", ["float float float float float -> spring", "vec3 vec3 vec3 float float -> spring3"], "SpringMath::CriticalSpringDamper",
+   doc="critical_spring_damper(x, v, target, smoothing_time, dt) -> (value, velocity)")
 
 
 # ---- constructors (lowered to IR 'Make' nodes, not calls) -----------------------------------
@@ -151,6 +182,7 @@ CONSTRUCTORS: dict[str, tuple[Sig, ...]] = {
     "vec3": (_parse_sig("float float float -> vec3"), _parse_sig("vec2 float -> vec3")),
     "rotator": (_parse_sig("float float float -> rotator"),),
     "quat": (_parse_sig("float float float float -> quat"),),
+    "transform": (_parse_sig("vec3 quat -> transform"), _parse_sig("vec3 quat vec3 -> transform")),
 }
 
 
@@ -181,11 +213,11 @@ BUILTIN_CONSTS: dict[str, BuiltinConst] = {
 
 
 # Type names and other words a program may not redefine.
-TYPE_NAMES = frozenset({"float", "int", "bool", "vec2", "vec3", "rotator", "quat", "hit"})
+TYPE_NAMES = frozenset({"float", "int", "bool", "vec2", "vec3", "rotator", "quat", "hit", "spring", "spring3", "transform"})
 
 
 def all_reserved_names() -> frozenset[str]:
-    return frozenset(BUILTINS) | frozenset(CONSTRUCTORS) | frozenset(BUILTIN_CONSTS) | TYPE_NAMES | {"MovementMode"}
+    return frozenset(BUILTINS) | frozenset(CONSTRUCTORS) | frozenset(BUILTIN_CONSTS) | TYPE_NAMES | {"MovementMode", "BlendOption"}
 
 
 def resolve_overload(sigs: tuple[Sig, ...], arg_types: list[Type]) -> tuple[int, list[bool]] | None:

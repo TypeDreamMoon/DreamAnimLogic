@@ -6,7 +6,8 @@
 // and the data assets exported from the project (CS_Als_Default, AIS_Als_Default, MS_Als_*) load into the settings types below.
 //
 // Not in this sketch: collision channels and response containers (MantlingTraceChannel, ...ResponseChannels, ...Responses --
-// the loader reports them as ignored members), transforms / quaternion helpers (need the transform type), the camera settings.
+// the loader reports them as ignored members) and the camera settings.  The easing option of the mantling settings is the built-in
+// BlendOption (EAlphaBlendOption).
 
 // ---- gameplay tags (AlsGameplayTags.h) ------------------------------------------------------------------------------
 tags AlsViewMode          = "Als.ViewMode"          { FirstPerson, ThirdPerson }
@@ -24,8 +25,6 @@ enum AlsHipsDirection { Forward, Backward, LeftForward, LeftBackward, RightForwa
 enum AlsMovementDirection { Forward, Backward, Left, Right }                                           // AlsMath.h
 enum AlsInAirRotationMode { KeepWorldRotation, KeepViewSpaceRotation, RotateToVelocity }              // AlsCharacterSettings.h
 enum AlsMantlingType { High, Low, InAir }                                                              // AlsMantlingSettings.h
-enum AlsBlendOption { Linear, Cubic, HermiteCubic, Sinusoidal, QuadraticInOut, CubicInOut, QuarticInOut, QuinticInOut,
-                      CircularIn, CircularOut, CircularInOut, ExpIn, ExpOut, ExpInOut, Custom }        // EAlphaBlendOption
 
 // ---- shared small structs ------------------------------------------------------------------------------------------
 struct AlsFloatInterval { Min: float; Max: float; }                                                    // FFloatInterval
@@ -232,9 +231,9 @@ settings AlsMantlingSettings {                                    // MS_Als_High
     StartTimeReferenceHeight: vec2 = vec2(125.0, 200.0);
     StartTime: vec2 = vec2(0.6, 0.0);
     MotionWarpingTimeRange: AlsFloatInterval;
-    MotionWarpingLocationBlendOption: AlsBlendOption;
+    MotionWarpingLocationBlendOption: BlendOption;
     MotionWarpingLocationCustomBlendCurve: curve;
-    MotionWarpingRotationBlendOption: AlsBlendOption = AlsBlendOption.HermiteCubic;
+    MotionWarpingRotationBlendOption: BlendOption = BlendOption.HermiteCubic;
     MotionWarpingRotationCustomBlendCurve: curve;
 }
 settings AlsMovementGaitSettings {
@@ -391,6 +390,14 @@ fn interpolate_angle_constant(current: float, target: float, dt: float, speed: f
 
 fn damper_exact_angle(current: float, target: float, dt: float, half_life: float) -> float {    // AlsRotation.h:144
     return lerp_angle(current, target, damper_exact_alpha(dt, half_life));
+}
+
+fn lerp_rotation(a: rotator, b: rotator, alpha: float) -> rotator {                              // AlsRotation.h: angle by angle, the short way
+    return rotator(lerp_angle(a.pitch, b.pitch, alpha), lerp_angle(a.yaw, b.yaw, alpha), lerp_angle(a.roll, b.roll, alpha));
+}
+
+fn damper_exact_rotation(current: quat, target: quat, dt: float, half_life: float) -> quat {     // AlsRotation.h
+    return slerp(current, target, damper_exact_alpha(dt, half_life));
 }
 
 fn calculate_movement_direction(angle: float, forward_half_angle: float, backward_half_angle: float) -> AlsMovementDirection {   // AlsMath.cpp:11

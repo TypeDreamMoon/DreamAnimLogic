@@ -94,7 +94,7 @@ class StructCheckTests(unittest.TestCase):
         for body, code in (("let a = S.Nope;", "DAL4030"), ("S.Nope = 1.0;", "DAL4030"), ("S.Blend.Forward.x = 1.0;", "DAL4030"),
                            ("I.Forward = 1.0;", "DAL5001"), ("K.Forward = 1.0;", "DAL5001"), ("P.x = 1.0;", "DAL5001"),
                            ("let l = S.Blend; l.Forward = 1.0;", "DAL5001"), ("S.Blend.Forward = true;", "DAL4002"),
-                           ("S.Lean.x = 1.0;", "DAL2010"), ("S.Blend = S.Feet;", "DAL4002"),
+                           ("S.Lean.z = 1.0;", "DAL4030"), ("S.Lean.xy = vec2(1.0, 2.0);", "DAL2010"), ("S.Blend = S.Feet;", "DAL4002"),
                            ("let q = S.Blend == S.Blend;", "DAL4001"), ("S.Feet.Phase = 1.5;", "DAL4002")):
             with self.subTest(body):
                 self.assertEqual(errors(pre + body + " }")[0][0], code)

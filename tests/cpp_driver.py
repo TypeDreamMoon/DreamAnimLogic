@@ -24,7 +24,7 @@ import tempfile
 
 from dal import ir
 from dal.cppbackend import CppGen, CppOptions, generate_cpp
-from dal.types import BOOL, FLOAT, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, ArrayType, AssetType, EnumType, MapType, StructType, TagType
+from dal.types import BOOL, FLOAT, INT, MOVEMENT_MODE, QUAT, ROTATOR, TRANSFORM, VEC2, VEC3, ArrayType, AssetType, EnumType, MapType, StructType, TagType
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STUB = os.path.join(HERE, "cpp_stub")
@@ -97,6 +97,8 @@ def _lit(ty, v):
         return f"FRotator3f({_num(v[0])}f, {_num(v[1])}f, {_num(v[2])}f)"
     if ty is QUAT:
         return f"FQuat4f({_num(v[0])}f, {_num(v[1])}f, {_num(v[2])}f, {_num(v[3])}f)"
+    if ty is TRANSFORM:
+        return f"FTransform3f({_lit(QUAT, v[1])}, {_lit(VEC3, v[0])}, {_lit(VEC3, v[2])})"
     if ty is MOVEMENT_MODE:
         return f"static_cast<EMovementMode>({int(v)})"
     if isinstance(ty, EnumType):
@@ -225,6 +227,8 @@ def _print_value(name, ty, obj="Obj"):
         comps = [f"{ref}.Pitch", f"{ref}.Yaw", f"{ref}.Roll"]
     elif ty is QUAT:
         comps = [f"{ref}.X", f"{ref}.Y", f"{ref}.Z", f"{ref}.W"]
+    elif ty is TRANSFORM:
+        comps = [f"{ref}.GetLocation().{c}" for c in "XYZ"] + [f"{ref}.GetRotation().{c}" for c in "XYZW"] + [f"{ref}.GetScale3D().{c}" for c in "XYZ"]
     elif ty is MOVEMENT_MODE:
         comps = [f"static_cast<int>(static_cast<EMovementMode>({ref}))"]
     elif isinstance(ty, EnumType):
@@ -571,6 +575,9 @@ def parse_value(ty, vals):
         return int(vals[0])
     if ty is BOOL:
         return bool(int(vals[0]))
+    if ty is TRANSFORM:
+        f = [float(v) for v in vals]
+        return (tuple(f[0:3]), tuple(f[3:7]), tuple(f[7:10]))
     return tuple(float(v) for v in vals)
 
 

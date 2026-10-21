@@ -46,6 +46,9 @@ from .types import (
     FLOAT,
     HIT,
     HIT_MEMBERS,
+    SPRING_MEMBERS,
+    TRANSFORM,
+    TRANSFORM_MEMBERS,
     INT,
     MONTAGE,
     MOVEMENT_MODE,
@@ -68,6 +71,11 @@ class Sym:
     pos: Pos
     obj: object = None
     file: str = ""  # file of the declaration (set for declarations from libraries)
+
+
+# the components of the vector types, in constructor order, and the constructor that rebuilds one
+COMPONENTS: dict = {VEC2: (("x", "y"), "vec2"), VEC3: (("x", "y", "z"), "vec3"), ROTATOR: (("pitch", "yaw", "roll"), "rotator"),
+                    QUAT: (("x", "y", "z", "w"), "quat")}
 
 
 @dataclass
@@ -122,7 +130,7 @@ STRUCT_API = frozenset({"copy", "to_plain", "flatten", "from_value", "load"})
 
 _SWIZZLE = {"x": 0, "y": 1, "z": 2}
 _MONTAGE_STATE = {"playing": BOOL, "active": BOOL, "position": FLOAT}   # Light1.playing ... ('section' has the montage's own enum)
-_HIT_TYPES = {"bool": BOOL, "vec3": VEC3, "float": FLOAT}
+_HIT_TYPES = {"bool": BOOL, "vec3": VEC3, "float": FLOAT, "quat": QUAT}
 _ACTION_TYPES = (BOOL, FLOAT, VEC2, VEC3)
 
 
@@ -240,7 +248,7 @@ class Checker:
             if not (key.is_tags or key.is_enum or key is INT):
                 self.err("DAL4052", f"a table is keyed by a tag set, an enum or int, not {key}", pos)
                 return ERROR
-            if value is HIT or value is MONTAGE or isinstance(value, (MapType, ArrayType)):
+            if value is HIT or value is MONTAGE or value in SPRING_MEMBERS or isinstance(value, (MapType, ArrayType)):
                 self.err("DAL4052", f"a table cannot hold {value}", pos)
                 return ERROR
             return MapType(key, value)
@@ -248,7 +256,7 @@ class Checker:
             elem = self.resolve_type(name[6:-1], pos)
             if elem is ERROR:
                 return ERROR
-            if elem is HIT or elem is MONTAGE or isinstance(elem, (MapType, ArrayType)):
+            if elem is HIT or elem is MONTAGE or elem in SPRING_MEMBERS or isinstance(elem, (MapType, ArrayType)):
                 self.err("DAL4052", f"a list cannot hold {elem}", pos)
                 return ERROR
             return ArrayType(elem)
@@ -639,7 +647,7 @@ class Checker:
             self.ctx.types[(origin, d.name)] = st
 
     def struct_member_ok(self, st: StructType, ty: Type) -> bool:
-        if ty is HIT or ty is MONTAGE:
+        if ty is HIT or ty is MONTAGE or ty in SPRING_MEMBERS:
             return False
         if isinstance(ty, AssetType):
             return st.kind == "settings" or not ty.settings_only
@@ -835,6 +843,9 @@ class Checker:
         and a settings value (a read-only data asset) only comes from a param."""
         if ty is HIT:
             self.err("DAL4023", f"{what} cannot have type hit: copy the fields you need (blocking, point, normal, distance, time)", pos)
+            return ERROR
+        if ty in SPRING_MEMBERS:
+            self.err("DAL4023", f"{what} cannot have type {ty}: copy .value and .velocity into states of their own", pos)
             return ERROR
         if (isinstance(ty, AssetType) and ty.settings_only) or isinstance(ty, (MapType, ArrayType)):
             self.err("DAL4058", f"{what} cannot have type {ty}: curves, tables and lists belong in a settings type (read them from the param)", pos)
@@ -1300,15 +1311,41 @@ class Checker:
             st = self.module.find_state(s.name)
             base_ty = st.ty if st else ERROR
         cur_ty = base_ty
+        component = None                     # (index in the path, name) when the target is a component of a vector
         for i, member in enumerate(s.path):
             pos = s.path_pos[i] if i < len(s.path_pos) else name_pos
             if cur_ty is ERROR:
                 self.ex(s.value, sc)
                 return None
-            if cur_ty in (VEC2, VEC3, ROTATOR, QUAT):
-                self.err("DAL2010", "cannot assign to a component; vectors are values: build a new one, e.g. v = vec2(a, b)", s.pos)
-                self.ex(s.value, sc)
-                return None
+            if cur_ty in COMPONENTS:
+                names = COMPONENTS[cur_ty][0]
+                if i != len(s.path) - 1:
+                    self.err("DAL4030", f"a {cur_ty} component is a float and has no members", s.path_pos[i + 1] if i + 1 < len(s.path_pos) else pos)
+                elif member in names:
+                    component = (i, (member,))
+                elif len(member) > 1 and all(c in "xyzw" for c in member) or member in ("xy", "xz", "yz", "xyz"):
+                    self.err("DAL2010", f"cannot assign to a swizzle ({member}); assign the components one at a time: v.{member[0]} = ...", pos)
+                else:
+                    self.err("DAL4030", f"{cur_ty} has no component '{member}' (components: {', '.join(names)})", pos)
+                if component is None:
+                    self.ex(s.value, sc)
+                    return None
+                break
+            if cur_ty is TRANSFORM:
+                rest = s.path[i:]
+                if member not in TRANSFORM_MEMBERS:
+                    self.err("DAL4030", f"transform has no member '{member}' (members: {', '.join(TRANSFORM_MEMBERS)})", pos)
+                elif len(rest) == 1:
+                    component = (i, (member,))
+                elif len(rest) == 2 and _HIT_TYPES[TRANSFORM_MEMBERS[member]] in COMPONENTS and rest[1] in COMPONENTS[_HIT_TYPES[TRANSFORM_MEMBERS[member]]][0]:
+                    component = (i, tuple(rest))
+                else:
+                    self.err("DAL4030", f"cannot assign to .{'.'.join(rest)}: assign a whole member of the transform, or one component of its location / rotation / scale",
+                             s.path_pos[i + 1] if i + 1 < len(s.path_pos) else pos)
+                if component is None:
+                    self.ex(s.value, sc)
+                    return None
+                break
             if not isinstance(cur_ty, StructType):
                 self.err("DAL4030", f"type {cur_ty} has no members", pos)
                 self.ex(s.value, sc)
@@ -1324,6 +1361,8 @@ class Checker:
                 self.ex(s.value, sc)
                 return None
             cur_ty = fd.ty
+        if component is not None:
+            return self.component_assign(s, sc, kind, base_ty, cur_ty, component, name_pos)
         if s.op == "=":
             self.mark_value_call(s.value)
         value = self.ex(s.value, sc)
@@ -1337,6 +1376,44 @@ class Checker:
             value = self.binary(s.op[0], cur, value, s.pos, name_pos)
         value = self.assignable(cur_ty, value, s.value.pos, f"'{s.name}.{'.'.join(s.path)}'")
         return ir.AssignField(kind, s.name, tuple(s.path), value)
+
+    def component_assign(self, s: S.MemberAssignStmt, sc: Scope, kind: str, base_ty: Type, vec_ty: Type, component: tuple[int, tuple[str, ...]], name_pos: Pos) -> ir.Stmt | None:
+        """`v.z = x;`, `S.Rotation.yaw += d;`, `T.location = p;` -- the vector or transform is rebuilt with the one part replaced."""
+        index, rest = component
+        place = tuple(s.path[:index])
+        target: ir.Expr = ir.LocalRef(base_ty, s.name) if kind == "local" else ir.StateRef(base_ty, s.name)
+        walk_ty = base_ty
+        for member in place:
+            walk_ty = walk_ty.field(member).ty         # type: ignore[union-attr]
+            target = ir.Member(walk_ty, target, member)
+        leaf: ir.Expr = target                          # the part being replaced, as it reads now
+        leaf_ty = walk_ty
+        for part in rest:
+            leaf_ty = FLOAT if leaf_ty in COMPONENTS else _HIT_TYPES[TRANSFORM_MEMBERS[part]]
+            leaf = ir.Member(leaf_ty, leaf, part)
+        if s.op == "=":
+            self.mark_value_call(s.value)
+        value = self.ex(s.value, sc)
+        label = ".".join([s.name, *s.path])
+        if s.op != "=":
+            value = self.binary(s.op[0], leaf, value, s.pos, name_pos)
+        value = self.assignable(leaf_ty, value, s.value.pos, f"'{label}'")
+        rebuilt = self.rebuild(target, vec_ty, rest, value)
+        if not place:
+            return ir.Assign(kind, s.name, rebuilt)
+        return ir.AssignField(kind, s.name, place, rebuilt)
+
+    def rebuild(self, expr: ir.Expr, ty: Type, rest: tuple[str, ...], new: ir.Expr) -> ir.Expr:
+        """`expr` (a vector or a transform) with the part named by `rest` replaced by `new`."""
+        if ty is TRANSFORM:
+            member = rest[0]
+            member_ty = _HIT_TYPES[TRANSFORM_MEMBERS[member]]
+            inner = new if len(rest) == 1 else self.rebuild(ir.Member(member_ty, expr, member), member_ty, rest[1:], new)
+            args = [inner if n == member else ir.Member(_HIT_TYPES[t], expr, n) for n, t in TRANSFORM_MEMBERS.items()]
+            return ir.Make(TRANSFORM, "transform", args, 1)
+        names, ctor = COMPONENTS[ty]
+        args = [new if c == rest[0] else ir.Member(FLOAT, expr, c) for c in names]
+        return ir.Make(ty, ctor, args, 0)
 
     def return_stmt(self, s: S.ReturnStmt, sc: Scope) -> ir.Stmt:
         if sc.ctx in ("fn", "view") or (sc.ctx == "method" and sc.ret is not None):
@@ -1512,6 +1589,11 @@ class Checker:
             if f in HIT_MEMBERS:
                 return ir.Member(_HIT_TYPES[HIT_MEMBERS[f]], b, f)
             return self.bad("DAL4030", f"hit has no member '{f}' (members: {', '.join(HIT_MEMBERS)})", e.field_pos)
+        if b.ty in SPRING_MEMBERS:
+            members = SPRING_MEMBERS[b.ty]
+            if f in members:
+                return ir.Member(_HIT_TYPES[members[f]], b, f)
+            return self.bad("DAL4030", f"{b.ty} has no member '{f}' (members: {', '.join(members)})", e.field_pos)
         if b.ty in (VEC2, VEC3):
             dim = 2 if b.ty is VEC2 else 3
             if not f or any(c not in "xyz" for c in f) or len(f) > 3:
@@ -1534,6 +1616,10 @@ class Checker:
             if f in ("x", "y", "z", "w"):
                 return ir.Member(FLOAT, b, f)
             return self.bad("DAL4030", f"quat has no member '{f}' (members: x, y, z, w)", e.field_pos)
+        if b.ty is TRANSFORM:
+            if f in TRANSFORM_MEMBERS:
+                return ir.Member(_HIT_TYPES[TRANSFORM_MEMBERS[f]], b, f)
+            return self.bad("DAL4030", f"transform has no member '{f}' (members: {', '.join(TRANSFORM_MEMBERS)})", e.field_pos)
         return self.bad("DAL4030", f"type {b.ty} has no members", e.field_pos)
 
     # ---- v1 / v2: montages, actions, handlers, commands, queries, loops --------------------------------------------------
@@ -1798,6 +1884,8 @@ class Checker:
                 return ir.Binary(BOOL, op, ir.Lit(tb, None), b)
             if ta is tb and ta in (VEC2, VEC3, ROTATOR, QUAT):
                 return self.bad("DAL4001", f"{ta} values cannot be compared with '{op}'; compare lengths or components, e.g. is_nearly_zero(length(a - b))", op_pos)
+            if ta is tb and ta is TRANSFORM:
+                return self.bad("DAL4001", f"transform values cannot be compared with '{op}'; compare .location, .rotation or .scale", op_pos)
             if ta is tb and isinstance(ta, StructType):
                 return self.bad("DAL4001", f"{ta.kind} values cannot be compared with '{op}'; compare the members you care about", op_pos)
             return fail()

@@ -794,6 +794,11 @@ class UCurveFloat : public UObject
 {
 public:
 	std::vector<FStubCurveKey> StubKeys;      // sorted by time
+	void GetTimeRange(float& MinTime, float& MaxTime) const
+	{
+		MinTime = StubKeys.empty() ? 0.f : StubKeys.front().Time;
+		MaxTime = StubKeys.empty() ? 0.f : StubKeys.back().Time;
+	}
 	float GetFloatValue(float InTime) const
 	{
 		if (StubKeys.empty()) { return 0.0f; }
@@ -810,6 +815,56 @@ public:
 			}
 		}
 		return StubKeys.back().Value;
+	}
+};
+
+// FAlphaBlend::AlphaToBlendOption (AlphaBlend.h): the easing functions, written from their documented formulas
+enum class EAlphaBlendOption : uint8
+{
+	Linear, Cubic, HermiteCubic, Sinusoidal, QuadraticInOut, CubicInOut, QuarticInOut, QuinticInOut,
+	CircularIn, CircularOut, CircularInOut, ExpIn, ExpOut, ExpInOut, Custom,
+};
+
+struct FAlphaBlend
+{
+	static float EaseInOut(float A, float Exp)
+	{
+		return A < 0.5f ? FMath::Pow(A * 2.f, Exp) * 0.5f : (1.f - FMath::Pow(1.f - (A * 2.f - 1.f), Exp)) * 0.5f + 0.5f;
+	}
+	static float CircularIn(float A) { return -1.f * (FMath::Sqrt(1.f - A * A) - 1.f); }
+	static float CircularOut(float A) { A -= 1.f; return FMath::Sqrt(1.f - A * A); }
+	static float ExpoIn(float A) { return A == 0.f ? 0.f : FMath::Pow(2.f, 10.f * (A - 1.f)); }
+	static float ExpoOut(float A) { return A == 1.f ? 1.f : -FMath::Pow(2.f, -10.f * A) + 1.f; }
+
+	static float AlphaToBlendOption(float A, EAlphaBlendOption Option, UCurveFloat* Curve)
+	{
+		float R = A;
+		switch (Option)
+		{
+		case EAlphaBlendOption::Sinusoidal: R = (FMath::Sin(A * UE_PI - UE_HALF_PI) + 1.f) / 2.f; break;
+		case EAlphaBlendOption::Cubic: R = (-2.f * A * A * A) + (3.f * A * A); break;
+		case EAlphaBlendOption::HermiteCubic: R = A < 0.f ? 0.f : (A >= 1.f ? 1.f : A * A * (3.0f - 2.0f * A)); break;
+		case EAlphaBlendOption::QuadraticInOut: R = EaseInOut(A, 2.f); break;
+		case EAlphaBlendOption::CubicInOut: R = EaseInOut(A, 3.f); break;
+		case EAlphaBlendOption::QuarticInOut: R = EaseInOut(A, 4.f); break;
+		case EAlphaBlendOption::QuinticInOut: R = EaseInOut(A, 5.f); break;
+		case EAlphaBlendOption::CircularIn: R = CircularIn(A); break;
+		case EAlphaBlendOption::CircularOut: R = CircularOut(A); break;
+		case EAlphaBlendOption::CircularInOut: R = A < 0.5f ? CircularIn(A * 2.f) * 0.5f : CircularOut(A * 2.f - 1.f) * 0.5f + 0.5f; break;
+		case EAlphaBlendOption::ExpIn: R = ExpoIn(A); break;
+		case EAlphaBlendOption::ExpOut: R = ExpoOut(A); break;
+		case EAlphaBlendOption::ExpInOut: R = A < 0.5f ? ExpoIn(A * 2.f) * 0.5f : ExpoOut(A * 2.f - 1.f) * 0.5f + 0.5f; break;
+		case EAlphaBlendOption::Custom:
+			if (Curve != nullptr)
+			{
+				float Min = 0.f, Max = 0.f;
+				Curve->GetTimeRange(Min, Max);
+				R = Curve->GetFloatValue(Min + (Max - Min) * A);
+			}
+			break;
+		default: break;
+		}
+		return FMath::Clamp<float>(R, 0.f, 1.f);
 	}
 };
 

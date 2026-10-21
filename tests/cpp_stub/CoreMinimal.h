@@ -179,6 +179,7 @@ namespace UE::Math
 	template <class T> struct TVector;
 	template <class T> struct TRotator;
 	template <class T> struct TQuat;
+	template <class T> struct TTransform;
 }
 
 using FVector2f = UE::Math::TVector2<float>;
@@ -189,6 +190,7 @@ using FRotator3f = UE::Math::TRotator<float>;
 using FRotator = UE::Math::TRotator<double>;
 using FQuat4f = UE::Math::TQuat<float>;
 using FQuat = UE::Math::TQuat<double>;
+using FTransform3f = UE::Math::TTransform<float>;
 
 struct FMath
 {
@@ -234,6 +236,13 @@ struct FMath
 
 	static bool IsNearlyZero(float V, float Tol = UE_SMALL_NUMBER) { return Abs(V) <= Tol; }
 	static bool IsNearlyEqual(float A, float B, float Tol = UE_SMALL_NUMBER) { return Abs(A - B) <= Tol; }
+
+	static float UnwindRadians(float A)
+	{
+		while (A > UE_PI) { A -= UE_TWO_PI; }
+		while (A < -UE_PI) { A += UE_TWO_PI; }
+		return A;
+	}
 
 	static float UnwindDegrees(float A)
 	{
@@ -304,6 +313,30 @@ struct FMath
 	template <class T> static UE::Math::TQuat<T> QInterpConstantTo(const UE::Math::TQuat<T>& Current, const UE::Math::TQuat<T>& Target, float Dt, float Speed);
 };
 
+// SpringMath (Math/SpringMath.h): the conversions and the critical spring damper, written from their documented behaviour
+struct SpringMath
+{
+	static constexpr float HalfLifeToSmoothingTime(float HalfLife) { return HalfLife / UE_LN2; }
+	static constexpr float SmoothingTimeToHalfLife(float SmoothingTime) { return SmoothingTime * UE_LN2; }
+
+	template <typename T>
+	static void CriticalSpringDamper(T& InOutX, T& InOutV, T TargetX, float SmoothingTime, float DeltaTime)
+	{
+		if (SmoothingTime < UE_SMALL_NUMBER)
+		{
+			InOutX = TargetX;
+			InOutV = T(0);
+			return;
+		}
+		const float Y = (4.0f / FMath::Max(SmoothingTime, UE_SMALL_NUMBER)) / 2.0f;
+		T J0 = InOutX - TargetX;
+		T J1 = InOutV + J0 * Y;
+		const float EyDt = FMath::InvExpApprox(Y * DeltaTime);
+		InOutX = EyDt * (J0 + J1 * DeltaTime) + TargetX;
+		InOutV = EyDt * (InOutV - J1 * Y * DeltaTime);
+	}
+};
+
 // ---- vectors, rotators, quaternions ------------------------------------------------------------
 
 namespace UE::Math
@@ -350,6 +383,7 @@ namespace UE::Math
 		T X = 0, Y = 0, Z = 0;
 		static const TVector ZeroVector;
 		TVector() = default;
+		explicit TVector(T InF) : X(InF), Y(InF), Z(InF) {}
 		TVector(T InX, T InY, T InZ) : X(InX), Y(InY), Z(InZ) {}
 		template <class U, class = std::enable_if_t<!std::is_same_v<T, U>>>
 		explicit TVector(const TVector<U>& V) : X((T)V.X), Y((T)V.Y), Z((T)V.Z) {}
@@ -372,6 +406,17 @@ namespace UE::Math
 		}
 		bool IsZero() const { return X == 0 && Y == 0 && Z == 0; }
 		TRotator<T> ToOrientationRotator() const;
+		TQuat<T> ToOrientationQuat() const;
+		T Size2D() const { return std::sqrt(X * X + Y * Y); }
+		TVector GetSafeNormal2D(T Tolerance = UE_SMALL_NUMBER) const
+		{
+			const T SquareSum = X * X + Y * Y;
+			if (SquareSum == 1.f) { return Z == 0.f ? *this : TVector(X, Y, 0.f); }
+			else if (SquareSum < Tolerance) { return TVector(0, 0, 0); }
+			const T Scale = FMath::InvSqrt(SquareSum);
+			return TVector(X * Scale, Y * Scale, 0.f);
+		}
+		TVector ProjectOnToNormal(const TVector& Normal) const { return Normal * (X * Normal.X + Y * Normal.Y + Z * Normal.Z); }
 		TVector GetClampedToMaxSize(T MaxSize) const
 		{
 			if (MaxSize < UE_KINDA_SMALL_NUMBER) { return TVector(0, 0, 0); }
@@ -431,8 +476,59 @@ namespace UE::Math
 		static const TQuat Identity;
 		TQuat() = default;
 		TQuat(T InX, T InY, T InZ, T InW) : X(InX), Y(InY), Z(InZ), W(InW) {}
+		TQuat(TVector<T> Axis, T AngleRad)
+		{
+			const T HalfA = 0.5f * AngleRad;
+			const T S = FMath::Sin(HalfA);
+			const T C = FMath::Cos(HalfA);
+			X = S * Axis.X; Y = S * Axis.Y; Z = S * Axis.Z; W = C;
+		}
 		template <class U, class = std::enable_if_t<!std::is_same_v<T, U>>>
 		explicit TQuat(const TQuat<U>& Q) : X((T)Q.X), Y((T)Q.Y), Z((T)Q.Z), W((T)Q.W) {}
+		TQuat operator*(T S) const { return TQuat(X * S, Y * S, Z * S, W * S); }
+		TQuat operator+(const TQuat& Q) const { return TQuat(X + Q.X, Y + Q.Y, Z + Q.Z, W + Q.W); }
+		T operator|(const TQuat& Q) const { return X * Q.X + Y * Q.Y + Z * Q.Z + W * Q.W; }
+		T SizeSquared() const { return X * X + Y * Y + Z * Z + W * W; }
+		static TQuat FastLerp(const TQuat& A, const TQuat& B, const T Alpha)
+		{
+			const T DotResult = (A | B);
+			const T Bias = DotResult >= 0 ? T(1.0f) : T(-1.0f);
+			return (B * Alpha) + (A * (Bias * (1.f - Alpha)));
+		}
+		TQuat Exp() const
+		{
+			const T Angle = FMath::Sqrt(X * X + Y * Y + Z * Z);
+			const T SinAngle = FMath::Sin(Angle);
+			TQuat Result;
+			Result.W = FMath::Cos(Angle);
+			if (FMath::Abs(SinAngle) >= T(UE_SMALL_NUMBER))
+			{
+				const T Scale = SinAngle / Angle;
+				Result.X = Scale * X; Result.Y = Scale * Y; Result.Z = Scale * Z;
+			}
+			else
+			{
+				Result.X = X; Result.Y = Y; Result.Z = Z;
+			}
+			return Result;
+		}
+		static TQuat MakeFromRotationVector(const TVector<T>& RotationVector)
+		{
+			return TQuat(RotationVector.X * 0.5f, RotationVector.Y * 0.5f, RotationVector.Z * 0.5f, 0.0f).Exp();
+		}
+		void ToSwingTwist(const TVector<T>& InTwistAxis, TQuat& OutSwing, TQuat& OutTwist) const
+		{
+			const T D = InTwistAxis.X * X + InTwistAxis.Y * Y + InTwistAxis.Z * Z;
+			OutTwist = TQuat(D * InTwistAxis.X, D * InTwistAxis.Y, D * InTwistAxis.Z, W);
+			if (OutTwist.SizeSquared() == 0.0f) { OutTwist = TQuat(0, 0, 0, 1); }
+			else { OutTwist = OutTwist.GetNormalized(); }
+			OutSwing = *this * OutTwist.Inverse();
+		}
+		T GetTwistAngle(const TVector<T>& TwistAxis) const
+		{
+			const T XYZ = TwistAxis.X * X + TwistAxis.Y * Y + TwistAxis.Z * Z;
+			return FMath::UnwindRadians(2.0f * FMath::Atan2(XYZ, W));
+		}
 		TQuat operator*(const TQuat& Q) const
 		{
 			return TQuat(W * Q.X + X * Q.W + Y * Q.Z - Z * Q.Y, W * Q.Y - X * Q.Z + Y * Q.W + Z * Q.X,
@@ -509,6 +605,66 @@ namespace UE::Math
 		}
 	};
 	template <class T> const TQuat<T> TQuat<T>::Identity(0, 0, 0, 1);
+
+	// FTransform (quaternion, translation, scale) as far as DalMath.h uses it; the QST formulas for non-negative scale
+	template <class T>
+	struct TTransform
+	{
+		TQuat<T> Rotation;
+		TVector<T> Translation;
+		TVector<T> Scale3D{(T)1, (T)1, (T)1};
+		TTransform() = default;
+		TTransform(const TQuat<T>& InRotation, const TVector<T>& InTranslation, const TVector<T>& InScale3D = TVector<T>((T)1, (T)1, (T)1))
+			: Rotation(InRotation), Translation(InTranslation), Scale3D(InScale3D) {}
+		TVector<T> GetLocation() const { return Translation; }
+		TQuat<T> GetRotation() const { return Rotation; }
+		TVector<T> GetScale3D() const { return Scale3D; }
+		void SetScale3D(const TVector<T>& NewScale3D) { Scale3D = NewScale3D; }
+		static TVector<T> GetSafeScaleReciprocal(const TVector<T>& InScale, T Tolerance = UE_SMALL_NUMBER)
+		{
+			return TVector<T>(FMath::Abs(InScale.X) <= Tolerance ? 0.f : 1 / InScale.X, FMath::Abs(InScale.Y) <= Tolerance ? 0.f : 1 / InScale.Y,
+			                  FMath::Abs(InScale.Z) <= Tolerance ? 0.f : 1 / InScale.Z);
+		}
+		TVector<T> TransformPosition(const TVector<T>& V) const { return Rotation.RotateVector(Scale3D * V) + Translation; }
+		TVector<T> InverseTransformPosition(const TVector<T>& V) const { return Rotation.UnrotateVector(V - Translation) * GetSafeScaleReciprocal(Scale3D); }
+		TVector<T> TransformVectorNoScale(const TVector<T>& V) const { return Rotation.RotateVector(V); }
+		TQuat<T> TransformRotation(const TQuat<T>& Q) const { return Rotation * Q; }
+		TQuat<T> InverseTransformRotation(const TQuat<T>& Q) const { return Rotation.Inverse() * Q; }
+		TTransform operator*(const TTransform& Other) const
+		{
+			return TTransform(Other.Rotation * Rotation, Other.Rotation.RotateVector(Other.Scale3D * Translation) + Other.Translation, Scale3D * Other.Scale3D);
+		}
+		TTransform Inverse() const
+		{
+			const TQuat<T> InvRotation = Rotation.Inverse();
+			const TVector<T> InvScale3D = GetSafeScaleReciprocal(Scale3D);
+			return TTransform(InvRotation, InvRotation.RotateVector(InvScale3D * -Translation), InvScale3D);
+		}
+		TTransform GetRelativeTransform(const TTransform& Other) const
+		{
+			if (FMath::Abs(1.f - Other.Rotation.SizeSquared()) >= 0.01f) { return TTransform(); }
+			const TVector<T> SafeRecipScale3D = GetSafeScaleReciprocal(Other.Scale3D);
+			const TQuat<T> Inv = Other.Rotation.Inverse();
+			return TTransform(Inv * Rotation, Inv.RotateVector(Translation - Other.Translation) * SafeRecipScale3D, Scale3D * SafeRecipScale3D);
+		}
+		TTransform GetRelativeTransformReverse(const TTransform& Other) const
+		{
+			const TVector<T> SafeRecipScale3D = GetSafeScaleReciprocal(Scale3D);
+			const TVector<T> NewScale = Other.Scale3D * SafeRecipScale3D;
+			const TQuat<T> NewRotation = Other.Rotation * Rotation.Inverse();
+			return TTransform(NewRotation, Other.Translation - NewRotation.RotateVector(NewScale * Translation), NewScale);
+		}
+	};
+
+	template <class T>
+	TQuat<T> TVector<T>::ToOrientationQuat() const
+	{
+		const T YawRad = FMath::Atan2(Y, X);
+		const T PitchRad = FMath::Atan2(Z, FMath::Sqrt(X * X + Y * Y));
+		const T SP = FMath::Sin(PitchRad * 0.5f), CP = FMath::Cos(PitchRad * 0.5f);
+		const T SY = FMath::Sin(YawRad * 0.5f), CY = FMath::Cos(YawRad * 0.5f);
+		return TQuat<T>(SP * SY, -SP * CY, CP * SY, CP * CY);
+	}
 
 	template <class T>
 	TRotator<T> TVector<T>::ToOrientationRotator() const

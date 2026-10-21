@@ -16,7 +16,7 @@ from . import runtime as rt
 from . import values as vals
 from .builtins import BUILTINS, CONSTRUCTORS
 from .hostapi import HOST_ITEMS, HostV1
-from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, VOID, ArrayType, AssetType, EnumType, MapType, StructType, TagType, Type, zero_value
+from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, SPRING_MEMBERS, TRANSFORM, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, VOID, SPRING, ArrayType, AssetType, EnumType, MapType, StructType, TagType, Type, zero_value
 
 
 class InterpError(Exception):
@@ -48,6 +48,10 @@ def coerce(ty: Type, v):
         return rt.as_quat(v)
     if ty is HIT:
         return rt.as_hit(v)
+    if ty in SPRING_MEMBERS:
+        return rt.as_spring(v) if ty is SPRING else rt.as_spring3(v)
+    if ty is TRANSFORM:
+        return rt.as_transform(v)
     if isinstance(ty, (StructType, TagType, EnumType, AssetType)):
         return vals.coerce(ty, v)
     raise InterpError(f"cannot coerce to {ty}")
@@ -115,6 +119,8 @@ class Evaluator:
                 return rt.Rotator(*args)
             if e.ctor == "quat":
                 return rt.Quat(*args)
+            if e.ctor == "transform":
+                return rt.Transform(*args)
             raise InterpError(f"unknown constructor {e.ctor}")
         if k is ir.CallBuiltin:
             fn = getattr(rt, BUILTINS[e.name].py)
@@ -201,7 +207,7 @@ class Evaluator:
         if isinstance(e.x.ty, StructType):
             return getattr(v, e.comps)
         comps = e.comps
-        if comps in HIT_MEMBERS:
+        if comps in HIT_MEMBERS or e.x.ty in SPRING_MEMBERS or e.x.ty is TRANSFORM:
             return getattr(v, comps)
         if len(comps) == 1 or comps in ("pitch", "yaw", "roll"):
             return v[_COMPS[comps]]

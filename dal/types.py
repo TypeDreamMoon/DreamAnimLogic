@@ -62,6 +62,16 @@ ERROR = _ErrorType()
 HIT = Type("hit")
 HIT_MEMBERS = {"blocking": "bool", "point": "vec3", "normal": "vec3", "distance": "float", "time": "float"}
 
+# v3: a QST transform (UE FTransform3f): location (vec3), rotation (quat), scale (vec3); a value type that can be stored
+TRANSFORM = Type("transform")
+TRANSFORM_MEMBERS = {"location": "vec3", "rotation": "quat", "scale": "vec3"}
+
+# v3: the result of critical_spring_damper: the new value and velocity.  Like `hit`, a value type for locals, function
+# parameters and results; it is not stored (copy .value and .velocity into states).
+SPRING = Type("spring")
+SPRING3 = Type("spring3")
+SPRING_MEMBERS = {SPRING: {"value": "float", "velocity": "float"}, SPRING3: {"value": "vec3", "velocity": "vec3"}}
+
 # v3: the type of a call that returns nothing (a method without `->`); never stored
 VOID = Type("void")
 
@@ -69,7 +79,7 @@ VOID = Type("void")
 MONTAGE = Type("montage")
 
 BASIC_TYPES: dict[str, Type] = {
-    t.name: t for t in (FLOAT, INT, BOOL, VEC2, VEC3, ROTATOR, QUAT, HIT)
+    t.name: t for t in (FLOAT, INT, BOOL, VEC2, VEC3, ROTATOR, QUAT, HIT, SPRING, SPRING3, TRANSFORM)
 }
 
 
@@ -216,7 +226,12 @@ def make_movement_mode() -> EnumType:
 
 
 MOVEMENT_MODE = make_movement_mode()
-BUILTIN_ENUMS: dict[str, EnumType] = {"MovementMode": MOVEMENT_MODE}
+
+# the easing options of FAlphaBlend (EAlphaBlendOption), in the engine's order
+BLEND_OPTION_MEMBERS = ["Linear", "Cubic", "HermiteCubic", "Sinusoidal", "QuadraticInOut", "CubicInOut", "QuarticInOut", "QuinticInOut",
+                        "CircularIn", "CircularOut", "CircularInOut", "ExpIn", "ExpOut", "ExpInOut", "Custom"]
+BLEND_OPTION = EnumType("BlendOption", BLEND_OPTION_MEMBERS, builtin=True, cpp_type="EAlphaBlendOption", cpp_prop_type="EAlphaBlendOption")
+BUILTIN_ENUMS: dict[str, EnumType] = {"MovementMode": MOVEMENT_MODE, "BlendOption": BLEND_OPTION}
 
 
 def py_member_name(member: str) -> str:
@@ -246,6 +261,12 @@ def zero_value(ty: Type):
         return 0
     if ty is HIT:
         return rt.Hit(False, rt.Vec3(0.0, 0.0, 0.0), rt.Vec3(0.0, 0.0, 0.0), 0.0, 1.0)
+    if ty is TRANSFORM:
+        return rt.Transform()
+    if ty is SPRING:
+        return rt.Spring(0.0, 0.0)
+    if ty is SPRING3:
+        return rt.Spring3(rt.Vec3(0.0, 0.0, 0.0), rt.Vec3(0.0, 0.0, 0.0))
     if isinstance(ty, TagType):
         return ""
     if isinstance(ty, AssetType):

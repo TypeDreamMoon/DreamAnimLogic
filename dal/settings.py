@@ -289,6 +289,8 @@ class _Loader:
             raise SettingsError(f"{path}: expected true or false, got {v!r}")
         if kind in ("vec2", "vec3", "rotator", "quat"):
             return self.decode_vector(kind, v, path)
+        if kind == "transform":
+            return self.decode_transform(v, path)
         if kind in ("sequence", "montage"):
             name = asset_name(v)
             if name is not None and not self.resolver.has_asset(kind, name):
@@ -314,6 +316,21 @@ class _Loader:
         if len(comps) != len(names) or any(isinstance(c, bool) or not isinstance(c, (int, float)) for c in comps):
             raise SettingsError(f"{path}: a {kind} is {len(names)} numbers, got {v!r}")
         return {"vec2": rt.Vec2, "vec3": rt.Vec3, "rotator": rt.Rotator, "quat": rt.Quat}[kind](*comps)
+
+    def decode_transform(self, v, path: str):
+        """`{"location": [x, y, z], "rotation": [x, y, z, w] or {Pitch, Yaw, Roll}, "scale": [x, y, z]}`; the keys may be capitalised
+        (Translation / Location, Rotation, Scale3D / Scale); missing parts are the identity."""
+        if not isinstance(v, dict):
+            raise SettingsError(f"{path}: expected an object with location, rotation and scale for a transform, got {v!r}")
+        low = {str(k).lower(): x for k, x in v.items()}
+        loc = low.get("location", low.get("translation"))
+        rot = low.get("rotation")
+        scale = low.get("scale", low.get("scale3d"))
+        if isinstance(rot, dict) and "pitch" in {str(k).lower() for k in rot}:
+            rot = rt.to_quat(self.decode_vector("rotator", rot, path + ".rotation"))
+        return rt.Transform(self.decode_vector("vec3", loc, path + ".location") if loc is not None else rt.VEC3_ZERO,
+                            self.decode_vector("quat", rot, path + ".rotation") if rot is not None else rt.QUAT_IDENTITY,
+                            self.decode_vector("vec3", scale, path + ".scale") if scale is not None else rt.Vec3(1.0, 1.0, 1.0))
 
     def decode_curve(self, kind: str, v, path: str):
         if v is None:

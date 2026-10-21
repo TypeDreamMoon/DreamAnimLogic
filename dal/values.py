@@ -17,6 +17,7 @@ from .types import (
     INT,
     QUAT,
     ROTATOR,
+    TRANSFORM,
     VEC2,
     VEC3,
     EnumType,
@@ -105,6 +106,8 @@ def coerce(ty: Type, v):
         return rt.as_rotator(v)
     if ty is QUAT:
         return rt.as_quat(v)
+    if ty is TRANSFORM:
+        return rt.as_transform(v)
     if isinstance(ty, EnumType):
         if isinstance(v, str):
             name = v.rsplit("::", 1)[-1].rsplit(".", 1)[-1]

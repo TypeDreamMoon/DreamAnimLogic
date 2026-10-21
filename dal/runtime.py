@@ -173,6 +173,47 @@ class Hit(tuple):
         return f"Hit(blocking={self[0]!r}, point={self[1]!r}, normal={self[2]!r}, distance={self[3]!r}, time={self[4]!r})"
 
 
+class Transform(tuple):
+    """A QST transform (UE ``FTransform3f``): location, rotation, scale.  A point is mapped by ``rotate(scale * p) + location``;
+    ``compose(a, b)`` applies a first, then b."""
+
+    __slots__ = ()
+
+    def __new__(cls, location=(0.0, 0.0, 0.0), rotation=(0.0, 0.0, 0.0, 1.0), scale=(1.0, 1.0, 1.0)):
+        return tuple.__new__(cls, (as_vec3(location), as_quat(rotation), as_vec3(scale)))
+
+    location = property(lambda s: s[0])
+    rotation = property(lambda s: s[1])
+    scale = property(lambda s: s[2])
+
+    def __repr__(self):
+        return f"Transform({self[0]!r}, {self[1]!r}, {self[2]!r})"
+
+
+class Spring(tuple):
+    """The result of critical_spring_damper on a float: value, velocity."""
+
+    __slots__ = ()
+
+    def __new__(cls, value=0.0, velocity=0.0):
+        return tuple.__new__(cls, (float(value), float(velocity)))
+
+    value = property(lambda s: s[0])
+    velocity = property(lambda s: s[1])
+
+
+class Spring3(tuple):
+    """The result of critical_spring_damper on a vec3: value, velocity."""
+
+    __slots__ = ()
+
+    def __new__(cls, value=(0.0, 0.0, 0.0), velocity=(0.0, 0.0, 0.0)):
+        return tuple.__new__(cls, (as_vec3(value), as_vec3(velocity)))
+
+    value = property(lambda s: s[0])
+    velocity = property(lambda s: s[1])
+
+
 VEC2_ZERO = Vec2(0.0, 0.0)
 VEC3_ZERO = Vec3(0.0, 0.0, 0.0)
 ROTATOR_ZERO = Rotator(0.0, 0.0, 0.0)
@@ -189,6 +230,26 @@ class MovementMode(IntEnum):
     Swimming = 4
     Flying = 5
     Custom = 6
+
+
+class BlendOption(IntEnum):
+    """The easing options of ``blend_alpha``; same order as UE ``EAlphaBlendOption``."""
+
+    Linear = 0
+    Cubic = 1
+    HermiteCubic = 2
+    Sinusoidal = 3
+    QuadraticInOut = 4
+    CubicInOut = 5
+    QuarticInOut = 6
+    QuinticInOut = 7
+    CircularIn = 8
+    CircularOut = 9
+    CircularInOut = 10
+    ExpIn = 11
+    ExpOut = 12
+    ExpInOut = 13
+    Custom = 14
 
 
 # Coercions used by the generated ``_sample`` so hosts may return plain tuples.
@@ -218,6 +279,18 @@ def as_quat(v):
 
 def as_hit(v):
     return v if type(v) is Hit else Hit(*v)
+
+
+def as_transform(v):
+    return v if type(v) is Transform else Transform(*v)
+
+
+def as_spring(v):
+    return v if type(v) is Spring else Spring(*v)
+
+
+def as_spring3(v):
+    return v if type(v) is Spring3 else Spring3(*v)
 
 
 def path_get(v, path):
@@ -918,6 +991,248 @@ def exponential_smoothing(cur, target, dt, smoothing_time):
     return target
 
 
+# ---- quaternion and vector helpers (G13) ---------------------------------------------------
+
+def fast_lerp(a, b, alpha):
+    """FQuat::FastLerp: the shortest-route linear blend, NOT normalized."""
+    dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+    k = (1.0 if dot >= 0.0 else -1.0) * (1.0 - alpha)
+    return Quat(b[0] * alpha + a[0] * k, b[1] * alpha + a[1] * k, b[2] * alpha + a[2] * k, b[3] * alpha + a[3] * k)
+
+
+def quat_from_axis_angle(axis, rad):
+    """FQuat(Axis, AngleRad); the axis must be a unit vector."""
+    half = 0.5 * rad
+    s, c = sin(half), cos(half)
+    return Quat(s * axis[0], s * axis[1], s * axis[2], c)
+
+
+def quat_from_rotation_vector(v):
+    """FQuat::MakeFromRotationVector: the rotation about v by |v| radians (Exp of the half vector)."""
+    x, y, z = v[0] * 0.5, v[1] * 0.5, v[2] * 0.5
+    angle = sqrt(x * x + y * y + z * z)
+    sin_angle = sin(angle)
+    if abs_(sin_angle) >= SMALL_NUMBER:
+        k = sin_angle / angle
+        return Quat(k * x, k * y, k * z, cos(angle))
+    return Quat(x, y, z, cos(angle))
+
+
+def to_orientation_quat(v):
+    """FVector::ToOrientationQuat: the rotation that turns +X to v, without roll."""
+    yaw = atan2(v[1], v[0])
+    pitch = atan2(v[2], sqrt(v[0] * v[0] + v[1] * v[1]))
+    sp, cp = sin(pitch * 0.5), cos(pitch * 0.5)
+    sy, cy = sin(yaw * 0.5), cos(yaw * 0.5)
+    return Quat(sp * sy, -sp * cy, cp * sy, cp * cy)
+
+
+def get_twist(q, axis):
+    """The twist part of FQuat::ToSwingTwist(axis, swing, twist): the rotation about `axis`."""
+    d = axis[0] * q[0] + axis[1] * q[1] + axis[2] * q[2]
+    t = Quat(d * axis[0], d * axis[1], d * axis[2], q[3])
+    if t[0] * t[0] + t[1] * t[1] + t[2] * t[2] + t[3] * t[3] == 0.0:
+        return QUAT_IDENTITY
+    return quat_normalize(t)
+
+
+def _unwind_radians(a):
+    while a > PI:
+        a -= TWO_PI
+    while a < -PI:
+        a += TWO_PI
+    return a
+
+
+def twist_angle(q, axis):
+    """FQuat::GetTwistAngle: the twist about `axis` in radians, in [-pi, pi]."""
+    d = axis[0] * q[0] + axis[1] * q[1] + axis[2] * q[2]
+    return _unwind_radians(2.0 * atan2(d, q[3]))
+
+
+def project_on_normal(v, n):
+    """FVector::ProjectOnToNormal: n * (v . n)."""
+    return n * (v[0] * n[0] + v[1] * n[1] + v[2] * n[2])
+
+
+def safe_normal_2d(v):
+    """FVector::GetSafeNormal2D: the horizontal direction (z = 0); zero for a (nearly) vertical vector."""
+    sq = v[0] * v[0] + v[1] * v[1]
+    if sq == 1.0:
+        return v if v[2] == 0.0 else Vec3(v[0], v[1], 0.0)
+    if sq < SMALL_NUMBER:
+        return VEC3_ZERO
+    k = inv_sqrt(sq)
+    return Vec3(v[0] * k, v[1] * k, 0.0)
+
+
+def size_2d(v):
+    """FVector::Size2D."""
+    return sqrt(v[0] * v[0] + v[1] * v[1])
+
+
+def half_life_to_smoothing_time(half_life):
+    """SpringMath::HalfLifeToSmoothingTime."""
+    return half_life / LN2
+
+
+# ---- transforms (G12): the QST formulas of UE's FTransform for non-negative scale --------------------------------
+
+def _safe_recip(s, tol=SMALL_NUMBER):
+    """FTransform::GetSafeScaleReciprocal: 1 / scale, 0 for a (nearly) zero component."""
+    return Vec3(*(0.0 if abs(c) <= tol else 1.0 / c for c in s))
+
+
+def make_transform(location, rotation, scale=(1.0, 1.0, 1.0)):
+    return Transform(location, rotation, scale)
+
+
+def transform_position(t, v):
+    """FTransform::TransformPosition: rotate(scale * v) + location."""
+    return _rotate_q(t[1], t[2] * v, False) + t[0]
+
+
+def inverse_transform_position(t, v):
+    """FTransform::InverseTransformPosition: unrotate(v - location) / scale."""
+    return _rotate_q(t[1], v - t[0], True) * _safe_recip(t[2])
+
+
+def transform_rotation(t, q):
+    """FTransform::TransformRotation: rotation * q."""
+    return quat_mul(t[1], q)
+
+
+def inverse_transform_rotation(t, q):
+    """FTransform::InverseTransformRotation: inverse(rotation) * q."""
+    return quat_mul(quat_inverse(t[1]), q)
+
+
+def transform_vector_no_scale(t, v):
+    """FTransform::TransformVectorNoScale: rotate(v)."""
+    return _rotate_q(t[1], v, False)
+
+
+def compose(a, b):
+    """FTransform::operator* (a * b): apply a, then b."""
+    return Transform(_rotate_q(b[1], b[2] * a[0], False) + b[0], quat_mul(b[1], a[1]), a[2] * b[2])
+
+
+def relative_transform(a, b):
+    """FTransform::GetRelativeTransform: a relative to b (a * inverse(b)); the identity when b's rotation is not normalized."""
+    if abs(1.0 - (b[1][0] ** 2 + b[1][1] ** 2 + b[1][2] ** 2 + b[1][3] ** 2)) >= 0.01:
+        return Transform()
+    safe = _safe_recip(b[2])
+    inv = quat_inverse(b[1])
+    return Transform(_rotate_q(inv, a[0] - b[0], False) * safe, quat_mul(inv, a[1]), a[2] * safe)
+
+
+def relative_transform_reverse(a, b):
+    """FTransform::GetRelativeTransformReverse: inverse(a) * b."""
+    scale = b[2] * _safe_recip(a[2])
+    rot = quat_mul(b[1], quat_inverse(a[1]))
+    return Transform(b[0] - _rotate_q(rot, scale * a[0], False), rot, scale)
+
+
+def inverse(t):
+    """FTransform::Inverse (exact for uniform scale)."""
+    inv_rot = quat_inverse(t[1])
+    inv_scale = _safe_recip(t[2])
+    return Transform(_rotate_q(inv_rot, inv_scale * (-t[0]), False), inv_rot, inv_scale)
+
+
+def with_scale(t, scale):
+    return Transform(t[0], t[1], scale)
+
+
+def _ease_in(alpha, exp):
+    return pow_(alpha, exp)
+
+
+def _ease_out(alpha, exp):
+    return 1.0 - pow_(1.0 - alpha, exp)
+
+
+def _ease_in_out(alpha, exp):
+    return _ease_in(alpha * 2.0, exp) * 0.5 if alpha < 0.5 else _ease_out(alpha * 2.0 - 1.0, exp) * 0.5 + 0.5
+
+
+def _circ_in(a):
+    return -1.0 * (sqrt(1.0 - a * a) - 1.0)
+
+
+def _circ_out(a):
+    a -= 1.0
+    return sqrt(1.0 - a * a)
+
+
+def _expo_in(a):
+    return 0.0 if a == 0.0 else pow_(2.0, 10.0 * (a - 1.0))
+
+
+def _expo_out(a):
+    return 1.0 if a == 1.0 else -pow_(2.0, -10.0 * a) + 1.0
+
+
+def _in_out(inn, out, a):
+    return inn(a * 2.0) * 0.5 if a < 0.5 else out(a * 2.0 - 1.0) * 0.5 + 0.5
+
+
+def blend_alpha(alpha, option, curve):
+    """FAlphaBlend::AlphaToBlendOption: the eased alpha in [0, 1]; `Custom` reads the curve over its own time range
+    (linear when there is no curve)."""
+    o = int(option)
+    if o == BlendOption.Sinusoidal:
+        r = (sin(alpha * PI - HALF_PI) + 1.0) / 2.0
+    elif o == BlendOption.Cubic:
+        r = (-2.0 * alpha * alpha * alpha) + (3.0 * alpha * alpha)                   # CubicInterp(0, 0, 1, 0, alpha)
+    elif o == BlendOption.HermiteCubic:
+        r = 0.0 if alpha < 0.0 else (1.0 if alpha >= 1.0 else alpha * alpha * (3.0 - 2.0 * alpha))     # SmoothStep(0, 1, alpha)
+    elif o == BlendOption.QuadraticInOut:
+        r = _ease_in_out(alpha, 2.0)
+    elif o == BlendOption.CubicInOut:
+        r = _ease_in_out(alpha, 3.0)
+    elif o == BlendOption.QuarticInOut:
+        r = _ease_in_out(alpha, 4.0)
+    elif o == BlendOption.QuinticInOut:
+        r = _ease_in_out(alpha, 5.0)
+    elif o == BlendOption.CircularIn:
+        r = _circ_in(alpha)
+    elif o == BlendOption.CircularOut:
+        r = _circ_out(alpha)
+    elif o == BlendOption.CircularInOut:
+        r = _in_out(_circ_in, _circ_out, alpha)
+    elif o == BlendOption.ExpIn:
+        r = _expo_in(alpha)
+    elif o == BlendOption.ExpOut:
+        r = _expo_out(alpha)
+    elif o == BlendOption.ExpInOut:
+        r = _in_out(_expo_in, _expo_out, alpha)
+    elif o == BlendOption.Custom and curve is not None:
+        keys = getattr(curve, "keys", None) or []
+        lo, hi = (keys[0].time, keys[-1].time) if keys else (0.0, 0.0)
+        r = curve_eval(curve, lo + (hi - lo) * alpha)
+    else:
+        r = alpha
+    return clamp(r, 0.0, 1.0)
+
+
+def critical_spring_damper(x, v, target, smoothing_time, dt):
+    """SpringMath::CriticalSpringDamper on a float or a vec3: the value and velocity after dt (a Spring or a Spring3)."""
+    scalar = isinstance(x, (int, float))
+    if smoothing_time < SMALL_NUMBER:
+        return Spring(target, 0.0) if scalar else Spring3(target, VEC3_ZERO)
+    y = 4.0 / max_(smoothing_time, SMALL_NUMBER) / 2.0                 # SmoothingTimeToDamping / 2
+    ey_dt = inv_exp_approx(y * dt)
+    if scalar:
+        j0 = x - target
+        j1 = v + j0 * y
+        return Spring(ey_dt * (j0 + j1 * dt) + target, ey_dt * (v - j1 * y * dt))
+    j0 = Vec3(x[0] - target[0], x[1] - target[1], x[2] - target[2])
+    j1 = Vec3(v[0] + j0[0] * y, v[1] + j0[1] * y, v[2] + j0[2] * y)
+    return Spring3(Vec3(*(ey_dt * (j0[i] + j1[i] * dt) + target[i] for i in range(3))),
+                   Vec3(*(ey_dt * (v[i] - j1[i] * y * dt) for i in range(3))))
+
+
 # ---- struct values --------------------------------------------------------------------
 
 class Struct:
@@ -1007,6 +1322,9 @@ _COERCE = {
     "rotator": as_rotator,
     "quat": as_quat,
     "hit": as_hit,
+    "transform": as_transform,
+    "spring": as_spring,
+    "spring3": as_spring3,
 }
 
 

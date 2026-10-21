@@ -84,7 +84,9 @@ class DiagnosticTests(unittest.TestCase):
         self.check(HDR + "const C: float = 1.0;\nupdate(dt) { C = 2.0; }", ("DAL5001", 3, 14))
         self.check(HDR + "update(dt) { let x = 1; x = 2; }", ("DAL5001", 2, 25))
         self.check(HDR + "update(dt) { dt = 2.0; }", ("DAL5001", 2, 14))
-        self.check(HDR + "state V: vec2;\nupdate(dt) { V.x = 1.0; }", ("DAL2010", 3, 14))
+        self.check(HDR + "state V: vec2;\nupdate(dt) { V.x = 1.0; }")                         # a component is assignable (the vector is rebuilt)
+        self.check(HDR + "state V: vec2;\nupdate(dt) { V.xy = vec2(1.0, 2.0); }", ("DAL2010", 3, 16))
+        self.check(HDR + "state V: vec2;\nupdate(dt) { V.z = 1.0; }", ("DAL4030", 3, 16))
         self.check(HDR + "state N: int;\nupdate(dt) { N -= 0.5; }", ("DAL4002", 3, 19))
 
     def test_scoping(self):

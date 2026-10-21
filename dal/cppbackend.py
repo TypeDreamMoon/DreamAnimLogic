@@ -43,6 +43,9 @@ from .types import (
     HIT,
     INT,
     MOVEMENT_MODE,
+    SPRING,
+    SPRING3,
+    TRANSFORM,
     QUAT,
     ROTATOR,
     VEC2,
@@ -75,6 +78,7 @@ KIND_PARENT = {
     "actor": ("UActorComponent", "Components/ActorComponent.h"),
 }
 
+TRANSFORM_GETTER = {"location": "GetLocation", "rotation": "GetRotation", "scale": "GetScale3D"}
 HIT_MEMBER_CPP = {"blocking": "bBlocking", "point": "Point", "normal": "Normal", "distance": "Distance", "time": "Time"}
 
 
@@ -152,8 +156,14 @@ def cpp_type(ty: Type) -> str:
         return "FRotator3f"
     if ty is QUAT:
         return "FQuat4f"
+    if ty is TRANSFORM:
+        return "FTransform3f"
     if ty is HIT:
         return "DalHost::FHit"
+    if ty is SPRING:
+        return "DalMath::FSpring"
+    if ty is SPRING3:
+        return "DalMath::FSpring3"
     if isinstance(ty, EnumType):
         return ty.cpp_type
     if isinstance(ty, StructType):
@@ -243,6 +253,8 @@ def cpp_value(ty: Type, v) -> str:
         return "FRotator3f(%s)" % ", ".join(fmt_float(c) for c in v)
     if ty is QUAT:
         return "FQuat4f(%s)" % ", ".join(fmt_float(c) for c in v)
+    if ty is TRANSFORM:
+        return "FTransform3f(%s, %s, %s)" % (cpp_value(QUAT, v[1]), cpp_value(VEC3, v[0]), cpp_value(VEC3, v[2]))
     if isinstance(ty, EnumType):
         return ty.cpp_members[ty.members[int(v)]]
     if isinstance(ty, StructType):
@@ -337,6 +349,8 @@ class CppExprGen:
                 return f"DalMath::MakeVec3({', '.join(a)})" if e.sig_index == 1 else f"FVector3f({', '.join(a)})"
             if e.ctor == "rotator":
                 return f"FRotator3f({', '.join(a)})"
+            if e.ctor == "transform":
+                return f"FTransform3f({a[1]}, {a[0]}{', ' + a[2] if len(a) > 2 else ''})"
             return f"FQuat4f({', '.join(a)})"
         if k is ir.CallBuiltin:
             return f"DalMath::{BUILTINS[e.name].cpp}({', '.join(unparen(self.x(a)) for a in e.args)})"
@@ -406,6 +420,10 @@ class CppExprGen:
             return f"static_cast<EMovementMode>({text})" if e.ty is MOVEMENT_MODE else text
         if e.x.ty is HIT:
             return f"{base}.{HIT_MEMBER_CPP[e.comps]}"
+        if e.x.ty is SPRING or e.x.ty is SPRING3:
+            return f"{base}.{e.comps.capitalize()}"
+        if e.x.ty is TRANSFORM:
+            return f"{base}.{TRANSFORM_GETTER[e.comps]}()"
         if len(e.comps) == 1 or e.comps in ("pitch", "yaw", "roll"):
             return f"{base}.{_COMP_CPP[e.comps]}"
         idx = ", ".join(str(_SWIZ_IDX[c]) for c in e.comps)

@@ -15,9 +15,10 @@ from _bootstrap import EXAMPLES
 
 import dal
 from dal import harness, ir
+from builtin_programs import PRELUDE, arg, input_decl, outputs, uses_curve
 from dal.builtins import BUILTINS, CONSTRUCTORS
 from dal.pybackend import generate_python
-from dal.types import BOOL, FLOAT, INT, QUAT, ROTATOR, VEC2, VEC3
+from dal.types import BOOL, FLOAT, INT, QUAT, ROTATOR, TRANSFORM, VEC2, VEC3
 
 FLOAT_POOL = [0.0, -0.0, 1.0, -1.0, 0.5, -0.5, 2.5, 1e-9, -1e-9, 180.0, -180.0, 360.0, 540.0, -540.0, 1e4, 3.14159, 0.25, 100.0]
 
@@ -58,6 +59,10 @@ def rand_for(rng, ty):
         return (rand_float(rng), rand_float(rng), rand_float(rng))
     if ty is QUAT:
         return rand_quat(rng)
+    if ty is TRANSFORM:
+        return ((rand_float(rng), rand_float(rng), rand_float(rng)), rand_quat(rng), (rng.choice([0.5, 1.0, 2.0]),) * 3)
+    if getattr(ty, 'is_enum', False):
+        return rng.randrange(len(ty.members))
     raise ValueError(ty)
 
 
@@ -115,11 +120,18 @@ class BuiltinConsistency(unittest.TestCase):
         count = 0
         for name, b in sorted(BUILTINS.items()):
             for idx, sig in enumerate(b.sigs):
-                params = "".join(f"input P{i}: {t.name};\n" for i, t in enumerate(sig.params))
-                args = ", ".join(f"P{i}" for i in range(len(sig.params)))
-                src = f"logic T;\n{params}state R: {sig.ret.name};\nupdate(dt) {{ R = {name}({args}); }}\n"
+                params = "".join(input_decl(sig, i, f"P{i}") + "\n" for i in range(len(sig.params)))
+                args = ", ".join(arg(sig, i, f"P{i}") for i in range(len(sig.params)))
+                outs = outputs(sig.ret)
+                states = "".join(f"state R{suffix}: {ty};\n" for suffix, ty, _a in outs)
+                body = " ".join(f"R{suffix} = {name}({args}){access};" for suffix, _t, access in outs)
+                cfg = PRELUDE if uses_curve(sig) else ""
+                params = ("param Cfg: BuiltinCfg;\n" if uses_curve(sig) else "") + params
+                src = f"{cfg}logic T;\n{params}{states}update(dt) {{ {body} }}\n"
                 module = compile_src(src)
                 call = module.update.body[0].value
+                if outs[0][2]:
+                    call = call.x                                  # a record result: its members are stored
                 self.assertIsInstance(call, ir.CallBuiltin, name)
                 self.assertEqual((call.name, call.sig_index, call.ty), (name, idx, sig.ret), f"{name} overload {idx}")
                 frames = free_frames(module, 120, hash((name, idx)) & 0xFFFF)

@@ -10,7 +10,7 @@ from __future__ import annotations
 from . import ir
 from .builtins import BUILTIN_CONSTS, BUILTINS
 from .hostapi import HOST_ITEMS
-from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, VOID, ArrayType, AssetType, EnumType, MapType, StructType, TagType, Type, py_member_name, zero_value
+from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, SPRING, SPRING3, SPRING_MEMBERS, TRANSFORM, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, VOID, ArrayType, AssetType, EnumType, MapType, StructType, TagType, Type, py_member_name, zero_value
 
 INDENT = "    "
 
@@ -23,11 +23,14 @@ _AS = {
     ROTATOR: "_rt.as_rotator",
     QUAT: "_rt.as_quat",
     HIT: "_rt.as_hit",
+    TRANSFORM: "_rt.as_transform",
+    SPRING: "_rt.as_spring",
+    SPRING3: "_rt.as_spring3",
 }
 
 
 def py_enum_class(ty: EnumType) -> str:
-    return "_rt.MovementMode" if ty.builtin else ty.name
+    return f"_rt.{ty.name}" if ty.builtin else ty.name
 
 
 def py_value(ty: Type, v) -> str:
@@ -46,6 +49,8 @@ def py_value(ty: Type, v) -> str:
         return "_rt.Rotator(%s)" % ", ".join(repr(float(c)) for c in v)
     if ty is QUAT:
         return "_rt.Quat(%s)" % ", ".join(repr(float(c)) for c in v)
+    if ty is TRANSFORM:
+        return "_rt.Transform(%s)" % ", ".join(py_value(t, c) for t, c in zip((VEC3, QUAT, VEC3), v))
     if isinstance(ty, EnumType):
         return f"{py_enum_class(ty)}.{py_member_name(ty.members[int(v)])}"
     if isinstance(ty, TagType):
@@ -174,7 +179,7 @@ class PyGen:
         if k is ir.Member:
             if isinstance(e.x.ty, StructType):
                 return f"{self.x(e.x)}.{e.comps}"
-            if e.comps in HIT_MEMBERS or len(e.comps) == 1 or e.comps in ("pitch", "yaw", "roll"):
+            if e.comps in HIT_MEMBERS or e.x.ty in SPRING_MEMBERS or e.x.ty is TRANSFORM or len(e.comps) == 1 or e.comps in ("pitch", "yaw", "roll"):
                 return f"{self.x(e.x)}.{e.comps}"
             return f"_rt.swizzle({self.x(e.x)}, {e.comps!r})"
         if k is ir.Make:
@@ -185,6 +190,8 @@ class PyGen:
                 return f"_rt.vec3_from_vec2({args})" if e.sig_index == 1 else f"_rt.Vec3({args})"
             if e.ctor == "rotator":
                 return f"_rt.Rotator({args})"
+            if e.ctor == "transform":
+                return f"_rt.Transform({args})"
             return f"_rt.Quat({args})"
         if k is ir.CallBuiltin:
             return f"_rt.{BUILTINS[e.name].py}({', '.join(unparen(self.x(a)) for a in e.args)})"

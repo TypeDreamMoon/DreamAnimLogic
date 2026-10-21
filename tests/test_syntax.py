@@ -152,8 +152,8 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(col, len("state X: float") + 1)
         self.assertIn("';'", msg)
 
-    def test_member_assignment_parses_and_the_checker_rejects_components_with_advice(self):
-        # a.b = v parses as a member assignment (struct members, v3); assigning to a component of a vector is a type error
+    def test_member_assignment_parses_and_the_checker_rejects_swizzles_with_advice(self):
+        # a.b = v parses as a member assignment (struct members, v3); a component of a vector is assignable (v3), a swizzle is not
         unit = parse("logic A;\nupdate(dt) { V.x = 1.0; S.a.b += 2.0; }")
         first, second = unit.decls[1].body
         self.assertIsInstance(first, S.MemberAssignStmt)
@@ -161,9 +161,10 @@ class ParserTests(unittest.TestCase):
         self.assertEqual((second.name, second.path, second.op), ("S", ["a", "b"], "+="))
         import dal
         with self.assertRaises(DalError) as cm:
-            dal.check_source("logic A;\nstate V: vec2;\nupdate(dt) { V.x = 1.0; }", "t.dal")
+            dal.check_source("logic A;\nstate V: vec2;\nupdate(dt) { V.xy = vec2(1.0, 2.0); }", "t.dal")
         self.assertEqual(cm.exception.first.code, "DAL2010")
-        self.assertIn("vec2", cm.exception.first.message)
+        self.assertIn("swizzle", cm.exception.first.message)
+        dal.check_source("logic A;\nstate V: vec2;\nupdate(dt) { V.x = 1.0; }", "t.dal")
 
     def test_struct_declarations_and_named_arguments(self):
         unit = parse("struct P { a: float = 1.0; b: vec3; }\nlogic A;\nstate S: P = P(a: 2.0, b: vec3(1.0, 2.0, 3.0));")

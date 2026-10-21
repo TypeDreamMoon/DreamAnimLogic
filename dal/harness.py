@@ -32,7 +32,7 @@ from .hostapi import HOST_ITEMS
 from .mockhost import MockHost
 from .interp import Interpreter
 from .pybackend import generate_python, load_class
-from .types import BOOL, FLOAT, INT, QUAT, ROTATOR, VEC2, VEC3, ArrayType, AssetType, EnumType, MapType, StructType, TagType, Type
+from .types import BOOL, FLOAT, INT, QUAT, ROTATOR, TRANSFORM, VEC2, VEC3, ArrayType, AssetType, EnumType, MapType, StructType, TagType, Type
 
 
 class ScriptedHost(MockHost):
@@ -81,6 +81,9 @@ def _rand_value(rng: random.Random, ty: Type, scale: float = 10.0):
         return (rng.uniform(-180, 180), rng.uniform(-180, 180), rng.uniform(-180, 180))
     if ty is QUAT:
         return _rand_quat(rng)
+    if ty is TRANSFORM:
+        return ((rng.uniform(-scale, scale), rng.uniform(-scale, scale), rng.uniform(-scale, scale)), _rand_quat(rng),
+                tuple(rng.choice([0.5, 1.0, 1.5, 2.0]) for _ in range(3)))
     if isinstance(ty, EnumType):
         return rng.randrange(len(ty.members))
     if isinstance(ty, TagType):

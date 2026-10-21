@@ -15,7 +15,8 @@ from _bootstrap import EXAMPLES, TESTS
 import dal
 from dal.builtins import BUILTINS
 from dal.cppbackend import CppOptions, cpp_value, fmt_float, generate_cpp
-from dal.types import BOOL, FLOAT, INT, QUAT, ROTATOR, VEC2, VEC3
+from builtin_programs import PRELUDE, arg, input_decl, outputs
+from dal.types import BLEND_OPTION, BOOL, CURVE, FLOAT, INT, QUAT, ROTATOR, SPRING, SPRING3, TRANSFORM, VEC2, VEC3
 
 GOLDEN = os.path.join(TESTS, "golden")
 UPDATE = os.environ.get("UPDATE_GOLDEN") == "1"
@@ -213,7 +214,7 @@ class LiteralTests(unittest.TestCase):
         self.assertEqual(cpp_value(QUAT, rt.QUAT_IDENTITY), "FQuat4f(0.0f, 0.0f, 0.0f, 1.0f)")
 
 
-CPP_TO_DAL = {"float": FLOAT, "int32": INT, "bool": BOOL, "FVector2f": VEC2, "FVector3f": VEC3, "FRotator3f": ROTATOR, "FQuat4f": QUAT}
+CPP_TO_DAL = {"FTransform3f": TRANSFORM, "EAlphaBlendOption": BLEND_OPTION, "UCurveFloat*": CURVE, "FSpring": SPRING, "FSpring3": SPRING3, "float": FLOAT, "int32": INT, "bool": BOOL, "FVector2f": VEC2, "FVector3f": VEC3, "FRotator3f": ROTATOR, "FQuat4f": QUAT}
 
 
 def parse_dalmath_header():
@@ -264,10 +265,13 @@ class CompileEveryBuiltinTests(unittest.TestCase):
         for name, b in sorted(BUILTINS.items()):
             for idx, sig in enumerate(b.sigs):
                 ident = f"R_{name}_{idx}"
-                args = ", ".join(f"P_{name}_{idx}_{i}" for i in range(len(sig.params)))
-                lines.append((f"state {ident}: {sig.ret.name};", [f"input P_{name}_{idx}_{i}: {t.name};" for i, t in enumerate(sig.params)], f"{ident} = {name}({args});"))
+                args = ", ".join(arg(sig, i, f"P_{name}_{idx}_{i}") for i in range(len(sig.params)))
+                outs = outputs(sig.ret)
+                lines.append(("".join(f"state {ident}{suffix}: {ty};" for suffix, ty, _a in outs),
+                              [d for i in range(len(sig.params)) if (d := input_decl(sig, i, f"P_{name}_{idx}_{i}"))],
+                              " ".join(f"{ident}{suffix} = {name}({args}){access};" for suffix, _t, access in outs)))
         decls = "\n".join(d for d, _i, _s in lines) + "\n" + "\n".join(i for _d, ins, _s in lines for i in ins)
-        src = "logic Everything;\n" + decls + "\nupdate(dt) {\n" + "\n".join("  " + s for _d, _i, s in lines) + "\n}\n"
+        src = PRELUDE + "logic Everything;\nparam Cfg: BuiltinCfg;\n" + decls + "\nupdate(dt) {\n" + "\n".join("  " + s for _d, _i, s in lines) + "\n}\n"
         module = dal.check_source(src, "everything.dal").module
         files = generate_cpp(module)
         cpp = files["Everything.cpp"]

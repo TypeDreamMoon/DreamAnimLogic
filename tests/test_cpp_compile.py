@@ -259,11 +259,14 @@ class CppCompileTests(unittest.TestCase):
         self.run_case(module, frames, options=CppOptions(module_api="DAL_TEST_API"), defines=["DAL_TEST_API="])
 
 
-POOL = {FLOAT: ("F", 5), INT: ("I", 3), VEC2: ("U", 2), VEC3: ("V", 2), ROTATOR: ("R", 2), QUAT: ("Q", 2)}
+from builtin_programs import CURVE_ARGS, PRELUDE, outputs  # noqa: E402
+from dal.types import BLEND_OPTION, TRANSFORM  # noqa: E402
+
+POOL = {FLOAT: ("F", 5), INT: ("I", 3), VEC2: ("U", 2), VEC3: ("V", 3), ROTATOR: ("R", 2), QUAT: ("Q", 2), BLEND_OPTION: ("B", 1), TRANSFORM: ("T", 2)}
 
 
 def everything_source():
-    lines = ["logic Everything;"]
+    lines = [PRELUDE.rstrip(), "logic Everything;", "param Cfg: BuiltinCfg;"]
     for ty, (prefix, n) in POOL.items():
         lines += [f"input {prefix}{k}: {ty.name};" for k in range(n)]
     states, body, count = [], [], 0
@@ -272,12 +275,16 @@ def everything_source():
             used = {}
             args = []
             for p in sig.params:
+                if p in CURVE_ARGS:
+                    args.append(CURVE_ARGS[p])
+                    continue
                 prefix, _ = POOL[p]
                 k = used.get(p, 0)
                 used[p] = k + 1
                 args.append(f"{prefix}{k}")
-            states.append(f"state R_{name}_{idx}: {sig.ret.name};")
-            body.append(f"  R_{name}_{idx} = {name}({', '.join(args)});")
+            for suffix, ty_name, access in outputs(sig.ret):
+                states.append(f"state R_{name}_{idx}{suffix}: {ty_name};")
+                body.append(f"  R_{name}_{idx}{suffix} = {name}({', '.join(args)}){access};")
             count += 1
     return "\n".join(lines + states) + "\nupdate(dt) {\n" + "\n".join(body) + "\n}\n", count
 
@@ -294,6 +301,10 @@ def rand_input(rng, ty):
         return rng.choice([0, 1, -1, 2, -2, 7, -7, 100, 2**31 - 1, -(2**31)])
     if ty is BOOL:
         return rng.random() < 0.5
+    if ty is BLEND_OPTION:
+        return rng.randrange(len(BLEND_OPTION.members))
+    if ty is TRANSFORM:
+        return ((fl(), fl(), fl()), rand_input(rng, QUAT), (rng.choice([0.5, 1.0, 2.0]), rng.choice([0.5, 1.0, 2.0]), rng.choice([0.5, 1.0, 2.0])))
     if ty is VEC2:
         return (fl(), fl())
     if ty is VEC3:
