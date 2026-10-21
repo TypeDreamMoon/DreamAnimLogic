@@ -40,6 +40,7 @@ class MockHost(HostV1):
         self.spheres: list[tuple[tuple, float]] = []
         self._actions: dict = {}
         self._notifies: dict = {}
+        self._curves: dict = {}                  # scripted animation curve values: name -> value
 
     # ---- reads ---------------------------------------------------------------------------------------------------------
     def action(self, name, ty):
@@ -49,6 +50,9 @@ class MockHost(HostV1):
 
     def notify(self, name):
         return bool(self._notifies.get(name, False))
+
+    def anim_curve(self, name):
+        return float(self._curves.get(name, 0.0))
 
     def _montage(self, name):
         return self.montages.get(name, {})

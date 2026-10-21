@@ -106,6 +106,11 @@ def coerce(ty: Type, v):
     if ty is QUAT:
         return rt.as_quat(v)
     if isinstance(ty, EnumType):
+        if isinstance(v, str):
+            name = v.rsplit("::", 1)[-1].rsplit(".", 1)[-1]
+            if name not in ty.members:
+                raise ValueError(f"'{v}' is not a member of {ty.name} ({', '.join(ty.members)})")
+            return ty.members.index(name)
         return int(v)
     if isinstance(ty, TagType):
         return "" if v is None else str(v)

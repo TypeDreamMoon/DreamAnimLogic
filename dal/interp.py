@@ -15,8 +15,8 @@ from . import ir
 from . import runtime as rt
 from . import values as vals
 from .builtins import BUILTINS, CONSTRUCTORS
-from .hostapi import HostV1
-from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, VOID, ArrayType, EnumType, MapType, StructType, TagType, Type, zero_value
+from .hostapi import HOST_ITEMS, HostV1
+from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, VOID, ArrayType, AssetType, EnumType, MapType, StructType, TagType, Type, zero_value
 
 
 class InterpError(Exception):
@@ -46,11 +46,9 @@ def coerce(ty: Type, v):
         return rt.as_rotator(v)
     if ty is QUAT:
         return rt.as_quat(v)
-    if isinstance(ty, EnumType):
-        return int(v)
     if ty is HIT:
         return rt.as_hit(v)
-    if isinstance(ty, (StructType, TagType)):
+    if isinstance(ty, (StructType, TagType, EnumType, AssetType)):
         return vals.coerce(ty, v)
     raise InterpError(f"cannot coerce to {ty}")
 
@@ -392,6 +390,7 @@ class Interpreter:
 
     def sample_inputs(self) -> None:
         h = self.host
+        consumed: dict = {}                      # consume-on-read groups: one call to the host per sample
         for i in self.module.inputs:
             if i.peer is not None:
                 if i.name in self.overrides:
@@ -413,14 +412,19 @@ class Interpreter:
                 self.values[i.name] = coerce(i.ty, self.overrides[i.name])
                 continue
             item = i.host.item
-            if item == "action":
+            spec = HOST_ITEMS[item]
+            if spec.consume:
+                if spec.consume not in consumed:
+                    consumed[spec.consume] = getattr(h, spec.consume)()
+                raw = consumed[spec.consume][spec.part]
+            elif item == "action":
                 raw = h.action(i.host.arg, i.ty.name)
             elif item == "notify":
                 raw = h.notify(i.host.arg)
             elif item == "montage_section":
                 name = h.montage_section(i.host.arg)
                 raw = i.ty.members.index(name) if name in i.ty.members else 0    # type: ignore[attr-defined]
-            elif item.startswith("montage_"):
+            elif spec.arg_kind == "string" or item.startswith("montage_"):
                 raw = getattr(h, item)(i.host.arg)
             else:
                 raw = getattr(h, item)
@@ -505,16 +509,49 @@ class Interpreter:
                 self._run(h.body, {})
             self.flush()
 
-    def call_entry(self, name: str) -> None:
+    def call_entry(self, name: str, /, *args, **named) -> None:
+        """Call an entry by name, with its parameters by position or by name (missing ones take their declared defaults)."""
         for e in self.module.entries:
             if e.name == name:
+                env = self.bind_entry(e, args, named)
+                if e.dt_name is not None:
+                    env[e.dt_name] = self._dt
                 try:
-                    self.ev.run_block(e.body, {e.dt_name: self._dt})
+                    self.ev.run_block(e.body, env)
                 except _ReturnValue:
                     pass
                 self.flush()
                 return
+        if self.module.linked is not None:
+            for e in self.module.linked.entries:
+                if e.name == name:
+                    parent = self.peers.get("Parent")
+                    if parent is not None:
+                        parent.call_entry(name, *args, **named)
+                    return
         raise InterpError(f"no entry {name!r}")
+
+    def bind_entry(self, e, args: tuple, named: dict) -> dict:
+        """The locals of an entry call: the arguments, coerced to the parameter types, then the declared defaults."""
+        names = [p.name for p in e.params]
+        if len(args) > len(names):
+            raise TypeError(f"entry {e.name} takes {len(names)} argument(s), {len(args)} given")
+        given = dict(zip(names, args))
+        for k, v in named.items():
+            if k not in names:
+                raise TypeError(f"entry {e.name} has no parameter {k!r} (parameters: {', '.join(names) or 'none'})")
+            if k in given:
+                raise TypeError(f"entry {e.name}: parameter {k!r} given twice")
+            given[k] = v
+        env: dict = {}
+        for p in e.params:
+            if p.name in given and not (given[p.name] is None and p.has_default and isinstance(p.ty, StructType)):
+                env[p.name] = coerce(p.ty, given[p.name])         # (None for a struct stands for its declared default)
+            elif p.has_default:
+                env[p.name] = vals.copy_value(p.default) if isinstance(p.default, rt.Struct) else p.default
+            else:
+                raise TypeError(f"entry {e.name} needs the argument {p.name!r}")
+        return env
 
     def snapshot(self) -> dict[str, object]:
         out: dict[str, object] = {}

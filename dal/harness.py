@@ -39,11 +39,12 @@ class ScriptedHost(MockHost):
     """A host that replays one frame dict at a time and records the commands it is given."""
 
     def load(self, frame: dict) -> None:
-        for name in HOST_ITEMS:
-            if name in ("action", "notify") or name.startswith("montage_"):
+        for name, item in HOST_ITEMS.items():
+            if name in ("action", "notify") or name.startswith("montage_") or item.arg:
                 continue
             if name in frame:
                 setattr(self, name, frame[name])
+        self._curves = dict(frame.get("curves", {}))
         self._actions = frame.get("actions", {})
         self._notifies = frame.get("notifies", {})
         self.events = [tuple(e) for e in frame.get("events", [])]
@@ -144,6 +145,7 @@ def _rand_quat(rng: random.Random):
 def random_frames(module: ir.Module, count: int, seed: int = 1) -> list[dict]:
     """Random frames covering every input of the module (host-bound and free)."""
     rng = random.Random(seed)
+    rng_v2 = random.Random(seed * 7919 + 13)               # the later host items draw from their own stream (earlier sequences stay as they were)
     frames: list[dict] = []
     t = 0.0
     for _ in range(count):
@@ -162,6 +164,16 @@ def random_frames(module: ir.Module, count: int, seed: int = 1) -> list[dict]:
         f["actor_location"] = tuple(rng.uniform(-500, 500) for _ in range(3))
         f["actor_rotation"] = _rand_quat(rng)
         f["control_rotation"] = (rng.uniform(-90, 90), rng.uniform(-180, 180), 0.0)
+        f["capsule_radius"] = rng_v2.uniform(20.0, 50.0)
+        f["capsule_half_height"] = rng_v2.uniform(60.0, 100.0)
+        f["actor_scale"] = rng_v2.choice([1.0, 1.0, 0.5, 2.0])
+        f["walkable_floor_z"] = rng_v2.choice([0.71, 0.5, 0.866])
+        f["actor_ready"] = rng_v2.random() < 0.8
+        f["has_root_motion"] = rng_v2.random() < 0.3
+        f["movement_mode_custom"] = rng_v2.randrange(4)
+        f["pre_penetration_velocity_valid"] = rng_v2.random() < 0.4
+        f["pre_penetration_velocity"] = tuple(rng_v2.uniform(-600, 600) for _ in range(3))
+        f["curves"] = {i.host.arg: rng_v2.uniform(0.0, 1.0) for i in module.inputs if i.host is not None and i.host.item == "anim_curve"}
         for i in module.inputs:
             if i.peer is not None:
                 continue
@@ -172,7 +184,7 @@ def random_frames(module: ir.Module, count: int, seed: int = 1) -> list[dict]:
             elif i.host.item == "notify":
                 f["notifies"][i.host.arg] = rng.random() < 0.25
         if module.entries:
-            f["calls"] = [e.name for e in module.entries if rng.random() < 0.6]
+            f["calls"] = [_random_call(rng, e) for e in module.entries if rng.random() < 0.6]
         if any(h.event not in ("begin_play", "end_play") for h in module.handlers):
             f["events"] = _random_events(module, rng)
         if module.montages:
@@ -188,6 +200,29 @@ def random_frames(module: ir.Module, count: int, seed: int = 1) -> list[dict]:
                           "spheres": [(tuple(rng.uniform(-300, 300) for _ in range(3)), rng.uniform(10, 80)) for _ in range(rng.randrange(0, 3))]}
         frames.append(f)
     return frames
+
+
+def _rand_arg(rng: random.Random, ty: Type):
+    """A loosely typed argument for an entry parameter: enums by member name or index, tags by name, assets by name."""
+    if isinstance(ty, EnumType):
+        return ty.members[rng.randrange(len(ty.members))] if rng.random() < 0.5 else rng.randrange(len(ty.members))
+    if isinstance(ty, AssetType):
+        return None if rng.random() < 0.2 else f"A_{ty.name}_{rng.randint(1, 3)}"
+    return _rand_value(rng, ty, 5.0)
+
+
+def _random_call(rng: random.Random, entry: ir.EntryDef):
+    """An entry call of a frame: the name alone, or (name, {parameter: argument}); parameters with a default are left out at random."""
+    args = {p.name: _rand_arg(rng, p.ty) for p in entry.params if not p.has_default or rng.random() < 0.5}
+    return (entry.name, args) if entry.params else entry.name
+
+
+def call_items(frame: dict) -> list[tuple[str, dict]]:
+    """The entry calls of a frame as (name, named arguments)."""
+    out = []
+    for c in frame.get("calls", []):
+        out.append((c, {}) if isinstance(c, str) else (c[0], dict(c[1]) if len(c) > 1 else {}))
+    return out
 
 
 def _random_events(module: ir.Module, rng: random.Random) -> list[tuple]:
@@ -228,8 +263,8 @@ def run_interpreter(module: ir.Module, frames: list[dict], **params) -> list[dic
         host.load(f)
         _apply_free(it, f)
         it.update(f["dt"])
-        for name in f.get("calls", []):
-            it.call_entry(name)
+        for name, args in call_items(f):
+            it.call_entry(name, **args)
         if f.get("end_play"):
             it.end_play()
         out.append(_snapshot(it, host))
@@ -245,8 +280,8 @@ def run_python(module: ir.Module, frames: list[dict], source: str | None = None,
         host.load(f)
         _apply_free(obj, f)
         obj.update(f["dt"])
-        for name in f.get("calls", []):
-            obj.call_entry(name)
+        for name, args in call_items(f):
+            obj.call_entry(name, **args)
         if f.get("end_play") and hasattr(obj, "end_play"):
             obj.end_play()
         out.append(_snapshot(obj, host))
@@ -315,7 +350,8 @@ def random_system_frames(modules: dict[str, ir.Module], count: int, seed: int = 
         f["calls"] = {}
         for name, m in modules.items():
             f["free"][name] = {i.name: _rand_value(rng, i.ty) for i in m.inputs if i.is_free}
-            f["calls"][name] = [e.name for e in m.entries if rng.random() < 0.6]
+            entries = [*m.entries, *(m.linked.entries if m.linked is not None else [])]
+            f["calls"][name] = [_random_call(rng, e) for e in entries if rng.random() < 0.6]
     return frames
 
 
@@ -335,6 +371,8 @@ def run_system(modules: dict[str, ir.Module], frames: list[dict], backend: str =
         for p in m.peers:
             if p.logic in objs:
                 objs[n].connect(p.name, objs[p.logic])
+        if m.linked is not None and m.linked.parent in objs:
+            objs[n].connect("Parent", objs[m.linked.parent])
     steps = schedule or default_schedule(modules)
     # the engine begins play before the first tick, once every logic exists: actor logics first, then the animation instances
     for n in sorted(modules, key=lambda k: modules[k].kind != "actor"):
@@ -354,8 +392,9 @@ def run_system(modules: dict[str, ir.Module], frames: list[dict], backend: str =
             else:
                 objs[n].update_phase(slot, f["dt"])
         for n in modules:
-            for name in f.get("calls", {}).get(n, []):
-                objs[n].call_entry(name)
+            for item in f.get("calls", {}).get(n, []):
+                name, args = (item, {}) if isinstance(item, str) else (item[0], dict(item[1]) if len(item) > 1 else {})
+                objs[n].call_entry(name, **args)
         snap = {}
         for n in modules:
             snap[n] = _snapshot(objs[n], hosts[n])

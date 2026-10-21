@@ -355,10 +355,27 @@ class HandlerDef:
 
 
 @dataclass
+class EntryParam:
+    name: str
+    ty: Type
+    default: object = None
+    has_default: bool = False
+
+
+@dataclass
 class EntryDef:
     name: str
-    dt_name: str
+    dt_name: str | None
     body: list[Stmt]
+    params: list[EntryParam] = field(default_factory=list)
+    linked: bool = False                                 # the logic that is linked to this one forwards it
+
+
+@dataclass
+class LinkedDef:
+    """`logic X : anim linked(Parent);` -- X forwards the `linked` entries of Parent."""
+    parent: str
+    entries: list[EntryDef]                              # signatures only (empty bodies)
 
 
 @dataclass
@@ -407,6 +424,7 @@ class Module:
     peers: list[PeerDef] = field(default_factory=list)
     phases_explicit: bool = False                               # a tick slot was written (`in after_movement`)
     entries: list[EntryDef] = field(default_factory=list)
+    linked: "LinkedDef | None" = None
     kind: str = "anim"                                          # 'anim' (UAnimInstance) | 'actor' (UActorComponent)
     montages: list[MontageDef] = field(default_factory=list)
     actions: list[ActionDef] = field(default_factory=list)
@@ -683,8 +701,11 @@ def dump(m: Module) -> str:
             out.append("  pre:")
             out.extend(dump_stmts(u.pre, 2))
         out.extend(dump_stmts(u.body))
+    if m.linked is not None:
+        out.append(f"linked({m.linked.parent}): " + ", ".join(x.name for x in m.linked.entries))
     for e in m.entries:
-        out.append(f"entry {e.name}({e.dt_name})")
+        head = ", ".join(([e.dt_name] if e.dt_name else []) + [f"{x.name}: {x.ty}" + (f" = {x.default!r}" if x.has_default else "") for x in e.params])
+        out.append(f"entry {e.name}({head})" + (" linked" if e.linked else ""))
         out.extend(dump_stmts(e.body))
     for h in m.handlers:
         ps = ", ".join(f"{n}: {t}" for n, t in h.params)

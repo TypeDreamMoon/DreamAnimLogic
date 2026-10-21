@@ -488,9 +488,12 @@ EXEC: dict[str, tuple[list[str], list[str]]] = {
 # input trigger events (handler phase -> ETriggerEvent / DalHost::EInputPhase members)
 _TRIGGER = {"started": "Started", "triggered": "Triggered", "ongoing": "Ongoing", "completed": "Completed", "canceled": "Canceled"}
 
-_MOVEMENT_ITEMS = ("velocity", "acceleration", "max_acceleration", "max_braking_deceleration",
+_CHARACTER_ITEMS = ("capsule_radius", "capsule_half_height", "actor_scale", "has_root_motion")      # read from the ACharacter
+_CAPSULE_ITEMS = ("capsule_radius", "capsule_half_height", "actor_scale")
+_CONSUME_ITEMS = ("pre_penetration_velocity", "pre_penetration_velocity_valid")                    # DalRuntime's movement component
+_MOVEMENT_ITEMS = ("velocity", "acceleration", "max_acceleration", "max_braking_deceleration", "walkable_floor_z", "movement_mode_custom",
                    "max_walk_speed", "movement_mode", "is_grounded", "is_crouching")
-_PAWN_ITEMS = ("actor_location", "actor_rotation", "control_rotation", "action")
+_PAWN_ITEMS = ("actor_location", "actor_rotation", "control_rotation", "action", "actor_ready")
 
 
 @dataclass
@@ -584,7 +587,8 @@ class CppGen:
         self.section_reads = [i for i in self.montage_reads if i.host.item == "montage_section"]  # type: ignore[union-attr]
         self.section_cmds = bool({"montage_play", "montage_jump_to_section", "montage_set_next_section"} & set(self.cmds))
         self.montage_cmds = [c for c in self.cmds if c.startswith("montage_")]
-        self.needs_anim = bool(self.montage_reads or self.montage_cmds or self.bind_anim)
+        self.curve_reads = [i for i in module.inputs if i.host is not None and i.host.item == "anim_curve"]
+        self.needs_anim = bool(self.montage_reads or self.curve_reads or self.montage_cmds or self.bind_anim)
         self.arm = bool({"camera_set_arm_length", "camera_set_socket_offset"} & set(self.cmds))
         self.camera = "camera_set_fov" in self.cmds
         self.controller = "set_control_rotation" in self.cmds
@@ -592,6 +596,16 @@ class CppGen:
         self.character_cmds = [c for c in self.cmds if EXEC[c][0][0] == _G_CHARACTER]
 
     # ---- statements ---------------------------------------------------------------------------
+    def entry_params(self, e: ir.EntryDef) -> str:
+        """The parameter list of an entry in the header: the declared defaults become C++ default arguments."""
+        parts = []
+        for p in e.params:
+            text = cpp_param(p.ty, p.name)
+            if p.has_default:
+                text += f" = {cpp_value(p.ty, p.default)}"
+            parts.append(text)
+        return ", ".join(parts)
+
     def cmd_arg(self, e: ir.Expr) -> str:
         if isinstance(e, ir.MontageRef):
             return f"Dal_MontageId_{e.name}"
@@ -710,11 +724,17 @@ class CppGen:
             mods += ["EnhancedInput"]
         if self.uses_tags(any_origin=True) or any(isinstance(d.ty, TagType) for d in [*self.m.params, *self.m.inputs, *self.m.states]):
             mods += ["GameplayTags"]
+        if self.uses(*_CONSUME_ITEMS):
+            mods += ["DalRuntime"]
         return mods
 
     @property
     def needs_movement_read(self) -> bool:
         return self.uses(*_MOVEMENT_ITEMS)
+
+    @property
+    def needs_character_read(self) -> bool:
+        return self.needs_movement_read or self.uses(*_CHARACTER_ITEMS, *_CONSUME_ITEMS)
 
     @property
     def needs_pawn_helper(self) -> bool:
@@ -737,6 +757,11 @@ class CppGen:
         events, cmds = self.has_events, self.has_cmds
 
         # ---- helpers
+        if m.linked is not None:
+            out.append(Method("void", "DalResolveParent", doc="Find the main animation instance of the mesh and the owning character.", body=[
+                "const USkeletalMeshComponent* DalMesh = GetSkelMeshComponent();",
+                f"Parent = DalMesh != nullptr ? Cast<U{m.linked.parent}>(DalMesh->GetAnimInstance()) : nullptr;",
+                "Character = Cast<ACharacter>(GetOwningActor());"]))
         if self.needs_pawn_helper:
             out.append(Method("APawn*", "DalGetPawn", body=[
                 "return TryGetPawnOwner();" if not self.actor else "return Cast<APawn>(GetOwner());"]))
@@ -1472,6 +1497,8 @@ class CppGen:
         L.append("")
         L.append('#include "CoreMinimal.h"')
         L.append(f'#include "{self.parent_include}"')
+        if m.linked is not None:
+            L.append(f'#include "{m.linked.parent}.h"')
         if self.hosth:
             L.append('#include "DalHost.h"')
         for lib in m.libs:
@@ -1494,6 +1521,8 @@ class CppGen:
         fwd: list[str] = []
         for peer in m.peers:
             fwd.append(f"class U{peer.logic};")
+        if m.linked is not None:
+            fwd.append("class ACharacter;")
         # Engine classes named in the declarations of the helper methods below. The header must not lean on what the
         # parent class' header happens to include.
         if self.needs_pawn_helper:
@@ -1588,6 +1617,7 @@ class CppGen:
                 L.append(f'{T}UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "DAL|Peer", Transient)')
                 L.append(f"{T}TObjectPtr<U{peer.logic}> {peer.name};")
                 L.append("")
+        cls_name = self.cls
         if self.actor:
             L.append(f"{T}virtual void BeginPlay() override;")
             if self.bind_anim or self.end_handlers:
@@ -1595,6 +1625,9 @@ class CppGen:
             if not self.phased:
                 L.append(f"{T}virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;")
         else:
+            if m.linked is not None:
+                L.append(f"{T}{cls_name}();")
+                L.append("")
             L.append(f"{T}virtual void NativeInitializeAnimation() override;")
             if self.begin_handlers:
                 L.append(f"{T}virtual void NativeBeginPlay() override;")
@@ -1607,11 +1640,27 @@ class CppGen:
         L.append(f"{T}void DalResetState();")
         L.append("")
         thread_safe = "" if self.actor else ", Meta = (BlueprintThreadSafe)"
+        if m.linked is not None:
+            L.append(f"{T}// ---- linked instance: the main instance of the mesh, and the entries this one forwards to it ----")
+            L.append(f'{T}UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "DAL|Linked", Transient)')
+            L.append(f"{T}TWeakObjectPtr<U{m.linked.parent}> Parent;")
+            L.append("")
+            L.append(f'{T}UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "DAL|Linked", Transient)')
+            L.append(f"{T}TObjectPtr<ACharacter> Character;")
+            L.append("")
+            L.append(f'{T}UFUNCTION(BlueprintPure, Category = "DAL|Linked"{thread_safe})')
+            L.append(f"{T}U{m.linked.parent}* GetParent() const {{ return Parent.Get(); }}")
+            L.append("")
+            for e in m.linked.entries:
+                L.append(f"{T}/** Forwarded to the main instance: Parent->{e.name}(...). */")
+                L.append(f'{T}UFUNCTION(BlueprintCallable, Category = "DAL|Entry"{thread_safe})')
+                L.append(f"{T}void {e.name}({self.entry_params(e)});")
+                L.append("")
         for e in m.entries:
             L.append(f"{T}/** Entry: call from a .dab with Call(Self.{e.name}). Uses the delta time of the current update. */"
                      if not self.actor else f"{T}/** Entry: callable from Blueprints. Uses the delta time of the last tick. */")
             L.append(f'{T}UFUNCTION(BlueprintCallable, Category = "DAL|Entry"{thread_safe})')
-            L.append(f"{T}void {e.name}();")
+            L.append(f"{T}void {e.name}({self.entry_params(e)});")
             L.append("")
         for mt in self.methods():
             if mt.access == "public":
@@ -1696,9 +1745,13 @@ class CppGen:
             add("GameFramework/Actor.h")
         if self.uses("time") or self.queries:
             add("Engine/World.h")
-        if self.needs_movement_read or self.movement_cmds or self.character_cmds:
+        if self.needs_character_read or self.movement_cmds or self.character_cmds:
             add("GameFramework/Character.h")
             add("GameFramework/CharacterMovementComponent.h")
+        if self.uses(*_CAPSULE_ITEMS):
+            add("Components/CapsuleComponent.h")
+        if self.uses(*_CONSUME_ITEMS):
+            add("DalCharacterMovementComponent.h")
         if self.uses(*_PAWN_ITEMS) or self.needs_pawn_helper or self.controller or self.arm or self.camera:
             add("GameFramework/Pawn.h")
         if self.action_names():
@@ -1735,6 +1788,9 @@ class CppGen:
         if self.phased:
             for x in ("GameFramework/Actor.h", "GameFramework/Pawn.h", "GameFramework/Controller.h", "GameFramework/Character.h",
                       "GameFramework/CharacterMovementComponent.h", "Components/SkeletalMeshComponent.h"):
+                add(x)
+        if m.linked is not None:
+            for x in ("GameFramework/Character.h", "Components/SkeletalMeshComponent.h", "Animation/AnimInstance.h"):
                 add(x)
         if m.peers:
             add("GameFramework/Actor.h")
@@ -1951,7 +2007,11 @@ class CppGen:
                 tick.append("}")
                 blocks.append(tick)
         else:
+            if m.linked is not None:
+                blocks.append([f"{cls}::{cls}()", "{", f"{T}bUseMainInstanceMontageEvaluationData = true;", "}"])
             init = [f"void {cls}::NativeInitializeAnimation()", "{", f"{T}Super::NativeInitializeAnimation();", "", f"{T}DalResetState();"]
+            if m.linked is not None:
+                init.append(f"{T}DalResolveParent();")
             if self.bind_anim:
                 init.append(f"{T}DalBindAnim(this);")
             init.append("}")
@@ -1965,6 +2025,8 @@ class CppGen:
                 blocks.append(bp)
             upd = [f"void {cls}::NativeUpdateAnimation(const float DeltaSeconds)", "{",
                    f"{T}Super::NativeUpdateAnimation(DeltaSeconds);", ""]
+            if m.linked is not None:
+                upd += [f"{T}if (!Parent.IsValid())", f"{T}{{", f"{T}{T}DalResolveParent();", f"{T}}}", ""]
             if traffic:
                 upd.append(f"{T}// Game thread: run what the previous update asked for, gather the host values and the events;")
                 upd.append(f"{T}// the worker thread only reads this object.")
@@ -2061,9 +2123,15 @@ class CppGen:
                 if mt.name == "DalDispatchEvents" or mt.name.startswith("DalHandler_"):
                     blocks.append(mt.define(cls))
             blocks.append(upd_lines)
+        if m.linked is not None:
+            for e in m.linked.entries:
+                args = ", ".join(p.name for p in e.params)
+                blocks.append([f"void {cls}::{e.name}({cpp_params([(p.name, p.ty) for p in e.params], True)})", "{",
+                               f"{T}if (Parent.IsValid())", f"{T}{{", f"{T}{T}Parent->{e.name}({args});", f"{T}}}", "}"])
         for e in m.entries:
-            lines = [f"void {cls}::{e.name}()", "{",
-                     f"{T}[[maybe_unused]] const float {e.dt_name} = Dal_DeltaSeconds;"]
+            lines = [f"void {cls}::{e.name}({cpp_params([(p.name, p.ty) for p in e.params], True)})", "{"]
+            if e.dt_name:
+                lines.append(f"{T}[[maybe_unused]] const float {e.dt_name} = Dal_DeltaSeconds;")
             lines.extend(self.stmts(e.body, 1))
             if self.actor and self.has_cmds:
                 lines.append(f"{T}DalFlushCommands();")
@@ -2140,17 +2208,29 @@ class CppGen:
             L.append("}")
             return L
         needs_movement = self.needs_movement_read
-        needs_pawn = needs_movement or self.uses(*_PAWN_ITEMS)
+        needs_character = self.needs_character_read
+        needs_pawn = needs_character or self.uses(*_PAWN_ITEMS)
         if needs_pawn:
             L.append(f"{T}const APawn* Pawn = " + ("Cast<APawn>(GetOwner());" if self.actor else "TryGetPawnOwner();"))
-        if needs_movement:
+        if needs_character:
             L.append(f"{T}const ACharacter* Character = Cast<ACharacter>(Pawn);")
+        if needs_movement:
             L.append(f"{T}const UCharacterMovementComponent* Movement = IsValid(Character) ? Character->GetCharacterMovement() : nullptr;")
+        if self.uses(*_CAPSULE_ITEMS):
+            L.append(f"{T}const UCapsuleComponent* Capsule = IsValid(Character) ? Character->GetCapsuleComponent() : nullptr;")
+        if self.uses(*_CONSUME_ITEMS):
+            L += [f"{T}// consume-on-read: the movement component hands the pre-penetration velocity out once (DalRuntime)",
+                  f"{T}FVector DalPrePenetration = FVector::ZeroVector;",
+                  f"{T}bool bDalPrePenetration = false;",
+                  f"{T}if (UDalCharacterMovementComponent* DalMovement = IsValid(Character) ? Cast<UDalCharacterMovementComponent>(Character->GetCharacterMovement()) : nullptr)",
+                  f"{T}{{",
+                  f"{T}{T}bDalPrePenetration = DalMovement->TryConsumePrePenetrationAdjustmentVelocity(DalPrePenetration);",
+                  f"{T}}}"]
         if self.action_names():
             L.append(f"{T}const UEnhancedPlayerInput* PlayerInput = DalGetPlayerInput(Pawn);")
         if self.uses("time"):
             L.append(f"{T}const UWorld* World = GetWorld();")
-        if self.montage_reads:
+        if self.montage_reads or self.curve_reads:
             L.append(f"{T}const UAnimInstance* DalAnim = DalGetAnimInstance();")
         L.append("")
         for i, h in host:
@@ -2163,6 +2243,15 @@ class CppGen:
             if it == "notify":
                 L.append(f"{T}{name} = DalNotify_{h.arg};")
                 L.append(f"{T}DalNotify_{h.arg} = false;")
+                continue
+            if it == "anim_curve":
+                L.append(f"{T}{name} = DalAnim != nullptr ? DalAnim->GetCurveValue(FName(TEXT(\"{h.arg}\"))) : 0.0f;")
+                continue
+            if it == "pre_penetration_velocity":
+                L.append(f"{T}{name} = FVector3f(DalPrePenetration);")
+                continue
+            if it == "pre_penetration_velocity_valid":
+                L.append(f"{T}{name} = bDalPrePenetration;")
                 continue
             if it.startswith("montage_"):
                 slot = f"DalMontage_{h.arg}"
@@ -2191,13 +2280,29 @@ class CppGen:
                 "movement_mode": "Movement->MovementMode",
                 "is_grounded": "Movement->IsMovingOnGround()",
                 "is_crouching": "Movement->IsCrouching()",
+                "walkable_floor_z": "Movement->GetWalkableFloorZ()",
+                "movement_mode_custom": "static_cast<int32>(Movement->CustomMovementMode)",
             }
             pawn_expr = {
                 "actor_location": "FVector3f(Pawn->GetActorLocation())",
                 "actor_rotation": "FQuat4f(Pawn->GetActorQuat())",
                 "control_rotation": "FRotator3f(Pawn->GetControlRotation())",
+                "actor_ready": "Pawn->HasActorRegisteredAllComponents()",
             }
-            if it in movement_expr:
+            character_expr = {
+                "has_root_motion": ("Character", "Character->HasAnyRootMotion()"),
+                "capsule_radius": ("Capsule", "Capsule->GetScaledCapsuleRadius()"),
+                "capsule_half_height": ("Capsule", "Capsule->GetScaledCapsuleHalfHeight()"),
+                "actor_scale": ("Capsule", "static_cast<float>(Capsule->GetComponentScale().Z)"),
+            }
+            if it in character_expr:
+                guard, value = character_expr[it]
+                L.append(f"{T}{name} = {default};")
+                L.append(f"{T}if ({guard} != nullptr)")
+                L.append(f"{T}{{")
+                L.append(f"{T}{T}{name} = {value};")
+                L.append(f"{T}}}")
+            elif it in movement_expr:
                 L.append(f"{T}{name} = {default};")
                 L.append(f"{T}if (Movement != nullptr)")
                 L.append(f"{T}{{")

@@ -185,6 +185,7 @@ struct TWeakObjectPtr
 	TWeakObjectPtr(T* In) : Ptr(In) {}
 	TWeakObjectPtr& operator=(T* In) { Ptr = In; return *this; }
 	T* Get() const { return Ptr; }
+	T* operator->() const { return Ptr; }
 	bool IsValid() const { return Ptr != nullptr; }
 	void Reset() { Ptr = nullptr; }
 };
@@ -335,7 +336,10 @@ public:
 	std::vector<UObject*> StubComponents;
 	UInputComponent* InputComponent = nullptr;
 
+	bool StubRegistered = true;
+
 	FVector GetActorLocation() const { return StubLocation; }
+	bool HasActorRegisteredAllComponents() const { return StubRegistered; }
 	bool ActorHasTag(FName Tag) const { return std::find(Tags.begin(), Tags.end(), Tag) != Tags.end(); }
 
 	template <class T>
@@ -370,7 +374,10 @@ public:
 	float StubMaxBrakingDeceleration = 0.0f;
 	bool StubGrounded = false;
 	bool StubCrouching = false;
+	float StubWalkableFloorZ = 0.71f;
+	uint8 CustomMovementMode = 0;
 
+	float GetWalkableFloorZ() const { return StubWalkableFloorZ; }
 	FVector GetCurrentAcceleration() const { return StubAcceleration; }
 	virtual float GetMaxAcceleration() const { return StubMaxAcceleration; }
 	virtual float GetMaxBrakingDeceleration() const { return StubMaxBrakingDeceleration; }
@@ -412,11 +419,43 @@ public:
 	}
 };
 
+// the capsule of the character (UCapsuleComponent: scaled radius / half height, component scale)
+class UCapsuleComponent : public UObject
+{
+public:
+	float StubRadius = 0.0f;
+	float StubHalfHeight = 0.0f;
+	FVector StubScale{1.0, 1.0, 1.0};
+	float GetScaledCapsuleRadius() const { return StubRadius; }               // the stub holds the scaled values
+	float GetScaledCapsuleHalfHeight() const { return StubHalfHeight; }
+	FVector GetComponentScale() const { return StubScale; }
+};
+
+// DalRuntime's movement component: keeps the velocity before depenetration until somebody consumes it
+class UDalCharacterMovementComponent : public UCharacterMovementComponent
+{
+public:
+	FVector StubPrePenetration;
+	bool StubPrePenetrationValid = false;
+	bool TryConsumePrePenetrationAdjustmentVelocity(FVector& OutVelocity)
+	{
+		if (!StubPrePenetrationValid) { return false; }
+		OutVelocity = StubPrePenetration;
+		StubPrePenetrationValid = false;
+		StubPrePenetration = FVector();
+		return true;
+	}
+};
+
 class ACharacter : public APawn
 {
 public:
 	UCharacterMovementComponent* StubMovement = nullptr;
+	UCapsuleComponent* StubCapsule = nullptr;
+	bool StubRootMotion = false;
 	UCharacterMovementComponent* GetCharacterMovement() const { return StubMovement; }
+	UCapsuleComponent* GetCapsuleComponent() const { return StubCapsule; }
+	bool HasAnyRootMotion() const { return StubRootMotion; }
 	virtual void Jump() { StubLog::Emit("jump", {}); }
 	virtual void StopJumping() { StubLog::Emit("stop_jumping", {}); }
 	virtual void Crouch(bool /*bClientSimulation*/ = false) { StubLog::Emit("crouch", {}); }
@@ -602,8 +641,19 @@ public:
 		FName Section;
 	};
 	std::map<const UAnimMontage*, FStubMontage> StubMontages;
+	std::map<std::string, float> StubCurves;
+	float GetCurveValue(FName CurveName) const
+	{
+		auto It = StubCurves.find(CurveName.Text);
+		return It != StubCurves.end() ? It->second : 0.0f;
+	}
+
+	USkeletalMeshComponent* StubSkelMesh = nullptr;
+	bool bUseMainInstanceMontageEvaluationData = false;
 
 	virtual APawn* TryGetPawnOwner() const { return StubPawn; }
+	AActor* GetOwningActor() const { return StubPawn; }
+	USkeletalMeshComponent* GetSkelMeshComponent() const { return StubSkelMesh; }
 	UWorld* GetWorld() const { return StubWorld; }
 	virtual void NativeInitializeAnimation() {}
 	virtual void NativeBeginPlay() {}

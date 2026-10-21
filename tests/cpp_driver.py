@@ -262,8 +262,67 @@ _SIMPLE = {
     "actor_location": lambda v: f"Pawn.StubLocation = FVector({_num(v[0])}, {_num(v[1])}, {_num(v[2])});",
     "actor_rotation": lambda v: f"Pawn.StubQuat = FQuat({_num(v[0])}, {_num(v[1])}, {_num(v[2])}, {_num(v[3])});",
     "control_rotation": lambda v: f"Pawn.StubControlRotation = FRotator({_num(v[0])}, {_num(v[1])}, {_num(v[2])});",
+    "capsule_radius": lambda v: f"Capsule.StubRadius = {_num(v)}f;",
+    "capsule_half_height": lambda v: f"Capsule.StubHalfHeight = {_num(v)}f;",
+    "actor_scale": lambda v: f"Capsule.StubScale = FVector({_num(v)}, {_num(v)}, {_num(v)});",
+    "walkable_floor_z": lambda v: f"Move.StubWalkableFloorZ = {_num(v)}f;",
+    "actor_ready": lambda v: f"Pawn.StubRegistered = {'true' if v else 'false'};",
+    "has_root_motion": lambda v: f"Pawn.StubRootMotion = {'true' if v else 'false'};",
+    "movement_mode_custom": lambda v: f"Move.CustomMovementMode = {int(v)};",
+    "pre_penetration_velocity": lambda v: f"Move.StubPrePenetration = FVector({_num(v[0])}, {_num(v[1])}, {_num(v[2])});",
+    "pre_penetration_velocity_valid": lambda v: f"Move.StubPrePenetrationValid = {'true' if v else 'false'};",
 }
 _TRIGGER = {"started": "Started", "triggered": "Triggered", "ongoing": "Ongoing", "completed": "Completed", "canceled": "Canceled"}
+
+
+ASSET_HELPERS = [
+    "[[maybe_unused]] static UAnimSequenceBase* DalSequence(const char* Name)",
+    "{",
+    "	static std::map<std::string, UAnimSequenceBase*> Pool;",
+    "	UAnimSequenceBase*& Found = Pool[Name];",
+    "	if (Found == nullptr) { Found = new UAnimSequenceBase(); Found->StubName = Name; }",
+    "	return Found;",
+    "}",
+    "",
+    "[[maybe_unused]] static UAnimMontage* DalMontage(const char* Name)",
+    "{",
+    "	static std::map<std::string, UAnimMontage*> Pool;",
+    "	UAnimMontage*& Found = Pool[Name];",
+    "	if (Found == nullptr) { Found = new UAnimMontage(); Found->StubName = Name; }",
+    "	return Found;",
+    "}",
+    "",
+    "[[maybe_unused]] static UCurveFloat* DalCurveF() { return new UCurveFloat(); }",
+    "[[maybe_unused]] static UCurveVector* DalCurveV() { return new UCurveVector(); }",
+    "",
+]
+
+
+def _arg_lit(ty, v):
+    """C++ for a loosely typed entry argument (enum member name or index, tag name, asset name, struct dict)."""
+    if isinstance(ty, EnumType) and isinstance(v, str):
+        v = ty.members.index(v.rsplit("::", 1)[-1].rsplit(".", 1)[-1])
+    if isinstance(ty, AssetType):
+        if v is None:
+            return "nullptr"
+        return f'Dal{"Sequence" if ty.name == "sequence" else "Montage"}("{v}")'
+    if isinstance(ty, StructType):
+        sets = " ".join(f"S.{f.name} = {_arg_lit(f.ty, v[f.name])};" for f in ty.fields if f.name in v)
+        return f"[&]() {{ {ty.cpp_type} S; {sets} return S; }}()"
+    return _lit(ty, v)
+
+
+def entry_call(module: ir.Module, target: str, item) -> str:
+    """`Obj.Name(args);` for an entry call of a frame: the name, or (name, {parameter: argument}).  Arguments up to the last one
+    given are written (the declared default fills the gaps); the rest is left to the C++ default arguments."""
+    from dal.cppbackend import cpp_value
+
+    name, args = (item, {}) if isinstance(item, str) else (item[0], dict(item[1]) if len(item) > 1 else {})
+    entries = [*module.entries, *(module.linked.entries if module.linked is not None else [])]
+    e = next(x for x in entries if x.name == name)
+    last = max((i for i, p in enumerate(e.params) if p.name in args), default=-1)
+    parts = [_arg_lit(p.ty, args[p.name]) if p.name in args else cpp_value(p.ty, p.default) for p in e.params[:last + 1]]
+    return f"{target}.{name}({', '.join(parts)});"
 
 
 def make_driver(module: ir.Module, frames: list[dict], params: dict | None = None) -> str:
@@ -297,25 +356,7 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
         '	std::printf("%s %s\\n", Name, Value.empty() ? "-" : Value.c_str());',
         "}",
         "",
-        "[[maybe_unused]] static UAnimSequenceBase* DalSequence(const char* Name)",
-        "{",
-        "	static std::map<std::string, UAnimSequenceBase*> Pool;",
-        "	UAnimSequenceBase*& Found = Pool[Name];",
-        "	if (Found == nullptr) { Found = new UAnimSequenceBase(); Found->StubName = Name; }",
-        "	return Found;",
-        "}",
-        "",
-        "[[maybe_unused]] static UAnimMontage* DalMontage(const char* Name)",
-        "{",
-        "	static std::map<std::string, UAnimMontage*> Pool;",
-        "	UAnimMontage*& Found = Pool[Name];",
-        "	if (Found == nullptr) { Found = new UAnimMontage(); Found->StubName = Name; }",
-        "	return Found;",
-        "}",
-        "",
-        "[[maybe_unused]] static UCurveFloat* DalCurveF() { return new UCurveFloat(); }",
-        "[[maybe_unused]] static UCurveVector* DalCurveV() { return new UCurveVector(); }",
-        "",
+        *ASSET_HELPERS,
         "static void Pcmds()",
         "{",
         "	for (const std::string& Line : StubLog::Lines())",
@@ -330,7 +371,8 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
         f"\t{cls} Obj;",
         "\tUWorld World;",
         "\tACharacter Pawn;",
-        "\tUCharacterMovementComponent Move;",
+        "\tUDalCharacterMovementComponent Move;",
+        "\tUCapsuleComponent Capsule;",
         "\tAPlayerController Controller;",
         "\tULocalPlayer LocalPlayer;",
         "\tUEnhancedInputLocalPlayerSubsystem Subsystem;",
@@ -342,6 +384,7 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
         "\tUEnhancedInputComponent InputComp;",
         "\tAActor Targets[8];",
         "\tPawn.StubMovement = &Move;",
+        "\tPawn.StubCapsule = &Capsule;",
         "\tPawn.StubController = &Controller;",
         "\tController.StubLocalPlayer = &LocalPlayer;",
         "\tLocalPlayer.StubSubsystem = &Subsystem;",
@@ -389,6 +432,8 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
         for key, fmt in _SIMPLE.items():
             if key in f:
                 L.append("\t\t" + fmt(f[key]))
+        for cname, cv in f.get("curves", {}).items():
+            L.append(f'		{target}.StubCurves["{cname}"] = {_num(cv)}f;')
         for a, v in f.get("actions", {}).items():
             if a not in by_name:
                 continue
@@ -459,7 +504,7 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
             L.append(f"\t\tObj.NativeUpdateAnimation({dt}f);")
             L.append(f"\t\tObj.NativeThreadSafeUpdateAnimation({dt}f);")
         for call in f.get("calls", []):
-            L.append(f"\t\tObj.{call}();")
+            L.append("\t\t" + entry_call(module, "Obj", call))
         if f.get("end_play"):
             L.append("\t\tObj.EndPlay(EEndPlayReason::Destroyed);" if actor else "\t\tObj.NativeUninitializeAnimation();")
         L.append(f'\t\tstd::printf("FRAME {n}\\n");')

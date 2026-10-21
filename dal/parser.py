@@ -267,9 +267,18 @@ class Parser:
                 raise self.error("DAL2020", f"expected the logic kind 'anim' or 'actor', found {self.describe(k)}")
             self.advance()
             kind, kind_pos = k.text, k.pos
+        linked, linked_pos = None, None
+        if self.is_word("linked"):
+            lk = self.advance()
+            if kind != "anim":
+                raise self.error("DAL2024", "only an animation logic can be linked: logic Name : anim linked(MainLogic);", lk.pos)
+            self.expect_op("(", "after 'linked'")
+            parent = self.ident("the name of the main animation logic")
+            self.expect_op(")", "to close linked(...)")
+            linked, linked_pos = parent.text, parent.pos
         phase, phase_pos = self.parse_phase()
         self.expect_op(";", "after the logic name")
-        return S.LogicDecl(kw.pos, name.text, kind, kind_pos, phase, phase_pos, name_pos=name.pos)
+        return S.LogicDecl(kw.pos, name.text, kind, kind_pos, phase, phase_pos, linked, linked_pos, name_pos=name.pos)
 
     def parse_phase(self) -> tuple[str | None, Pos | None]:
         """Optional `in pre_movement | after_movement | after_anim`."""
@@ -456,11 +465,37 @@ class Parser:
         return S.UpdateDecl(kw.pos, dt_name, dt_pos, body, phase=phase, phase_pos=phase_pos)
 
     def parse_entry(self) -> S.EntryDecl:
+        """`entry Name(dt, A: type = default, ...) [linked] { ... }`: a bare name first is the delta time (v0), then typed parameters."""
         kw = self.advance()
         name = self.ident("an entry name")
-        dt_name, dt_pos = self.parse_dt_param("the entry name")
+        self.expect_op("(", "after the entry name")
+        dt_name, dt_pos = None, None
+        if self.tok.kind == "IDENT" and not self.peek().is_op(":"):
+            dt = self.ident("the name of the delta-time parameter")
+            dt_name, dt_pos = dt.text, dt.pos
+            if self.tok.is_op(","):
+                self.advance()
+        params: list[S.Param] = []
+        while not self.tok.is_op(")"):
+            pname = self.ident("a parameter name")
+            self.expect_op(":", "after the parameter name")
+            type_name, type_pos = self.parse_type_name()
+            init = None
+            if self.tok.is_op("="):
+                self.advance()
+                init = self.parse_expr()
+            params.append(S.Param(pname.text, type_name, pname.pos, type_pos, init))
+            if self.tok.is_op(","):
+                self.advance()
+                continue
+            break
+        self.expect_op(")", "to close the entry's parameter list")
+        linked = False
+        if self.is_word("linked"):
+            self.advance()
+            linked = True
         body = self.parse_block()
-        return S.EntryDecl(kw.pos, name.text, dt_name, dt_pos, body, name_pos=name.pos)
+        return S.EntryDecl(kw.pos, name.text, dt_name, dt_pos, body, params, linked, name_pos=name.pos)
 
     # ---- statements --------------------------------------------------------
 

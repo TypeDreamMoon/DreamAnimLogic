@@ -47,6 +47,7 @@ def make_system_driver(modules: dict[str, ir.Module], frames: list[dict], schedu
         '	std::printf("%s %s\\n", Name, Value.empty() ? "-" : Value.c_str());',
         "}",
         "",
+        *cd.ASSET_HELPERS,
         "static void Pcmds(const char* Logic)",
         "{",
         "	for (const std::string& Line : StubLog::Lines())",
@@ -60,10 +61,12 @@ def make_system_driver(modules: dict[str, ir.Module], frames: list[dict], schedu
         "{",
         "\tUWorld World;",
         "\tACharacter Pawn;",
-        "\tUCharacterMovementComponent Move;",
+        "\tUDalCharacterMovementComponent Move;",
+        "\tUCapsuleComponent Capsule;",
         "\tAPlayerController Controller;",
         "\tUSkeletalMeshComponent Mesh;",
         "\tPawn.StubMovement = &Move;",
+        "\tPawn.StubCapsule = &Capsule;",
         "\tPawn.StubController = &Controller;",
     ]
     for n, m in modules.items():
@@ -76,7 +79,7 @@ def make_system_driver(modules: dict[str, ir.Module], frames: list[dict], schedu
     for n in actors:
         L += [f"\tL_{n}.StubOwner = &Pawn;", f"\tL_{n}.StubWorld = &World;"]
     for n in anims:
-        L += [f"\tL_{n}.StubPawn = &Pawn;", f"\tL_{n}.StubWorld = &World;"]
+        L += [f"\tL_{n}.StubPawn = &Pawn;", f"\tL_{n}.StubWorld = &World;", f"\tL_{n}.StubSkelMesh = &Mesh;"]
     for n in actors:
         if gens[n].phased:
             L.append(f"\tL_{n}.RegisterComponentTickFunctions(true);")
@@ -111,7 +114,7 @@ def make_system_driver(modules: dict[str, ir.Module], frames: list[dict], schedu
             L.append(f'\t\tPcmds("{n}");')
         for n in modules:
             for call in f.get("calls", {}).get(n, []):
-                L.append(f"\t\tL_{n}.{call}();")
+                L.append("\t\t" + cd.entry_call(modules[n], f"L_{n}", call))
             L.append(f'\t\tPcmds("{n}");')
         L.append(f'\t\tstd::printf("FRAME {k}\\n");')
         for n, m in modules.items():

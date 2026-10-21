@@ -262,6 +262,19 @@ def as_asset(v):
     return v
 
 
+def as_enum(cls, v):
+    """A member of the IntEnum ``cls`` from a member, an index, or a member name (also 'EType::Member' / 'Type.Member')."""
+    if isinstance(v, cls):
+        return v
+    if isinstance(v, str):
+        name = v.rsplit("::", 1)[-1].rsplit(".", 1)[-1]
+        for m in cls:
+            if m.name == name or m.name.rstrip("_") == name:
+                return m
+        raise ValueError(f"'{v}' is not a member of {cls.__name__} ({', '.join(m.name.rstrip('_') for m in cls)})")
+    return cls(int(v))
+
+
 # ---- arithmetic with defined edge cases ---------------------------------------
 
 def fdiv(a, b):
@@ -1157,10 +1170,11 @@ class LogicBase:
         cmds, self._cmds = self._cmds, []
         return cmds
 
-    def call_entry(self, name: str) -> None:
+    def call_entry(self, name: str, /, *args, **named) -> None:
+        """Call an entry the way a graph does: by name, with the parameters by position or by name (missing ones take their defaults)."""
         if name not in self.DAL_ENTRIES:
             raise KeyError(f"{self.DAL_NAME} has no entry {name!r}")
-        getattr(self, name)()
+        getattr(self, name)(*args, **named)
 
     def snapshot(self) -> dict:
         """Inputs then states as plain data (floats / ints / bools / tuples)."""

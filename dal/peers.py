@@ -25,7 +25,7 @@ class PeerIface:
     vars: dict[str, Type] = field(default_factory=dict)                                   # states, inputs and params
     methods: dict[str, tuple[list[tuple[str, Type]], Type | None]] = field(default_factory=dict)   # pub methods
     views: dict[str, tuple[list[tuple[str, Type]], Type | None]] = field(default_factory=dict)     # pub views
-    entries: dict[str, list[tuple[str, Type, object]]] = field(default_factory=dict)      # entry name -> typed parameters
+    entries: dict[str, "ir.EntryDef"] = field(default_factory=dict)      # entry name -> its signature (typed parameters, `linked` marker)
 
 
 def load_interface(ctx: CompileContext, from_key: str, type_name: str) -> PeerIface:
@@ -55,6 +55,6 @@ def load_interface(ctx: CompileContext, from_key: str, type_name: str) -> PeerIf
         if x.pub:
             (iface.views if x.is_view else iface.methods)[x.name] = (list(x.params), x.ret)
     for e in module.entries:
-        iface.entries[e.name] = list(getattr(e, "params", []))
+        iface.entries[e.name] = e
     ctx.ifaces[key] = iface
     return iface

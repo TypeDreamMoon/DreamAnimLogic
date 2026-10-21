@@ -158,6 +158,7 @@ class Checker:
         self.allow_settings_param = False                 # the next name read is the base of a member access
         self.interface_only = False                       # stop after the declarations (the checker run for a peer's interface)
         self.method_sigs: dict[str, MethodSig] = {}
+        self.entry_sigs: dict[int, list[ir.EntryParam]] = {}      # id(EntryDecl) -> its typed parameters
         self.method_calls: dict[str, list[str]] = {}      # call graph of methods and views (recursion check)
         self.peer_ifaces: dict[str, peermod.PeerIface] = {}
         self.value_calls: set[int] = set()                # ids of calls that may produce a value (the whole right-hand side of let / = / return)
@@ -394,7 +395,11 @@ class Checker:
         for d in decls:
             self.focus(d)
             if isinstance(d, S.EntryDecl):
-                self.declare_global(d.name, "entry", d.name_pos or d.pos, what="an entry name")
+                self.declare_entry_sig(d)
+        for d in logics[:1]:
+            self.focus(d)
+            if d.linked is not None:
+                self.declare_linked(d)
 
         if self.interface_only:
             self.source = self.main_source
@@ -403,7 +408,7 @@ class Checker:
             m.enums = self.user_enums
             for d in decls:
                 if isinstance(d, S.EntryDecl):
-                    m.entries.append(ir.EntryDef(d.name, d.dt_name, []))
+                    m.entries.append(ir.EntryDef(d.name, d.dt_name, [], self.entry_sigs.get(id(d), []), d.linked))
             for name, sig in self.method_sigs.items():
                 m.methods.append(ir.MethodDef(name, sig.params, sig.ret, [], sig.pub, sig.is_view))
             return m
@@ -429,7 +434,7 @@ class Checker:
                 if h is not None:
                     m.handlers.append(h)
         self.source = self.main_source
-        if not m.is_library and m.update is None and not m.entries and not m.handlers:
+        if not m.is_library and m.update is None and not m.entries and not m.handlers and m.linked is None:
             self.warn("DAL5091", "the logic has no 'update', no 'entry' and no 'on' handler; it never changes anything", Pos(1, 1, 2))
 
         self.order_functions()
@@ -1036,14 +1041,79 @@ class Checker:
         pre = self.block(d.pre, sc)
         return ir.UpdateDef(d.dt_name, self.block(d.body, sc), pre, phase)
 
+    def declare_entry_sig(self, d: S.EntryDecl) -> None:
+        """The typed parameters of an entry: `entry Name(dt, A: float = 1.0, B: sequence)`."""
+        self.declare_global(d.name, "entry", d.name_pos or d.pos, what="an entry name")
+        if d.linked and self.kind != "anim":
+            self.err("DAL3014", "only an animation logic has linked entries: a linked instance forwards them", d.name_pos or d.pos)
+        params: list[ir.EntryParam] = []
+        seen = {d.dt_name} if d.dt_name else set()
+        has_default = False
+        for p in d.params:
+            ty = self.resolve_type(p.type_name, p.type_pos)
+            if ty is not ERROR:
+                ty = self.storable(ty, p.type_pos, "an entry parameter")
+            if not self.valid_ident(p.name, p.pos, "a parameter name"):
+                pass
+            elif p.name in seen:
+                self.err("DAL3001", f"parameter '{p.name}' is declared twice", p.pos)
+            elif p.name in self.globals:
+                self.err("DAL3005", f"parameter '{p.name}' hides the {self.globals[p.name].kind} of the same name", p.pos)
+            seen.add(p.name)
+            value, given = None, p.init is not None
+            if given:
+                value = self.const_value(p.init, ty, p.pos, f"parameter '{p.name}'")
+                has_default = True
+            elif has_default:
+                self.err("DAL3013", f"parameter '{p.name}' needs a default value: it follows a parameter that has one", p.pos)
+            params.append(ir.EntryParam(p.name, ty, value, given))
+        self.entry_sigs[id(d)] = params
+
+    def declare_linked(self, d: S.LogicDecl) -> None:
+        """`logic X : anim linked(Main);` -- X forwards the `linked` entries of Main (found as Main.dal next to this file)."""
+        if self.interface_only:
+            return
+        pos = d.linked_pos or d.pos
+        if self.ctx is None:
+            self.err("DAL3078", "the main logic is found through the compile context (use dal.check_file / dal.check_source)", pos)
+            return
+        if d.linked == d.name:
+            self.err("DAL3078", "a logic cannot be linked to itself", pos)
+            return
+        try:
+            iface = peermod.load_interface(self.ctx, self.ctx.main_key, d.linked)
+        except FileNotFoundError:
+            self.err("DAL3078", f"linked({d.linked}): there is no {d.linked}.dal next to this file", pos)
+            return
+        except DalError as e:
+            self.diags.extend(e.diagnostics)
+            return
+        if iface.logic != d.linked:
+            self.err("DAL3078", f"{d.linked}.dal declares the logic '{iface.logic}', not '{d.linked}'", pos)
+            return
+        if iface.kind != "anim":
+            self.err("DAL3078", f"linked({d.linked}): {d.linked} is an actor logic; a linked instance belongs to an animation logic", pos)
+            return
+        forwarded = [e for e in iface.entries.values() if e.linked]
+        if not forwarded:
+            self.warn("DAL5092", f"{d.linked} has no 'linked' entries: there is nothing to forward", pos)
+        for e in forwarded:
+            self.declare_global(e.name, "entry", pos, what=f"the entry '{e.name}' forwarded from {d.linked}")
+        self.module.linked = ir.LinkedDef(d.linked, [ir.EntryDef(e.name, None, [], list(e.params), True) for e in forwarded])
+
     def check_entry(self, d: S.EntryDecl) -> ir.EntryDef:
         sc = Scope("entry")
-        if not self.valid_ident(d.dt_name, d.dt_pos, "the delta-time parameter"):
-            pass
-        elif d.dt_name in self.globals:
-            self.err("DAL3005", f"'{d.dt_name}' hides the {self.globals[d.dt_name].kind} of the same name", d.dt_pos)
-        sc.declare(d.dt_name, Local(FLOAT, False))
-        return ir.EntryDef(d.name, d.dt_name, self.block(d.body, sc))
+        if d.dt_name is not None:
+            if not self.valid_ident(d.dt_name, d.dt_pos, "the delta-time parameter"):
+                pass
+            elif d.dt_name in self.globals:
+                self.err("DAL3005", f"'{d.dt_name}' hides the {self.globals[d.dt_name].kind} of the same name", d.dt_pos)
+            sc.declare(d.dt_name, Local(FLOAT, False))
+        params = self.entry_sigs.get(id(d), [])
+        for p in params:
+            if sc.lookup(p.name) is None and p.name not in self.globals:
+                sc.declare(p.name, Local(p.ty, False))
+        return ir.EntryDef(d.name, d.dt_name, self.block(d.body, sc), params, d.linked)
 
     def always_returns(self, stmts: list[ir.Stmt]) -> bool:
         for s in stmts:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from . import ir
 from .builtins import BUILTIN_CONSTS, BUILTINS
+from .hostapi import HOST_ITEMS
 from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, VOID, ArrayType, AssetType, EnumType, MapType, StructType, TagType, Type, py_member_name, zero_value
 
 INDENT = "    "
@@ -280,6 +281,18 @@ class PyGen:
         L.append("")
         return L
 
+    def entry_signature(self, e: ir.EntryDef) -> str:
+        """`self, A, B=1.0, C=None`: a struct default is made when the call is made (None stands for it), the others are constants."""
+        parts = ["self"]
+        for p in e.params:
+            if not p.has_default:
+                parts.append(p.name)
+            elif isinstance(p.ty, StructType):
+                parts.append(f"{p.name}=None")
+            else:
+                parts.append(f"{p.name}={py_value(p.ty, p.default)}")
+        return ", ".join(parts)
+
     def value_types(self) -> list[Type]:
         """Struct and tag types the class stores or accepts (params, inputs, states), in declaration order."""
         seen: list[Type] = []
@@ -438,7 +451,16 @@ class PyGen:
         for s in m.states:
             L.append(f"{INDENT*2}({s.name!r}, {s.ty.name!r}),")
         L.append(f"{INDENT})")
-        L.append(f"{INDENT}DAL_ENTRIES = ({''.join(repr(e.name) + ', ' for e in m.entries)})")
+        forwarded = m.linked.entries if m.linked is not None else []
+        L.append(f"{INDENT}DAL_ENTRIES = ({''.join(repr(e.name) + ', ' for e in [*m.entries, *forwarded])})")
+        if any(e.params for e in [*m.entries, *forwarded]):
+            L.append(f"{INDENT}DAL_ENTRY_PARAMS = {{")
+            for e in [*m.entries, *forwarded]:
+                if e.params:
+                    L.append(f"{INDENT*2}{e.name!r}: (" + "".join(f"({p.name!r}, {p.ty.name!r}, {p.has_default!r}), " for p in e.params) + "),")
+            L.append(f"{INDENT}}}")
+        if m.linked is not None:
+            L.append(f"{INDENT}DAL_LINKED = {m.linked.parent!r}")
         coerced = [t for t in self.value_types() if isinstance(t, (StructType, TagType))]
         if coerced:
             L.append(f"{INDENT}DAL_TYPES = {{" + ", ".join(f"{t.name!r}: {py_coercer(t)}" for t in coerced) + "}")
@@ -496,6 +518,8 @@ class PyGen:
         peered = [i for i in m.inputs if i.peer]
         if bound:
             L.append(f"{INDENT*2}h = self.host")
+        for method in dict.fromkeys(HOST_ITEMS[i.host.item].consume for i in bound if HOST_ITEMS[i.host.item].consume):
+            L.append(f"{INDENT*2}c_{method} = None")
         if bound or peered:
             L.append(f"{INDENT*2}ov = self.overrides")
         for i in bound:
@@ -509,11 +533,22 @@ class PyGen:
                 L.append(f"{INDENT*3}n = h.montage_section({h.arg!r})")
                 L.append(f"{INDENT*3}self.{i.name} = {en}(_SEC_{en}.index(n) if n in _SEC_{en} else 0)")
                 continue
+            spec = HOST_ITEMS[h.item]
+            if spec.consume:
+                # consume-on-read: the host hands the group out once per sample, and not at all when every member is overridden
+                conv = _AS[i.ty]
+                L.append(f"{INDENT*2}if {i.name!r} in ov:")
+                L.append(f"{INDENT*3}self.{i.name} = {conv}(ov[{i.name!r}])")
+                L.append(f"{INDENT*2}else:")
+                L.append(f"{INDENT*3}if c_{spec.consume} is None:")
+                L.append(f"{INDENT*4}c_{spec.consume} = h.{spec.consume}()")
+                L.append(f"{INDENT*3}self.{i.name} = {conv}(c_{spec.consume}[{spec.part}])")
+                continue
             if h.item == "action":
                 src = f"h.action({h.arg!r}, {i.ty.name!r})"
             elif h.item == "notify":
                 src = f"h.notify({h.arg!r})"
-            elif h.item.startswith("montage_"):
+            elif spec.arg_kind == "string" or h.item.startswith("montage_"):
                 src = f"h.{h.item}({h.arg!r})"
             else:
                 src = f"h.{h.item}"
@@ -625,12 +660,30 @@ class PyGen:
             L.extend(self.stmts(x.body, 2) or [f"{INDENT*2}pass"])
             L.append("")
         for e in m.entries:
-            L.append(f"{INDENT}def {e.name}(self):")
-            L.append(f'{INDENT*2}"""Entry: runs with the delta time of the last update."""')
-            L.append(f"{INDENT*2}{e.dt_name} = self._dt")
+            L.append(f"{INDENT}def {e.name}({self.entry_signature(e)}):")
+            L.append(f'{INDENT*2}"""Entry: runs with the delta time of the last update."""' if e.dt_name else f'{INDENT*2}"""Entry."""')
+            for p in e.params:
+                conv = py_coercer(p.ty)
+                if isinstance(p.ty, EnumType):
+                    conv = f"_rt.as_enum({py_enum_class(p.ty)}, {p.name})"
+                    L.append(f"{INDENT*2}{p.name} = {conv}")
+                elif p.has_default and isinstance(p.ty, StructType):
+                    L.append(f"{INDENT*2}{p.name} = {py_value(p.ty, p.default)} if {p.name} is None else {conv}({p.name})")
+                else:
+                    L.append(f"{INDENT*2}{p.name} = {conv}({p.name})")
+            if e.dt_name:
+                L.append(f"{INDENT*2}{e.dt_name} = self._dt")
             L.extend(self.stmts(e.body, 2) or [f"{INDENT*2}pass"])
             if m.uses_commands:
                 L.append(f"{INDENT*2}self._flush()")
+            L.append("")
+        for e in forwarded:
+            # the arguments go to the main instance as they come: it knows the parameter types and the defaults
+            L.append(f"{INDENT}def {e.name}(self, *args, **named):")
+            L.append(f'{INDENT*2}"""Forwarded to the main instance ({m.linked.parent}.{e.name})."""')
+            L.append(f"{INDENT*2}parent = self.peers.get('Parent')")
+            L.append(f"{INDENT*2}if parent is not None:")
+            L.append(f"{INDENT*3}parent.call_entry({e.name!r}, *args, **named)")
             L.append("")
         for k, h in enumerate(m.handlers):
             ps = "".join(f", {n}" for n, _t in h.params)

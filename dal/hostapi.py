@@ -39,6 +39,8 @@ class HostItem:
     ue: str = ""                    # how the C++ backend reads it (documentation)
     arg_kind: str = ""              # 'string' (a name in quotes), 'action' (quoted name or a declared action), 'montage'
     section: bool = False           # the value is a section of the argument montage (type chosen by the montage)
+    consume: str = ""               # consume-on-read: the host method that hands the whole group out once (and clears it)
+    part: int = 0                   # which element of the consume method's result this item is
 
 
 HOST_ITEMS: dict[str, HostItem] = {
@@ -68,6 +70,30 @@ HOST_ITEMS: dict[str, HostItem] = {
                  ue="Pawn->GetActorQuat()"),
         HostItem("control_rotation", ROTATOR, unit="deg", doc="controller rotation (pitch, yaw, roll)",
                  ue="Pawn->GetControlRotation()"),
+        # v2: reads the ALS rewrite needs
+        HostItem("capsule_radius", FLOAT, unit="cm", doc="scaled radius of the character's capsule",
+                 ue="Character->GetCapsuleComponent()->GetScaledCapsuleRadius()"),
+        HostItem("capsule_half_height", FLOAT, unit="cm", doc="scaled half height of the character's capsule",
+                 ue="Character->GetCapsuleComponent()->GetScaledCapsuleHalfHeight()"),
+        HostItem("actor_scale", FLOAT, doc="Z scale of the character's capsule component",
+                 ue="Character->GetCapsuleComponent()->GetComponentScale().Z"),
+        HostItem("walkable_floor_z", FLOAT, doc="smallest Z of a floor normal that can be walked on",
+                 ue="CharacterMovement->GetWalkableFloorZ()"),
+        HostItem("actor_ready", BOOL, doc="the actor has registered all its components (true for hosts that cannot tell)",
+                 ue="Pawn->HasActorRegisteredAllComponents()"),
+        HostItem("has_root_motion", BOOL, doc="root motion (from animation or a root motion source) is driving the character",
+                 ue="Character->HasAnyRootMotion()"),
+        HostItem("movement_mode_custom", INT, doc="CMC custom movement mode (the sub mode of MOVE_Custom)",
+                 ue="CharacterMovement->CustomMovementMode"),
+        HostItem("anim_curve", FLOAT, arg=True, arg_kind="string",
+                 doc='value of an animation curve of the last evaluated pose: host.anim_curve("LayerHead") (0 when the curve is not there)',
+                 ue="AnimInstance->GetCurveValue(FName(Name))"),
+        HostItem("pre_penetration_velocity", VEC3, unit="cm/s", consume="consume_pre_penetration_velocity", part=1,
+                 doc="velocity the movement had before depenetration moved the character; consumed by the read",
+                 ue="UDalCharacterMovementComponent::TryConsumePrePenetrationAdjustmentVelocity (DalRuntime)"),
+        HostItem("pre_penetration_velocity_valid", BOOL, consume="consume_pre_penetration_velocity", part=0,
+                 doc="a pre-penetration velocity was recorded since the last read; consumed by the read",
+                 ue="UDalCharacterMovementComponent::TryConsumePrePenetrationAdjustmentVelocity (DalRuntime)"),
         HostItem("action", None, arg=True, arg_kind="action", allowed=(BOOL, FLOAT, VEC2, VEC3),
                  doc='Enhanced Input action value: host.action("Move") or host.action(Move) for a declared action',
                  ue="UEnhancedPlayerInput::GetActionValue(Action)"),
@@ -213,6 +239,15 @@ class HostV0:
     actor_location = rt.VEC3_ZERO
     actor_rotation = rt.QUAT_IDENTITY
     control_rotation = rt.ROTATOR_ZERO
+    capsule_radius = 0.0
+    capsule_half_height = 0.0
+    actor_scale = 1.0
+    walkable_floor_z = 0.71
+    actor_ready = True
+    has_root_motion = False
+    movement_mode_custom = 0
+    pre_penetration_velocity = rt.VEC3_ZERO
+    pre_penetration_velocity_valid = False
 
     def action(self, name: str, ty: str):
         """Value of the input action ``name`` as DAL type ``ty`` ('bool', 'float', 'vec2', 'vec3').
@@ -224,6 +259,21 @@ class HostV0:
     def notify(self, name: str) -> bool:
         """True if animation notify ``name`` fired since the previous update (consumed by the call)."""
         return False
+
+    def anim_curve(self, name: str) -> float:
+        """Value of the animation curve ``name`` in the pose evaluated last (0 when the curve is not there).
+
+        Blender adapter: ``AnimInstance.get_curve_value(name)`` (``anim/runtime/instance.py``)."""
+        return 0.0
+
+    def consume_pre_penetration_velocity(self):
+        """``(valid, velocity)`` of the pre-penetration velocity recorded since the last call (zero when there is none); the call clears it.
+
+        Blender adapter: the value ``c3 CharacterMovement._phys_walking`` stores as the move velocity before depenetration.
+        Unreal: ``UDalCharacterMovementComponent::TryConsumePrePenetrationAdjustmentVelocity`` (module DalRuntime)."""
+        valid, velocity = bool(self.pre_penetration_velocity_valid), self.pre_penetration_velocity
+        self.pre_penetration_velocity_valid, self.pre_penetration_velocity = False, rt.VEC3_ZERO
+        return valid, (velocity if valid else rt.VEC3_ZERO)           # no recorded value reads as zero
 
 
 class HostV1(HostV0):

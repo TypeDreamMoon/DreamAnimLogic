@@ -190,6 +190,8 @@ class LogicDecl(Decl):
     kind_pos: Pos | None = None
     phase: str | None = None         # `logic X : actor in after_movement;` -- the tick slot of the plain `update`
     phase_pos: Pos | None = None
+    linked: str | None = None        # `logic X : anim linked(Parent);` -- the main instance whose `linked` entries X forwards to
+    linked_pos: Pos | None = None
 
 
 @dataclass
@@ -256,6 +258,7 @@ class Param:
     type_name: str
     pos: Pos
     type_pos: Pos
+    init: "Expr | None" = None        # the default of an entry parameter
 
 
 @dataclass
@@ -291,9 +294,11 @@ class UpdateDecl(Decl):
 @dataclass
 class EntryDecl(Decl):
     name: str
-    dt_name: str
-    dt_pos: Pos
+    dt_name: str | None
+    dt_pos: Pos | None
     body: list[Stmt]
+    params: list[Param] = field(default_factory=list)      # entry Name(dt, A: float = 1.0, ...)
+    linked: bool = False                                   # entry Name(...) linked { ... }
 
 
 # ---- v1 / v2 declarations -----------------------------------------------------------------------------------
