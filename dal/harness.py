@@ -154,6 +154,7 @@ def random_frames(module: ir.Module, count: int, seed: int = 1) -> list[dict]:
     """Random frames covering every input of the module (host-bound and free)."""
     rng = random.Random(seed)
     rng_v2 = random.Random(seed * 7919 + 13)               # the later host items draw from their own stream (earlier sequences stay as they were)
+    rng_v4 = random.Random(seed * 104729 + 29)             # (and the ones of v4 from another)
     asks_world = module.kind != "actor" and any(isinstance(e, ir.HostQuery) for _label, body in module.bodies() for e in ir.walk_stmt_exprs(body))
     frames: list[dict] = []
     t = 0.0
@@ -176,6 +177,10 @@ def random_frames(module: ir.Module, count: int, seed: int = 1) -> list[dict]:
         f["capsule_radius"] = rng_v2.uniform(20.0, 50.0)
         f["capsule_half_height"] = rng_v2.uniform(60.0, 100.0)
         f["actor_scale"] = rng_v2.choice([1.0, 1.0, 0.5, 2.0])
+        f["mesh_scale"] = rng_v4.choice([1.0, 1.0, 0.5, 2.0])
+        f["time_dilation"] = rng_v4.choice([1.0, 1.0, 0.25, 2.0])
+        f["actor_time_dilation"] = rng_v4.choice([1.0, 1.0, 0.5, 4.0])
+        f["real_delta_time"] = rng_v4.choice([0.0, 1 / 60, rng_v4.uniform(0.001, 0.1)])
         f["walkable_floor_z"] = rng_v2.choice([0.71, 0.5, 0.866])
         f["actor_ready"] = rng_v2.random() < 0.8
         f["has_root_motion"] = rng_v2.random() < 0.3
@@ -407,17 +412,19 @@ def random_system_frames(modules: dict[str, ir.Module], count: int, seed: int = 
 
 
 def run_system(modules: dict[str, ir.Module], frames: list[dict], backend: str = "python",
-               schedule: list[tuple[str, str | None]] | None = None, sources: dict[str, str] | None = None) -> list[dict]:
+               schedule: list[tuple[str, str | None]] | None = None, sources: dict[str, str] | None = None,
+               params: dict[str, dict] | None = None) -> list[dict]:
     """Run several connected logics frame by frame; returns ``{logic: snapshot}`` per frame.
 
-    ``backend`` is 'interp' (the reference interpreter) or 'python' (generated classes)."""
+    ``backend`` is 'interp' (the reference interpreter) or 'python' (generated classes); ``params`` is ``{logic: {param: data}}``."""
     hosts = {n: ScriptedHost() for n in modules}
     objs: dict = {}
     for n, m in modules.items():
+        given = (params or {}).get(n, {})
         if backend == "interp":
-            objs[n] = Interpreter(m, hosts[n], externs=load_standins(m))
+            objs[n] = Interpreter(m, hosts[n], externs=load_standins(m), **given)
         else:
-            objs[n] = load_class(m, (sources or {}).get(n))(hosts[n])
+            objs[n] = load_class(m, (sources or {}).get(n))(hosts[n], **given)
     for n, m in modules.items():
         for p in m.peers:
             if p.logic in objs:

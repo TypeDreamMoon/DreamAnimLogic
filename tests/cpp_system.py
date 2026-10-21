@@ -243,7 +243,7 @@ def build_and_run_system(modules: dict[str, ir.Module], frames: list[dict], sche
             if r.returncode != 0:
                 raise cd.CompileFailed(r.stdout + r.stderr)
             objs.append(obj)
-        link = [path, "/nologo", *objs, f"/Fe:{exe}"] if kind == "msvc" else [path, *objs, "-o", exe]
+        link = [path, "/nologo", *objs, f"/Fe:{exe}", "/F67108864"] if kind == "msvc" else [path, *objs, "-o", exe]        # a 64 MB stack: main holds every frame's locals
         r = subprocess.run(link, cwd=work, env=env, capture_output=True, text=True, errors="replace")
         if r.returncode != 0:
             raise cd.CompileFailed(r.stdout + r.stderr)

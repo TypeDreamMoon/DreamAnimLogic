@@ -328,6 +328,9 @@ class PyGen:
         L.append(f'{INDENT}_TYPE_NAME = "{st.name}"')
         if settings:
             L.append(f"{INDENT}_IMMUTABLE = True")
+            unflat = [f.name for f in st.fields if isinstance(f.ty, (MapType, ArrayType)) or (isinstance(f.ty, AssetType) and f.ty.settings_only)]
+            if unflat:
+                L.append(f"{INDENT}_UNFLAT = {tuple(unflat)!r}")
         plain = [f for f in st.fields if not f.derived]
         if plain:
             # the properties of an animation notify come from the host as plain data: an enum member may be named

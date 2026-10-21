@@ -203,6 +203,8 @@ def leaves(name, ty):
     """(path, leaf type) of every leaf of a state / input: struct members are flattened with '.'."""
     if isinstance(ty, StructType):
         for f in ty.fields:
+            if ty.is_settings and (isinstance(f.ty, (MapType, ArrayType)) or (isinstance(f.ty, AssetType) and f.ty.settings_only)):
+                continue                                          # the tables, lists and curves of a settings value are not in a flat snapshot
             yield from leaves(f"{name}.{f.name}", f.ty)
     else:
         yield name, ty
@@ -271,6 +273,10 @@ _SIMPLE = {
     "capsule_radius": lambda v: f"Capsule.StubRadius = {_num(v)}f;",
     "capsule_half_height": lambda v: f"Capsule.StubHalfHeight = {_num(v)}f;",
     "actor_scale": lambda v: f"Capsule.StubScale = FVector({_num(v)}, {_num(v)}, {_num(v)});",
+    "mesh_scale": lambda v: f"Mesh.StubScale = FVector({_num(v)}, {_num(v)}, {_num(v)});",
+    "time_dilation": lambda v: f"World.StubSettings.StubTimeDilation = {_num(v)}f;",
+    "actor_time_dilation": lambda v: f"Pawn.CustomTimeDilation = {_num(v)}f;",
+    "real_delta_time": lambda v: f"World.DeltaRealTimeSeconds = {_num(v)}f;",
     "walkable_floor_z": lambda v: f"Move.StubWalkableFloorZ = {_num(v)}f;",
     "actor_ready": lambda v: f"Pawn.StubRegistered = {'true' if v else 'false'};",
     "has_root_motion": lambda v: f"Pawn.StubRootMotion = {'true' if v else 'false'};",
@@ -751,11 +757,13 @@ def build_and_run(module: ir.Module, frames: list[dict], extra_include: str | No
         parent = CppGen(module, options or CppOptions()).parent
         if kind == "msvc":
             cmd = [path, "/nologo", "/std:c++20", "/EHsc", "/W4", f"/DDAL_STUB_SUPER={parent}", *[f"/D{d}" for d in (defines or [])], *[f"/I{d}" for d in includes],
-                   driver, *srcs, f"/Fe:{exe}", f"/Fo:{work}\\"]
+                   driver, *srcs, f"/Fe:{exe}", f"/Fo:{work}\\", "/F67108864"]               # a 64 MB stack: main holds every frame's locals
             if warnings_as_errors:
                 cmd.insert(5, "/WX")
         else:
             cmd = [path, "-std=c++20", "-Wall", "-Wextra", f"-DDAL_STUB_SUPER={parent}", *[f"-D{d}" for d in (defines or [])], *[f"-I{d}" for d in includes], driver, *srcs, "-o", exe]
+            if os.name == "nt":
+                cmd.append("-Wl,--stack,67108864")
             if warnings_as_errors:
                 cmd.append("-Werror")
         build = subprocess.run(cmd, cwd=work, env=env, capture_output=True, text=True, errors="replace")

@@ -56,6 +56,7 @@ def struct_class(ty: StructType) -> type:
             self._derive()
 
     ns = {"__slots__": names, "_FIELDS": names, "_TYPE": ty, "_TYPE_NAME": ty.name, "_IMMUTABLE": ty.is_settings,
+          "_UNFLAT": tuple(f.name for f in ty.fields if ty.is_settings and (isinstance(f.ty, (MapType, ArrayType)) or (isinstance(f.ty, AssetType) and f.ty.settings_only))),
           "__init__": __init__, "_derive": _derive}
     cls = type(ty.name, (rt.Struct,), ns)
     ty._pyclass = cls

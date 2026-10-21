@@ -301,11 +301,22 @@ public:
 	bool CanCharacterStepUp(APawn*) const { return StubCanStepUp; }
 };
 
+class AWorldSettings : public UObject
+{
+public:
+	float StubTimeDilation = 1.0f;
+	float GetEffectiveTimeDilation() const { return StubTimeDilation; }
+};
+
 class UWorld : public UObject
 {
 public:
 	double Time = 0.0;
 	double GetTimeSeconds() const { return Time; }
+	float DeltaRealTimeSeconds = 0.0f;
+	AWorldSettings StubSettings;
+	AWorldSettings* GetWorldSettings() { return &StubSettings; }
+	const AWorldSettings* GetWorldSettings() const { return &StubSettings; }
 
 	// the scene the stub traces against (same analytic scene as dal.mockhost.MockHost): the ground plane is StubPrims[0], the spheres follow
 	bool HasGround = false;
@@ -467,6 +478,7 @@ public:
 	UInputComponent* InputComponent = nullptr;
 
 	bool StubRegistered = true;
+	float CustomTimeDilation = 1.0f;
 
 	FVector GetActorLocation() const { return StubLocation; }
 	bool HasActorRegisteredAllComponents() const { return StubRegistered; }
@@ -1027,6 +1039,8 @@ public:
 	AActor* GetOwner() const { return StubOwner; }
 	UAnimInstance* StubAnim = nullptr;
 	FTransform StubTransform;
+	FVector StubScale{1.0, 1.0, 1.0};
+	FVector GetComponentScale() const { return StubScale; }
 	std::map<std::string, std::pair<FTransform, FTransform>> StubBones;       // bone -> (component space, world space)
 	UPhysicsAsset* StubPhysics = nullptr;
 	USkeletalMesh* StubAsset = nullptr;

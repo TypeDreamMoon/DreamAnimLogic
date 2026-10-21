@@ -78,6 +78,15 @@ HOST_ITEMS: dict[str, HostItem] = {
                  ue="Character->GetCapsuleComponent()->GetScaledCapsuleHalfHeight()"),
         HostItem("actor_scale", FLOAT, doc="Z scale of the character's capsule component",
                  ue="Character->GetCapsuleComponent()->GetComponentScale().Z"),
+        # v4: scale of the mesh and time dilation (ALS reads the mesh's scale and divides the delta time by the dilation)
+        HostItem("mesh_scale", FLOAT, doc="Z scale of the character's skeletal mesh component (actor_scale is the capsule's)",
+                 ue="Mesh->GetComponentScale().Z"),
+        HostItem("time_dilation", FLOAT, doc="global time dilation of the world (1 = normal speed)",
+                 ue="World->GetWorldSettings()->GetEffectiveTimeDilation()"),
+        HostItem("actor_time_dilation", FLOAT, doc="custom time dilation of the character's actor (1 = normal speed)",
+                 ue="Pawn->CustomTimeDilation"),
+        HostItem("real_delta_time", FLOAT, unit="s", doc="the real (undilated, unclamped by the game) duration of the last frame",
+                 ue="World->DeltaRealTimeSeconds"),
         HostItem("walkable_floor_z", FLOAT, doc="smallest Z of a floor normal that can be walked on",
                  ue="CharacterMovement->GetWalkableFloorZ()"),
         HostItem("actor_ready", BOOL, doc="the actor has registered all its components (true for hosts that cannot tell)",
@@ -332,6 +341,10 @@ class HostV0:
     capsule_radius = 0.0
     capsule_half_height = 0.0
     actor_scale = 1.0
+    mesh_scale = 1.0
+    time_dilation = 1.0
+    actor_time_dilation = 1.0
+    real_delta_time = 0.0
     walkable_floor_z = 0.71
     actor_ready = True
     has_root_motion = False

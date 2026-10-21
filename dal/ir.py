@@ -283,6 +283,7 @@ class PeerUse:
     """input X: T <- Peer.State.Member: where the value comes from."""
     peer: str
     path: tuple[str, ...]
+    settings_asset: bool = False     # path[0] is a settings param of the peer that is a data asset: C++ reads it through Peer->DalSettings_<name>()
 
 
 @dataclass

@@ -23,6 +23,7 @@ class PeerIface:
     key: str
     filename: str
     vars: dict[str, Type] = field(default_factory=dict)                                   # states, inputs and params
+    settings_assets: set[str] = field(default_factory=set)                                # params that are settings data assets (C++: DalSettings_<name>())
     methods: dict[str, tuple[list[tuple[str, Type]], Type | None]] = field(default_factory=dict)   # pub methods
     views: dict[str, tuple[list[tuple[str, Type]], Type | None]] = field(default_factory=dict)     # pub views
     entries: dict[str, "ir.EntryDef"] = field(default_factory=dict)      # entry name -> its signature (typed parameters, `linked` marker)
@@ -51,6 +52,9 @@ def load_interface(ctx: CompileContext, from_key: str, type_name: str) -> PeerIf
     iface = PeerIface(module.name, module.kind, key, src.filename)
     for d in [*module.params, *module.inputs, *module.states]:
         iface.vars[d.name] = d.ty
+    for d in module.params:
+        if getattr(d.ty, "is_settings", False) and getattr(d.ty, "asset_root", False):
+            iface.settings_assets.add(d.name)
     for x in module.methods:
         if x.pub:
             (iface.views if x.is_view else iface.methods)[x.name] = (list(x.params), x.ret)

@@ -580,7 +580,7 @@ class Checker:
         if ty is not ERROR and cur is not ty:
             self.err("DAL4020", f"{b.peer}.{'.'.join(b.path)} has type {cur}, but input '{d.name}' is declared {ty}", d.type_pos)
             return None
-        return ir.PeerUse(b.peer, tuple(b.path))
+        return ir.PeerUse(b.peer, tuple(b.path), first in iface.settings_assets)
 
     PHASE_ORDER = ("pre_movement", "after_movement", "after_anim")
 
@@ -751,6 +751,8 @@ class Checker:
         if isinstance(ty, (MapType, ArrayType)):
             return st.kind == "settings"
         if isinstance(ty, StructType):
+            if ty.is_settings and st.kind == "struct" and not st.is_notify:
+                return True                                 # a settings value nested in a data asset (checked once the data assets are known: find_settings_roots)
             return st.kind == "settings" or ty.kind == "struct"
         return True
 
@@ -842,6 +844,17 @@ class Checker:
             if st.is_settings and st.name not in self.struct_cached:
                 st.asset_root = (st.origin, st.name) not in held
                 st.cpp_type = ("U" if st.asset_root else "F") + st.name
+        for st in order:
+            if st.kind != "struct" or st.name in self.struct_cached:
+                continue
+            for f in st.fields:                            # a plain struct holds copies of the settings values nested in a data asset, not the data assets
+                if isinstance(f.ty, StructType) and f.ty.is_settings and f.ty.asset_root:
+                    d = self.struct_decls.get(st.name)
+                    if d is not None:
+                        self.focus(d)
+                        self.err("DAL4050", f"member '{f.name}' of struct {st.name}: {f.ty.name} is a settings data asset (no other settings type holds it), "
+                                            f"a struct can hold only the settings types nested in one", d.name_pos or d.pos)
+                    f.ty = ERROR
         for st in order:
             if not st.is_settings or st.name in self.struct_cached:
                 continue
@@ -935,7 +948,7 @@ class Checker:
         self.user_enums.append(et)
         self.globals[d.name].obj = et
 
-    def storable(self, ty: Type, pos: Pos, what: str, settings_ok: bool = False, snapshot_ok: bool = False) -> Type:
+    def storable(self, ty: Type, pos: Pos, what: str, settings_ok: bool = False, snapshot_ok: bool = False, settings_value_ok: bool = False) -> Type:
         """A hit result cannot live in state, inputs, params or constants (Unreal cannot reflect it); neither can curves, tables and lists,
         and a settings value (a read-only data asset) only comes from a param."""
         if ty is HIT:
@@ -951,7 +964,11 @@ class Checker:
             self.err("DAL4062", f"{what} cannot have type snapshot: a pose snapshot is a state (or a member of a struct state) that host.snapshot_pose(State) fills", pos)
             return ERROR
         if isinstance(ty, StructType) and ty.is_settings and not settings_ok:
-            self.err("DAL4058", f"{what} cannot have type {ty}: a settings value is a read-only data asset, it comes from a param (or from a member of another settings)", pos)
+            if settings_value_ok and not ty.asset_root:
+                return ty                                    # a value type nested in a data asset: a state holds a (read-only) copy of one
+            what_it_is = ("a data asset: only a param holds it, a state can hold one of the settings types nested in it" if settings_value_ok
+                          else "a read-only data asset, it comes from a param (or from a member of another settings)")
+            self.err("DAL4058", f"{what} cannot have type {ty}: a settings value is {what_it_is}", pos)
             return ERROR
         return ty
 
@@ -1019,7 +1036,7 @@ class Checker:
 
     def declare_state(self, d: S.StateDecl) -> None:
         ok = self.declare_global(d.name, "state", d.name_pos or d.pos, what="a state name")
-        ty = self.storable(self.resolve_type(d.type_name, d.type_pos), d.type_pos, "a state", snapshot_ok=True)
+        ty = self.storable(self.resolve_type(d.type_name, d.type_pos), d.type_pos, "a state", snapshot_ok=True, settings_value_ok=True)
         value = self.const_value(d.init, ty, d.pos, f"state '{d.name}'")
         if ok and ty is not ERROR:
             self.module.states.append(ir.StateDef(d.name, ty, value))

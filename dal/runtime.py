@@ -1310,6 +1310,7 @@ class Struct:
     _FIELDS: tuple = ()
     _TYPE_NAME = ""
     _IMMUTABLE = False
+    _UNFLAT: tuple = ()        # the members a flat snapshot leaves out: the tables, lists and curves of a settings value (they have no leaf form)
 
     def copy(self):
         new = object.__new__(type(self))
@@ -1324,6 +1325,8 @@ class Struct:
 
     def flatten(self, prefix: str, out: dict) -> None:
         for n in self._FIELDS:
+            if n in self._UNFLAT:
+                continue
             v = getattr(self, n)
             if isinstance(v, Struct):
                 v.flatten(prefix + "." + n, out)

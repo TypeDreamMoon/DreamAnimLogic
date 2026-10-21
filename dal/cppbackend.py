@@ -592,10 +592,11 @@ _TRIGGER = {"started": "Started", "triggered": "Triggered", "ongoing": "Ongoing"
 _CHARACTER_ITEMS = ("capsule_radius", "capsule_half_height", "actor_scale", "has_root_motion")      # read from the ACharacter
 _CAPSULE_ITEMS = ("capsule_radius", "capsule_half_height", "actor_scale")
 _CONSUME_ITEMS = ("pre_penetration_velocity", "pre_penetration_velocity_valid")                    # DalRuntime's movement component
-_MESH_ITEMS = ("ragdoll_supported", "mesh_world_transform", "bone_component_transform", "bone_world_transform", "ref_path_child_translation")
+_MESH_ITEMS = ("ragdoll_supported", "mesh_world_transform", "bone_component_transform", "bone_world_transform", "ref_path_child_translation", "mesh_scale")
+_WORLD_ITEMS = ("time", "time_dilation", "real_delta_time")                                          # read from the UWorld
 _MOVEMENT_ITEMS = ("velocity", "acceleration", "max_acceleration", "max_braking_deceleration", "walkable_floor_z", "movement_mode_custom",
                    "max_walk_speed", "movement_mode", "is_grounded", "is_crouching")
-_PAWN_ITEMS = ("actor_location", "actor_rotation", "control_rotation", "action", "actor_ready")
+_PAWN_ITEMS = ("actor_location", "actor_rotation", "control_rotation", "action", "actor_ready", "actor_time_dilation")
 
 
 @dataclass
@@ -2202,8 +2203,10 @@ class CppGen:
 
         if self.actor:
             add("GameFramework/Actor.h")
-        if self.uses("time") or self.queries:
+        if self.uses(*_WORLD_ITEMS) or self.queries:
             add("Engine/World.h")
+        if self.uses("time_dilation"):
+            add("GameFramework/WorldSettings.h")
         if self.needs_character_read or self.movement_cmds or self.character_cmds:
             add("GameFramework/Character.h")
             add("GameFramework/CharacterMovementComponent.h")
@@ -2693,7 +2696,10 @@ class CppGen:
         for i in peer_inputs:
             pu = i.peer
             assert pu is not None
-            value = f"{pu.peer}->" + ".".join(pu.path)
+            if pu.settings_asset:                                      # a member of the peer's settings data asset: through its accessor
+                value = f"{pu.peer}->DalSettings_{pu.path[0]}()" + "".join("." + p for p in pu.path[1:])
+            else:
+                value = f"{pu.peer}->" + ".".join(pu.path)
             if enum_cast(i.ty):
                 value = f"static_cast<{enum_cast(i.ty)}>({value})"
             L.append(f"{T}{i.name} = {pu.peer} != nullptr ? {value} : {cpp_value(i.ty, i.default)};")
@@ -2729,7 +2735,7 @@ class CppGen:
                   f"{T}}}"]
         if self.action_names():
             L.append(f"{T}const UEnhancedPlayerInput* PlayerInput = DalGetPlayerInput(Pawn);")
-        if self.uses("time"):
+        if self.uses(*_WORLD_ITEMS):
             L.append(f"{T}const UWorld* World = GetWorld();")
         if self.montage_reads or self.curve_reads:
             L.append(f"{T}const UAnimInstance* DalAnim = DalGetAnimInstance();")
@@ -2742,6 +2748,15 @@ class CppGen:
             it = h.item
             if it == "time":
                 L.append(f"{T}{name} = World != nullptr ? static_cast<float>(World->GetTimeSeconds()) : 0.0f;")
+                continue
+            if it == "time_dilation":
+                L.append(f"{T}{name} = World != nullptr && World->GetWorldSettings() != nullptr ? World->GetWorldSettings()->GetEffectiveTimeDilation() : 1.0f;")
+                continue
+            if it == "real_delta_time":
+                L.append(f"{T}{name} = World != nullptr ? World->DeltaRealTimeSeconds : 0.0f;")
+                continue
+            if it == "mesh_scale":
+                L.append(f"{T}{name} = DalMesh != nullptr ? static_cast<float>(DalMesh->GetComponentScale().Z) : 1.0f;")
                 continue
             if it == "notify":
                 L.append(f"{T}{name} = DalNotify_{h.arg};")
@@ -2811,6 +2826,7 @@ class CppGen:
                 "actor_rotation": "FQuat4f(Pawn->GetActorQuat())",
                 "control_rotation": "FRotator3f(Pawn->GetControlRotation())",
                 "actor_ready": "Pawn->HasActorRegisteredAllComponents()",
+                "actor_time_dilation": "Pawn->CustomTimeDilation",
             }
             character_expr = {
                 "has_root_motion": ("Character", "Character->HasAnyRootMotion()"),
