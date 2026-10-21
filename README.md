@@ -10,8 +10,10 @@ compiler, two backends**:
 
 The language is specified in Chinese in `I:\DCC\Plan\dal-syntax-v0.md` (v0: values, math, anim instance logic),
 `I:\DCC\Plan\dal-syntax-v1.md` (v1 / v2: host commands, events, montages, combos, queries, camera) and
-`I:\DCC\Plan\dal-syntax-v3.md` (v3, version 0.3.0: libraries, structs, tags, methods and peers, tick slots, settings and curves,
-entries with parameters, transforms, scene queries -- the language ALS-Refactored is rewritten in, see `als-dal-rewrite.md`).
+`I:\DCC\Plan\dal-syntax-v3.md` (v3, versions 0.3.0 and 0.4.0: libraries, structs, tags, methods and peers, tick slots, settings and curves,
+entries with parameters, transforms, scene queries -- the language ALS-Refactored is rewritten in, see `als-dal-rewrite.md`; 0.4.0 adds timer
+and hook events, notify declarations with payloads, `post_update`, dynamic montages / slots / pose snapshots, loops, root motion override and
+montage asset queries, and what the ALS rewrite found missing).
 This README covers the repository.
 
 ```
@@ -145,9 +147,9 @@ mock hosts implement them.
 
 | | what | in the language | when it takes effect |
 |---|---|---|---|
-| reads | CMC values, actor transform, capsule, input actions, notify flags, montage state, animation curves, bone and mesh transforms, reference skeleton, the consumed pre-penetration velocity | `input X: type <- host.item` | sampled once at the start of an update |
-| events | notify / notify window begin+end, montage ended / blending out, input action phases | `on notify Hit { ... }` | handlers run at the start of the next update, oldest first |
-| commands | CMC writes, jump / crouch / launch, montage play / stop / jump to section ..., control rotation, spring arm, FOV | `host.set_max_walk_speed(v);` | **queued**; the host runs them in order after the update |
+| reads | CMC values, actor transform, capsule, input actions, notify flags, montage state, animation curves, bone and mesh transforms, reference skeleton, the consumed pre-penetration velocity, time dilation, mesh scale | `input X: type <- host.item` | sampled once at the start of an update |
+| events | notify / notify window begin+end (declared ones with a payload), montage ended / blending out, input action phases, the character's hooks (mode changed, jumped, landed, crouch, teleported, physics rotation), timers | `on notify Hit { ... }`, `on landed(h) { ... }` | handlers run at the start of the next update, oldest first (`slot_events`: at the start of every tick slot) |
+| commands | CMC writes, jump / crouch / launch, montage play / stop / jump to section ... (a montage value works too), dynamic montages in slots, pose snapshots, root motion override, ragdoll, control rotation, spring arm, FOV | `host.set_max_walk_speed(v);` | **queued**; the host runs them in order after the update |
 | queries | line / sphere / capsule traces on a channel, overlap, walkable test, component reads, target list | `let h = host.trace_line(a, b);`, `host.sweep_capsule(a, b, r, hh, ch, blocking)` | answered immediately; the scene queries (marked in `python -m dal host`) also from an anim instance's worker thread, the rest game thread only |
 
 Python hosts subclass `dal.hostapi.HostV1` (every method documents the DreamVEd call it maps to:
@@ -168,7 +170,7 @@ what happens into the events the logic polls -- enough to test combos without Bl
   run the handlers, run the body, hand the queued commands to the host (`take_commands()` returns them instead, for
   hosts that execute commands themselves).
 * Metadata for UIs: `DAL_PARAMS`, `DAL_INPUTS`, `DAL_STATES`, `DAL_ENTRIES`, `DAL_ENTRY_PARAMS`, `DAL_KIND`, `DAL_HANDLERS`,
-  `DAL_PEERS`, `DAL_METHODS`, `DAL_VIEWS`, `DAL_PHASES`; a settings class has `DAL_SCHEMA` / `.load(source, resolver, report)`.
+  `DAL_PEERS`, `DAL_METHODS`, `DAL_VIEWS`, `DAL_PHASES`, `DAL_ORDER`, `DAL_POST_FLUSH`, `DAL_SLOT_EVENTS`; `post_update()` for an animation logic that has the block; a settings class has `DAL_SCHEMA` / `.load(source, resolver, report)`.
 * Imports only `dal.runtime` (and `dal.hostapi` lazily): the `dal` package must be importable, which is
   why it is vendored as a whole.
 
@@ -246,12 +248,14 @@ Both consumers carry **the same version of the package folder**:
 * DreamAnim: `DreamAnim/Tools/dal`
 
 Copy the `dal/` directory (including `dal/cpp/DalMath.h`, `dal/cpp/DalHost.h` and `dal/cpp/DalData.h`, excluding `__pycache__`);
-do not copy `tests/` or `examples/`. `dal.__version__` identifies the version (0.3.0); the generated files record it in their first
+do not copy `tests/` or `examples/`. `dal.__version__` identifies the version (0.4.0); the generated files record it in their first
 line. Blender calls `dal.check_file(...)` + `load_class(...)`; Unreal's editor Python calls
 `dal.cli.main(["compile", file, "--cpp", dir, "--module", API])` (or `python -m dal`). The compiler does
-not depend on Unreal or on the project directory. Programs written for 0.1.0 or 0.2.0 compile unchanged (their generated C++ is
-identical apart from the version in the banner; the goldens in `tests/golden` changed by that line only). Version 0.3.0 changes one
-behaviour of a v0 program: assigning to a vector component (`v.x = 1.0;`) is now allowed instead of error DAL2010.
+not depend on Unreal or on the project directory. Programs written for 0.1.0 to 0.3.0 compile unchanged (their generated C++ is
+identical apart from the version in the banner; the goldens in `tests/golden` changed by that line only; the one addition is a public
+`DalGetPhaseTick` in the logics that have tick slots). Version 0.3.0 changed one behaviour of a v0 program: assigning to a vector component
+(`v.x = 1.0;`) is allowed instead of error DAL2010. Version 0.4.0 makes `while` and `break` keywords (they were reserved words) and allows a
+value-returning method call inside an expression (it was DAL4042 everywhere but the whole right-hand side).
 
 ## Tests
 
@@ -259,7 +263,7 @@ behaviour of a v0 program: assigning to a vector component (`v.x = 1.0;`) is now
 python -I -m unittest discover -s tests
 ```
 
-608 tests (about 4.5 minutes; the C++ compile tests are most of it): 379 when DalLive was added, 184 of them from v0 unchanged. Python 3.11+ syntax; also run under Blender 5.2's embedded Python 3.13.
+1007 tests (about 10 minutes; the C++ compile tests are most of it): 608 at 0.3.0, 379 when DalLive was added, 184 of them from v0 unchanged. Python 3.11+ syntax; also run under Blender 5.2's embedded Python 3.13.
 
 | File | What it checks |
 |---|---|
@@ -286,7 +290,10 @@ python -I -m unittest discover -s tests
 | `test_host_reads.py` (17), `test_host_mesh.py` (10) | the v3 host reads: capsule, curves, consume-on-read, bones, mesh transform, reference skeleton, root motion mode |
 | `test_math3.py` (43) | component assignment, quaternion / vector / spring / easing built-ins by hand, `transform` (also against the animation runtime of the Blender host when it is on the machine) |
 | `test_queries.py` (23) | scene queries with channels, the extended hit, primitives, the thread-safe set; mock host vs stand-in engine scene |
-| `test_als_character.py` (62) | `als/`: every function cites its ALS line; the library's structs / settings against the C++ headers; the pack's settings load without a warning; the library math against the UE 5.8 goldens (`als/goldens`); interpreter / Python / C++ (stand-in engine) agree on random frames; gait, rotation, stance, landing, jump and input behaviour against the C++ semantics. `als_host_v2.py` registers, for these tests only, the host commands `hostapi.py` does not list yet (`set_actor_rotation`, `set_ground_friction`, ...) |
+| `test_als_character.py` (62) | `als/`: every function cites its ALS line; the library's structs / settings against the C++ headers; the pack's settings load without a warning; the library math against the UE 5.8 goldens (`als/goldens`); interpreter / Python / C++ (stand-in engine) agree on random frames; gait, rotation, stance, landing, jump and input behaviour against the C++ semantics. `als_host_v2.py` was the shim that registered the host commands `hostapi.py` did not list yet; the compiler has them now (0.4.0) and the shim only carries the settings data of the system driver |
+| `test_timer_hooks.py` (26), `test_notify.py` (20), `test_post_update.py` (20) | 0.4.0: `on timer`, the character's hook events, notify declarations with payloads (branching, ticks), `post_update` / `post_flush` and the animation instance proxy; interpreter vs Python on random frames, C++ compile-and-run |
+| `test_montage_commands.py` (38), `test_character_commands.py` (19), `test_character_gaps.py` (23) | 0.4.0: dynamic montages / slots / sources / pose snapshots, montage values as command arguments, the 17 character commands of the ALS rewrite, new host reads, settings values in state, a peer's settings member in C++, long C++ runs |
+| `test_loops.py` (19), `test_root_motion.py` (19), `test_slot_order.py` (17), `test_consume_slots.py` (8), `test_small_additions.py` (14), `test_method_calls_in_expressions.py` (11) | 0.4.0: `break` / `while`, root motion override and montage asset queries, `slot_events` and `before` / `after` (system runs against the C++), consume-on-read sampling per slot, rotator arithmetic / `valid(Peer)` / settings member initialisers, method calls inside expressions |
 | `test_live_session.py` | DalLive's pure-Python half with the mock hosts: which state survives a swap, compile errors keep the last good program, debounce, runtime faults, anim commands one update late, param overrides, compiler lookup |
 
 Regenerate golden files with `UPDATE_GOLDEN=1 python -I -m unittest discover -s tests -p test_cpp.py` (and
@@ -300,7 +307,10 @@ Regenerate golden files with `UPDATE_GOLDEN=1 python -I -m unittest discover -s 
   `OnPlayMontageNotifyBegin/End`, the `BindAction` overload, `SCENE_QUERY_STAT` in a component and the `FVector3f` / `FQuat4f`
   conversions all compile and behave. Not covered by those runs: several logics with same-named enums in one module, the custom
   `AnimNotify_<Name>()` functions of anim logic, a cooked / packaged build.
-* Nothing of v3 has been compiled in the real engine yet (the C++ of 0.3.0 only compiles against `tests/cpp_stub`, MSVC `/W4 /WX`).
+* Nothing of v3 / 0.4.0 has been compiled in the real engine yet (the C++ only compiles against `tests/cpp_stub`, MSVC `/W4 /WX`). The engine-side
+  pieces 0.4.0 assumes are not written: the code in `DalRuntime` that posts the hook events (`DalHost::FEventRouter::Post`), the new members of
+  `UDalCharacterMovementComponent` (`MaxAccelerationWalking`, `bInputBlocked`, `bMovementModeLocked`, `SetRootMotionOverride`,
+  `ClearRootMotionOverride`), `UDalRagdollService`, and the generated notify classes / animation instance proxy have never met UHT.
   The stand-in headers are written from the engine's documented behaviour and signatures; known places where UHT or the engine may
   disagree: C++ default arguments of `UFUNCTION`s (entries with parameters: a struct or tag default is a C++ expression UHT cannot
   parse -- give such a parameter no default or set it in the body), `FTransform3f` / `FCollisionResponseParams` details, the
