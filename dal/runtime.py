@@ -243,6 +243,15 @@ class MovementMode(IntEnum):
     Custom = 6
 
 
+class RootMotionMode(IntEnum):
+    """``ERootMotionMode``: how an animation instance extracts root motion."""
+
+    NoRootMotionExtraction = 0
+    IgnoreRootMotion = 1
+    RootMotionFromEverything = 2
+    RootMotionFromMontagesOnly = 3
+
+
 class Channel(IntEnum):
     """The collision channels of queries; same order as UE ``ECollisionChannel`` (the engine trace channels count up from 8)."""
 

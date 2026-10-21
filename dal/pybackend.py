@@ -449,7 +449,7 @@ class PyGen:
         for i in m.inputs:
             spec = None
             if i.host:
-                spec = f"host.{i.host.item}" + (f"({i.host.arg!r})" if i.host.arg is not None else "")
+                spec = f"host.{i.host.item}" + (f"({i.host.arg!r}" + (f", {i.host.arg2!r}" if i.host.arg2 is not None else "") + ")" if i.host.arg is not None else "")
             elif i.peer:
                 spec = f"peer.{i.peer.peer}." + ".".join(i.peer.path)
             L.append(f"{INDENT*2}({i.name!r}, {i.ty.name!r}, {spec!r}),")
@@ -556,7 +556,7 @@ class PyGen:
             elif h.item == "notify":
                 src = f"h.notify({h.arg!r})"
             elif spec.arg_kind == "string" or h.item.startswith("montage_"):
-                src = f"h.{h.item}({h.arg!r})"
+                src = f"h.{h.item}({h.arg!r}" + (f", {h.arg2!r}" if h.arg2 is not None else "") + ")"
             else:
                 src = f"h.{h.item}"
             if isinstance(i.ty, EnumType):

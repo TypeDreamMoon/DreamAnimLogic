@@ -104,6 +104,17 @@ enum ECollisionChannel : int
 	ECC_MAX,
 };
 
+namespace ERootMotionMode
+{
+	enum Type : int
+	{
+		NoRootMotionExtraction,
+		IgnoreRootMotion,
+		RootMotionFromEverything,
+		RootMotionFromMontagesOnly,
+	};
+}
+
 enum ECollisionResponse : int
 {
 	ECR_Ignore,
@@ -758,6 +769,7 @@ public:
 
 	USkeletalMeshComponent* StubSkelMesh = nullptr;
 	bool bUseMainInstanceMontageEvaluationData = false;
+	TEnumAsByte<ERootMotionMode::Type> RootMotionMode = ERootMotionMode::RootMotionFromMontagesOnly;
 
 	virtual APawn* TryGetPawnOwner() const { return StubPawn; }
 	AActor* GetOwningActor() const { return StubPawn; }
@@ -805,12 +817,72 @@ private:
 	}
 };
 
+enum ERelativeTransformSpace : int
+{
+	RTS_World,
+	RTS_Actor,
+	RTS_Component,
+	RTS_ParentBoneSpace,
+};
+
+// the reference skeleton and the physics asset of the mesh, as far as the generated reads use them
+struct FReferenceSkeleton
+{
+	std::vector<std::string> StubNames;
+	std::vector<int32> StubParents;
+	TArray<FTransform> StubPose;
+	int32 FindBoneIndex(FName Name) const
+	{
+		for (size_t I = 0; I < StubNames.size(); ++I)
+		{
+			if (StubNames[I] == Name.Text) { return static_cast<int32>(I); }
+		}
+		return INDEX_NONE;
+	}
+	int32 GetParentIndex(int32 Index) const { return StubParents[static_cast<size_t>(Index)]; }
+	const TArray<FTransform>& GetRefBonePose() const { return StubPose; }
+};
+
+class USkeletalMesh : public UObject
+{
+public:
+	FReferenceSkeleton StubRef;
+	const FReferenceSkeleton& GetRefSkeleton() const { return StubRef; }
+};
+
+class UPhysicsAsset : public UObject
+{
+public:
+	std::vector<std::string> StubBodies;
+	int32 FindBodyIndex(FName Name) const
+	{
+		for (size_t I = 0; I < StubBodies.size(); ++I)
+		{
+			if (StubBodies[I] == Name.Text) { return static_cast<int32>(I); }
+		}
+		return INDEX_NONE;
+	}
+};
+
 class USkeletalMeshComponent : public UObject
 {
 public:
 	FActorComponentTickFunction PrimaryComponentTick;
 	UAnimInstance* StubAnim = nullptr;
+	FTransform StubTransform;
+	std::map<std::string, std::pair<FTransform, FTransform>> StubBones;       // bone -> (component space, world space)
+	UPhysicsAsset* StubPhysics = nullptr;
+	USkeletalMesh* StubAsset = nullptr;
 	UAnimInstance* GetAnimInstance() const { return StubAnim; }
+	FTransform GetComponentTransform() const { return StubTransform; }
+	UPhysicsAsset* GetPhysicsAsset() const { return StubPhysics; }
+	USkeletalMesh* GetSkeletalMeshAsset() const { return StubAsset; }
+	FTransform GetSocketTransform(FName Name, ERelativeTransformSpace Space = RTS_World) const
+	{
+		auto It = StubBones.find(Name.Text);
+		if (It == StubBones.end()) { return Space == RTS_World ? StubTransform : FTransform(); }
+		return Space == RTS_Component ? It->second.first : It->second.second;
+	}
 };
 
 class UActorComponent : public UObject

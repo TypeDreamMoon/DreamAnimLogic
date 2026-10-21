@@ -329,6 +329,12 @@ def entry_call(module: ir.Module, target: str, item) -> str:
     return f"{target}.{name}({', '.join(parts)});"
 
 
+def _dtransform(t) -> str:
+    """A double-precision FTransform for a harness transform ((location), (rotation x y z w), (scale))."""
+    return (f"FTransform(FQuat({_num(t[1][0])}, {_num(t[1][1])}, {_num(t[1][2])}, {_num(t[1][3])}), "
+            f"FVector({_num(t[0][0])}, {_num(t[0][1])}, {_num(t[0][2])}), FVector({_num(t[2][0])}, {_num(t[2][1])}, {_num(t[2][2])}))")
+
+
 def make_driver(module: ir.Module, frames: list[dict], params: dict | None = None) -> str:
     gen = CppGen(module, CppOptions())
     actor = module.kind == "actor"
@@ -388,6 +394,8 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
         "\tUEnhancedInputComponent InputComp;",
         "\tAActor Targets[8];",
         "\tUPrimitiveComponent Prims[9];",
+        "\tUSkeletalMesh MeshAsset;",
+        "\tUPhysicsAsset Phys;",
         "\tPawn.StubMovement = &Move;",
         "\tPawn.StubCapsule = &Capsule;",
         "\tPawn.StubController = &Controller;",
@@ -407,7 +415,9 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
         L += [
             "\tObj.StubPawn = &Pawn;",
             "\tObj.StubWorld = &World;",
+            "\tObj.StubSkelMesh = &Mesh;",
         ]
+    L.append("\tMesh.StubPhysics = &Phys; Mesh.StubAsset = &MeshAsset;")
     for k in range(8):
         L.append(f'\tTargets[{k}].Tags.push_back(FName(TEXT("DalTarget")));')
     for a in slots:
@@ -437,6 +447,24 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
         for key, fmt in _SIMPLE.items():
             if key in f:
                 L.append("\t\t" + fmt(f[key]))
+        if "mesh_world_transform" in f:
+            L.append(f"		Mesh.StubTransform = {_dtransform(f['mesh_world_transform'])};")
+        if "root_motion_mode" in f:
+            L.append(f"		{target}.RootMotionMode = static_cast<ERootMotionMode::Type>({int(f['root_motion_mode'])});")
+        if "ragdoll_supported" in f:
+            L.append('		Phys.StubBodies = {"pelvis", "spine_03"};' if f["ragdoll_supported"] else '		Phys.StubBodies = {"pelvis"};')
+        if "bones" in f:
+            L.append("		Mesh.StubBones.clear();")
+            for bname, bt in f["bones"].items():
+                L.append(f'		Mesh.StubBones["{bname}"] = {{{_dtransform(bt["component"])}, {_dtransform(bt["world"])}}};')
+        if "skeleton" in f:
+            names = list(f["skeleton"])
+            L.append("		MeshAsset.StubRef = FReferenceSkeleton();")
+            for bname, info in f["skeleton"].items():
+                parent = names.index(info["parent"]) if info.get("parent") in f["skeleton"] else -1
+                tr = info["translation"]
+                L.append(f'		MeshAsset.StubRef.StubNames.push_back("{bname}"); MeshAsset.StubRef.StubParents.push_back({parent}); '
+                         f"MeshAsset.StubRef.StubPose.Add(FTransform(FQuat(), FVector({_num(tr[0])}, {_num(tr[1])}, {_num(tr[2])}), FVector(1.0, 1.0, 1.0)));")
         for cname, cv in f.get("curves", {}).items():
             L.append(f'		{target}.StubCurves["{cname}"] = {_num(cv)}f;')
         for a, v in f.get("actions", {}).items():
@@ -483,8 +511,7 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
             t = props.get("transform", ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0)))
             L.append(f"\t\tPrims[{k}].StubVelocity = FVector({_num(props.get('speed', 0.0))}, 0.0, 0.0); "
                      f"Prims[{k}].StubCanStepUp = {'true' if props.get('can_step_up', True) else 'false'}; "
-                     f"Prims[{k}].StubTransform = FTransform(FQuat({_num(t[1][0])}, {_num(t[1][1])}, {_num(t[1][2])}, {_num(t[1][3])}), "
-                     f"FVector({_num(t[0][0])}, {_num(t[0][1])}, {_num(t[0][2])}), FVector({_num(t[2][0])}, {_num(t[2][1])}, {_num(t[2][2])}));")
+                     f"Prims[{k}].StubTransform = {_dtransform(t)};")
         # a notify read through host.notify(...) that fired this frame
         for name, fired in f.get("notifies", {}).items():
             if not fired or name not in notify_inputs:

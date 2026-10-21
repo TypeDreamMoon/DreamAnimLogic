@@ -958,6 +958,17 @@ class Checker:
         if not item.arg and b.arg is not None:
             self.err("DAL3021", f"host.{item.name} takes no argument", b.arg_pos or b.pos)
             return None
+        if item.arg and item.nargs == 2 and b.arg2 is None:
+            self.err("DAL3021", f"host.{item.name} takes two names: host.{item.name}(\"Name\", \"Name\")", b.arg_pos or b.pos)
+            return None
+        if item.arg and item.nargs == 1 and b.arg2 is not None:
+            self.err("DAL3021", f"host.{item.name} takes one name", b.arg2_pos or b.pos)
+            return None
+        if item.arg and item.nargs == 2:
+            for nm in (b.arg, b.arg2):
+                if not nm or not nm.replace("_", "a").isalnum() or nm[0].isdigit():
+                    self.err("DAL3022", f"host argument {nm!r} must be an identifier (letters, digits, '_')", b.arg_pos or b.pos)
+                    return None
         if item.arg:
             apos = b.arg_pos or b.pos
             if item.arg_kind == "montage":
@@ -993,7 +1004,7 @@ class Checker:
             return None
         if item.name == "action":
             self.use_action(b.arg or "", ty, b.arg_pos or b.pos)
-        return ir.HostUse(b.item, b.arg)
+        return ir.HostUse(b.item, b.arg, b.arg2)
 
     def declare_params(self, params: list[S.Param]) -> list[tuple[str, Type]] | None:
         out: list[tuple[str, Type]] = []

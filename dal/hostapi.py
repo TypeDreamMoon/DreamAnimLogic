@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from . import runtime as rt
-from .types import BOOL, CHANNEL, CHANNEL_SET, FLOAT, HIT, INT, MOVEMENT_MODE, PRIMITIVE, QUAT, ROTATOR, TRANSFORM, VEC2, VEC3, Type
+from .types import BOOL, CHANNEL, CHANNEL_SET, FLOAT, HIT, INT, MOVEMENT_MODE, PRIMITIVE, QUAT, ROOT_MOTION_MODE, ROTATOR, TRANSFORM, VEC2, VEC3, Type
 
 
 # ---- reads ---------------------------------------------------------------------------------------------------
@@ -39,6 +39,7 @@ class HostItem:
     ue: str = ""                    # how the C++ backend reads it (documentation)
     arg_kind: str = ""              # 'string' (a name in quotes), 'action' (quoted name or a declared action), 'montage'
     section: bool = False           # the value is a section of the argument montage (type chosen by the montage)
+    nargs: int = 1                  # how many names an item with an argument takes (two for ref_path_child_translation)
     consume: str = ""               # consume-on-read: the host method that hands the whole group out once (and clears it)
     part: int = 0                   # which element of the consume method's result this item is
 
@@ -88,6 +89,21 @@ HOST_ITEMS: dict[str, HostItem] = {
         HostItem("anim_curve", FLOAT, arg=True, arg_kind="string",
                  doc='value of an animation curve of the last evaluated pose: host.anim_curve("LayerHead") (0 when the curve is not there)',
                  ue="AnimInstance->GetCurveValue(FName(Name))"),
+        HostItem("root_motion_mode", ROOT_MOTION_MODE, doc="how the animation instance extracts root motion (ERootMotionMode)",
+                 ue="AnimInstance->RootMotionMode"),
+        HostItem("ragdoll_supported", BOOL, doc="the mesh has a physics asset with the pelvis and spine_03 bodies (ragdolling can start)",
+                 ue="Mesh->GetPhysicsAsset() has bodies pelvis and spine_03"),
+        HostItem("mesh_world_transform", TRANSFORM, doc="world transform of the character mesh", ue="Mesh->GetComponentTransform()"),
+        HostItem("bone_component_transform", TRANSFORM, arg=True, arg_kind="string",
+                 doc='transform of a bone in component space, from the pose evaluated last: host.bone_component_transform("pelvis")',
+                 ue="Mesh->GetSocketTransform(Bone, RTS_Component)"),
+        HostItem("bone_world_transform", TRANSFORM, arg=True, arg_kind="string",
+                 doc='transform of a bone in world space, from the pose evaluated last: host.bone_world_transform("ik_foot_l")',
+                 ue="Mesh->GetSocketTransform(Bone, RTS_World)"),
+        HostItem("ref_path_child_translation", VEC3, arg=True, arg_kind="string", nargs=2, unit="cm",
+                 doc='host.ref_path_child_translation("calf_l", "thigh_l"): the local reference-pose translation of the bone of the path from the first '
+                     "bone up to the second that is a direct child of the second (the thigh axis)",
+                 ue="Mesh->GetSkeletalMeshAsset()->GetRefSkeleton(): the reference pose translation of the child of Ancestor on the path from Descendant"),
         HostItem("pre_penetration_velocity", VEC3, unit="cm/s", consume="consume_pre_penetration_velocity", part=1,
                  doc="velocity the movement had before depenetration moved the character; consumed by the read",
                  ue="UDalCharacterMovementComponent::TryConsumePrePenetrationAdjustmentVelocity (DalRuntime)"),
@@ -267,6 +283,9 @@ class HostV0:
     movement_mode_custom = 0
     pre_penetration_velocity = rt.VEC3_ZERO
     pre_penetration_velocity_valid = False
+    root_motion_mode = rt.RootMotionMode.RootMotionFromMontagesOnly
+    ragdoll_supported = False
+    mesh_world_transform = rt.Transform()
 
     def action(self, name: str, ty: str):
         """Value of the input action ``name`` as DAL type ``ty`` ('bool', 'float', 'vec2', 'vec3').
@@ -284,6 +303,21 @@ class HostV0:
 
         Blender adapter: ``AnimInstance.get_curve_value(name)`` (``anim/runtime/instance.py``)."""
         return 0.0
+
+    def bone_component_transform(self, name: str):
+        """Mesh->GetSocketTransform(name, RTS_Component): the bone's transform in the pose evaluated last (identity when the bone is not known).
+
+        Blender adapter: the component-space pose of the last evaluation (``AnimResult.comp``)."""
+        return rt.Transform()
+
+    def bone_world_transform(self, name: str):
+        """Mesh->GetSocketTransform(name, RTS_World): ``inst.component_transform`` composed with the component-space pose (identity when unknown)."""
+        return rt.Transform()
+
+    def ref_path_child_translation(self, descendant: str, ancestor: str):
+        """The local reference-pose translation of the bone that is a direct child of ``ancestor`` on the path up from ``descendant``
+        (zero when there is no such path).  Blender adapter: ``Skeleton.parents`` and the reference pose."""
+        return rt.VEC3_ZERO
 
     def consume_pre_penetration_velocity(self):
         """``(valid, velocity)`` of the pre-penetration velocity recorded since the last call (zero when there is none); the call clears it.

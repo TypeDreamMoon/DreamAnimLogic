@@ -620,6 +620,7 @@ namespace UE::Math
 		TTransform(const TQuat<T>& InRotation, const TVector<T>& InTranslation, const TVector<T>& InScale3D = TVector<T>((T)1, (T)1, (T)1))
 			: Rotation(InRotation), Translation(InTranslation), Scale3D(InScale3D) {}
 		TVector<T> GetLocation() const { return Translation; }
+		TVector<T> GetTranslation() const { return Translation; }
 		TQuat<T> GetRotation() const { return Rotation; }
 		TVector<T> GetScale3D() const { return Scale3D; }
 		void SetScale3D(const TVector<T>& NewScale3D) { Scale3D = NewScale3D; }

@@ -391,7 +391,16 @@ class Parser:
             else:
                 raise self.error("DAL2001", f"expected a string or a declared name, found {self.describe(s)}")
             self.advance()
+            arg2, arg2_pos = None, None
+            if self.tok.is_op(","):
+                self.advance()
+                s2 = self.tok
+                if s2.kind != "STRING":
+                    raise self.error("DAL2001", f"expected a second quoted name, found {self.describe(s2)}")
+                arg2, arg2_pos = s2.value, s2.pos
+                self.advance()
             self.expect_op(")", "after the host item argument")
+            return S.HostBinding(item.text, arg, Pos(h.pos.line, h.pos.col, item.pos.end_col), arg_pos, arg_is_ident, arg2, arg2_pos)
         return S.HostBinding(item.text, arg, Pos(h.pos.line, h.pos.col, item.pos.end_col), arg_pos, arg_is_ident)
 
     def parse_state(self) -> S.StateDecl:

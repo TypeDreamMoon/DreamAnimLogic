@@ -251,12 +251,17 @@ MOVEMENT_MODE = make_movement_mode()
 BLEND_OPTION_MEMBERS = ["Linear", "Cubic", "HermiteCubic", "Sinusoidal", "QuadraticInOut", "CubicInOut", "QuarticInOut", "QuinticInOut",
                         "CircularIn", "CircularOut", "CircularInOut", "ExpIn", "ExpOut", "ExpInOut", "Custom"]
 BLEND_OPTION = EnumType("BlendOption", BLEND_OPTION_MEMBERS, builtin=True, cpp_type="EAlphaBlendOption", cpp_prop_type="EAlphaBlendOption")
+# how an animation instance extracts root motion: ERootMotionMode::Type (an old-style enum in a namespace)
+ROOT_MOTION_MEMBERS = ["NoRootMotionExtraction", "IgnoreRootMotion", "RootMotionFromEverything", "RootMotionFromMontagesOnly"]
+ROOT_MOTION_MODE = EnumType("RootMotionMode", ROOT_MOTION_MEMBERS, builtin=True, cpp_type="ERootMotionMode::Type",
+                            cpp_prop_type="TEnumAsByte<ERootMotionMode::Type>", cpp_members={m: f"ERootMotionMode::{m}" for m in ROOT_MOTION_MEMBERS})
+
 # the collision channels of ECollisionChannel (the engine trace channels that have no name here are EngineTraceChannel1..6)
 CHANNEL_MEMBERS = (["WorldStatic", "WorldDynamic", "Pawn", "Visibility", "Camera", "PhysicsBody", "Vehicle", "Destructible"]
                    + [f"EngineTraceChannel{i}" for i in range(1, 7)] + [f"GameTraceChannel{i}" for i in range(1, 19)])
 CHANNEL = EnumType("Channel", CHANNEL_MEMBERS, builtin=True, cpp_type="ECollisionChannel", cpp_prop_type="TEnumAsByte<ECollisionChannel>",
                    cpp_members={m: f"ECC_{m}" for m in CHANNEL_MEMBERS})
-BUILTIN_ENUMS: dict[str, EnumType] = {"MovementMode": MOVEMENT_MODE, "BlendOption": BLEND_OPTION, "Channel": CHANNEL}
+BUILTIN_ENUMS: dict[str, EnumType] = {"MovementMode": MOVEMENT_MODE, "BlendOption": BLEND_OPTION, "Channel": CHANNEL, "RootMotionMode": ROOT_MOTION_MODE}
 CHANNEL_SET = ArrayType.of(CHANNEL)         # `channel_set`: the channels that block a query (the same type as array<Channel>)
 
 

@@ -274,6 +274,7 @@ class ParamDef:
 class HostUse:
     item: str
     arg: str | None = None
+    arg2: str | None = None          # the second name of a read that takes two (ref_path_child_translation)
 
 
 @dataclass
@@ -678,7 +679,7 @@ def dump(m: Module) -> str:
         if i.peer:
             out.append(f"input {i.name}: {i.ty} <- {i.peer.peer}." + ".".join(i.peer.path))
         elif i.host:
-            h = f"host.{i.host.item}" + (f"({i.host.arg!r})" if i.host.arg is not None else "")
+            h = f"host.{i.host.item}" + (f"({i.host.arg!r}" + (f", {i.host.arg2!r}" if i.host.arg2 is not None else "") + ")" if i.host.arg is not None else "")
             out.append(f"input {i.name}: {i.ty} <- {h}")
         else:
             out.append(f"input {i.name}: {i.ty} = {_fmt_value(i.default)}")

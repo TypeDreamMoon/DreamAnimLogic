@@ -223,6 +223,8 @@ class HostBinding:
     pos: Pos
     arg_pos: Pos | None = None
     arg_is_ident: bool = False       # host.montage_playing(Light1) rather than host.action("Move")
+    arg2: str | None = None          # the second argument of a read that takes two names: host.ref_path_child_translation("a", "b")
+    arg2_pos: Pos | None = None
 
 
 @dataclass

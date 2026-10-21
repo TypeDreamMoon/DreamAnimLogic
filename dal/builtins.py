@@ -217,7 +217,7 @@ TYPE_NAMES = frozenset({"float", "int", "bool", "vec2", "vec3", "rotator", "quat
 
 
 def all_reserved_names() -> frozenset[str]:
-    return frozenset(BUILTINS) | frozenset(CONSTRUCTORS) | frozenset(BUILTIN_CONSTS) | TYPE_NAMES | {"MovementMode", "BlendOption", "Channel"}
+    return frozenset(BUILTINS) | frozenset(CONSTRUCTORS) | frozenset(BUILTIN_CONSTS) | TYPE_NAMES | {"MovementMode", "BlendOption", "Channel", "RootMotionMode"}
 
 
 def resolve_overload(sigs: tuple[Sig, ...], arg_types: list[Type]) -> tuple[int, list[bool]] | None:

@@ -521,6 +521,7 @@ _TRIGGER = {"started": "Started", "triggered": "Triggered", "ongoing": "Ongoing"
 _CHARACTER_ITEMS = ("capsule_radius", "capsule_half_height", "actor_scale", "has_root_motion")      # read from the ACharacter
 _CAPSULE_ITEMS = ("capsule_radius", "capsule_half_height", "actor_scale")
 _CONSUME_ITEMS = ("pre_penetration_velocity", "pre_penetration_velocity_valid")                    # DalRuntime's movement component
+_MESH_ITEMS = ("ragdoll_supported", "mesh_world_transform", "bone_component_transform", "bone_world_transform", "ref_path_child_translation")
 _MOVEMENT_ITEMS = ("velocity", "acceleration", "max_acceleration", "max_braking_deceleration", "walkable_floor_z", "movement_mode_custom",
                    "max_walk_speed", "movement_mode", "is_grounded", "is_crouching")
 _PAWN_ITEMS = ("actor_location", "actor_rotation", "control_rotation", "action", "actor_ready")
@@ -624,6 +625,7 @@ class CppGen:
         self.section_cmds = bool({"montage_play", "montage_jump_to_section", "montage_set_next_section"} & set(self.cmds))
         self.montage_cmds = [c for c in self.cmds if c.startswith("montage_")]
         self.curve_reads = [i for i in module.inputs if i.host is not None and i.host.item == "anim_curve"]
+        self.curve_reads = self.curve_reads + [i for i in module.inputs if i.host is not None and i.host.item == "root_motion_mode"]   # reads of the anim instance
         self.needs_anim = bool(self.montage_reads or self.curve_reads or self.montage_cmds or self.bind_anim)
         self.arm = bool({"camera_set_arm_length", "camera_set_socket_offset"} & set(self.cmds))
         self.camera = "camera_set_fov" in self.cmds
@@ -808,6 +810,32 @@ class CppGen:
             out.append(Method("UCharacterMovementComponent*", "DalGetMovement", body=[
                 "ACharacter* DalCharacter = DalGetCharacter();",
                 "return DalCharacter != nullptr ? DalCharacter->GetCharacterMovement() : nullptr;"]))
+        if self.uses(*_MESH_ITEMS):
+            out.append(Method("USkeletalMeshComponent*", "DalGetMesh", const=True, body=(
+                ["const AActor* DalOwner = GetOwner();", "return DalOwner != nullptr ? DalOwner->FindComponentByClass<USkeletalMeshComponent>() : nullptr;"]
+                if self.actor else ["return GetSkelMeshComponent();"])))
+        if "ref_path_child_translation" in [h.item for _i, h in self.host_items()]:
+            out.append(Method("FVector3f", "DalRefPathChildTranslation", "const FName DalDescendant, const FName DalAncestor", const=True, body=[
+                "const USkeletalMeshComponent* DalMesh = DalGetMesh();",
+                "const USkeletalMesh* DalAsset = DalMesh != nullptr ? DalMesh->GetSkeletalMeshAsset() : nullptr;",
+                "if (DalAsset == nullptr)",
+                "{",
+                "\treturn FVector3f(0.0f, 0.0f, 0.0f);",
+                "}",
+                "const FReferenceSkeleton& DalRef = DalAsset->GetRefSkeleton();",
+                "const int32 DalAncestorIndex = DalRef.FindBoneIndex(DalAncestor);",
+                "int32 DalBone = DalRef.FindBoneIndex(DalDescendant);",
+                "int32 DalChild = INDEX_NONE;",
+                "while (DalBone != INDEX_NONE && DalBone != DalAncestorIndex)",
+                "{",
+                "\tDalChild = DalBone;",
+                "\tDalBone = DalRef.GetParentIndex(DalBone);",
+                "}",
+                "if (DalBone == INDEX_NONE || DalAncestorIndex == INDEX_NONE || DalChild == INDEX_NONE)",
+                "{",
+                "\treturn FVector3f(0.0f, 0.0f, 0.0f);",
+                "}",
+                "return FVector3f(DalRef.GetRefBonePose()[DalChild].GetTranslation());"]))
         if self.needs_anim:
             if self.actor:
                 out.append(Method("UAnimInstance*", "DalGetAnimInstance", body=[
@@ -1592,7 +1620,7 @@ class CppGen:
             for i in m.inputs:
                 if i.host is not None:
                     h = i.host
-                    src = f"host.{h.item}" + (f'("{h.arg}")' if h.arg is not None else "")
+                    src = f"host.{h.item}" + (f'("{h.arg}"' + (f', "{h.arg2}"' if h.arg2 is not None else "") + ")" if h.arg is not None else "")
                     L.append(f"{T}// <- {src}")
                     L.append(f'{T}UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "DAL|Input", Transient)')
                 else:
@@ -1891,6 +1919,10 @@ class CppGen:
             add("GameFramework/CharacterMovementComponent.h")
         if self.uses(*_CAPSULE_ITEMS):
             add("Components/CapsuleComponent.h")
+        if self.uses(*_MESH_ITEMS):
+            add("Components/SkeletalMeshComponent.h")
+            add("Engine/SkeletalMesh.h")
+            add("PhysicsEngine/PhysicsAsset.h")
         if self.uses(*_CONSUME_ITEMS):
             add("DalCharacterMovementComponent.h")
         if self.uses(*_PAWN_ITEMS) or self.needs_pawn_helper or self.controller or self.arm or self.camera:
@@ -2379,6 +2411,8 @@ class CppGen:
             L.append(f"{T}const UWorld* World = GetWorld();")
         if self.montage_reads or self.curve_reads:
             L.append(f"{T}const UAnimInstance* DalAnim = DalGetAnimInstance();")
+        if self.uses(*_MESH_ITEMS):
+            L.append(f"{T}const USkeletalMeshComponent* DalMesh = DalGetMesh();")
         L.append("")
         for i, h in host:
             default = cpp_value(i.ty, i.default)
@@ -2393,6 +2427,26 @@ class CppGen:
                 continue
             if it == "anim_curve":
                 L.append(f"{T}{name} = DalAnim != nullptr ? DalAnim->GetCurveValue(FName(TEXT(\"{h.arg}\"))) : 0.0f;")
+                continue
+            if it == "root_motion_mode":
+                L.append(f"{T}{name} = DalAnim != nullptr ? DalAnim->RootMotionMode.GetValue() : {default};")
+                continue
+            if it == "ragdoll_supported":
+                L.append(f"{T}{name} = false;")
+                L.append(f"{T}if (const UPhysicsAsset* DalPhysics = DalMesh != nullptr ? DalMesh->GetPhysicsAsset() : nullptr)")
+                L.append(f"{T}{{")
+                L.append(f'{T}{T}{name} = DalPhysics->FindBodyIndex(FName(TEXT("pelvis"))) != INDEX_NONE && DalPhysics->FindBodyIndex(FName(TEXT("spine_03"))) != INDEX_NONE;')
+                L.append(f"{T}}}")
+                continue
+            if it == "mesh_world_transform":
+                L.append(f"{T}{name} = DalMesh != nullptr ? FTransform3f(DalMesh->GetComponentTransform()) : FTransform3f();")
+                continue
+            if it in ("bone_component_transform", "bone_world_transform"):
+                space = "RTS_Component" if it == "bone_component_transform" else "RTS_World"
+                L.append(f'{T}{name} = DalMesh != nullptr ? FTransform3f(DalMesh->GetSocketTransform(FName(TEXT("{h.arg}")), {space})) : FTransform3f();')
+                continue
+            if it == "ref_path_child_translation":
+                L.append(f'{T}{name} = DalRefPathChildTranslation(FName(TEXT("{h.arg}")), FName(TEXT("{h.arg2}")));')
                 continue
             if it == "pre_penetration_velocity":
                 L.append(f"{T}{name} = FVector3f(DalPrePenetration);")

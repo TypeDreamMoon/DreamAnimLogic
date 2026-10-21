@@ -42,6 +42,8 @@ class MockHost(HostV1):
         self._notifies: dict = {}
         self._curves: dict = {}                  # scripted animation curve values: name -> value
         self.primitives: dict[str, dict] = {}    # scripted properties of the scene's shapes: name -> {speed, can_step_up, transform}
+        self.bones: dict[str, dict] = {}         # scripted pose: bone name -> {"component": transform, "world": transform}
+        self.skeleton: dict[str, dict] = {}      # scripted reference skeleton: bone name -> {"parent": name or None, "translation": (x, y, z)}
 
     # ---- reads ---------------------------------------------------------------------------------------------------------
     def action(self, name, ty):
@@ -51,6 +53,22 @@ class MockHost(HostV1):
 
     def notify(self, name):
         return bool(self._notifies.get(name, False))
+
+    def bone_component_transform(self, name):
+        return rt.as_transform(self.bones.get(name, {}).get("component", rt.Transform()))
+
+    def bone_world_transform(self, name):
+        return rt.as_transform(self.bones.get(name, {}).get("world", rt.Transform()))
+
+    def ref_path_child_translation(self, descendant, ancestor):
+        """Walk up from ``descendant`` to ``ancestor``: the translation of the last bone before it (its direct child on the path)."""
+        bone, child = descendant, None
+        while bone is not None and bone != ancestor:
+            child = bone
+            bone = self.skeleton.get(bone, {}).get("parent")
+        if bone != ancestor or child is None or child not in self.skeleton:
+            return rt.VEC3_ZERO
+        return rt.as_vec3(self.skeleton[child].get("translation", rt.VEC3_ZERO))
 
     def anim_curve(self, name):
         return float(self._curves.get(name, 0.0))

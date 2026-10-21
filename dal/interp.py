@@ -431,7 +431,7 @@ class Interpreter:
                 name = h.montage_section(i.host.arg)
                 raw = i.ty.members.index(name) if name in i.ty.members else 0    # type: ignore[attr-defined]
             elif spec.arg_kind == "string" or item.startswith("montage_"):
-                raw = getattr(h, item)(i.host.arg)
+                raw = getattr(h, item)(i.host.arg, *(() if i.host.arg2 is None else (i.host.arg2,)))
             else:
                 raw = getattr(h, item)
             self.values[i.name] = coerce(i.ty, raw)

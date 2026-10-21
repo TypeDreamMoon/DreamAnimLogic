@@ -45,6 +45,8 @@ class ScriptedHost(MockHost):
             if name in frame:
                 setattr(self, name, frame[name])
         self._curves = dict(frame.get("curves", {}))
+        self.bones = {k: dict(v) for k, v in frame.get("bones", {}).items()}
+        self.skeleton = {k: dict(v) for k, v in frame.get("skeleton", {}).items()}
         self._actions = frame.get("actions", {})
         self._notifies = frame.get("notifies", {})
         self.events = [tuple(e) for e in frame.get("events", [])]
@@ -179,6 +181,19 @@ def random_frames(module: ir.Module, count: int, seed: int = 1) -> list[dict]:
         f["pre_penetration_velocity_valid"] = rng_v2.random() < 0.4
         f["pre_penetration_velocity"] = tuple(rng_v2.uniform(-600, 600) for _ in range(3))
         f["curves"] = {i.host.arg: rng_v2.uniform(0.0, 1.0) for i in module.inputs if i.host is not None and i.host.item == "anim_curve"}
+        f["mesh_world_transform"] = _rand_value(rng_v2, TRANSFORM, 100.0)
+        f["root_motion_mode"] = rng_v2.randrange(4)
+        f["ragdoll_supported"] = rng_v2.random() < 0.5
+        f["bones"] = {i.host.arg: {"component": _rand_value(rng_v2, TRANSFORM, 50.0), "world": _rand_value(rng_v2, TRANSFORM, 100.0)}
+                      for i in module.inputs if i.host is not None and i.host.item in ("bone_component_transform", "bone_world_transform")}
+        f["skeleton"] = {}
+        for i in module.inputs:
+            if i.host is not None and i.host.item == "ref_path_child_translation":
+                desc, anc = i.host.arg, i.host.arg2
+                mid = f"{desc}_mid"
+                f["skeleton"][anc] = {"parent": None, "translation": tuple(rng_v2.uniform(-5, 5) for _ in range(3))}
+                f["skeleton"][mid] = {"parent": anc, "translation": tuple(rng_v2.uniform(-40, 40) for _ in range(3))}
+                f["skeleton"][desc] = {"parent": mid, "translation": tuple(rng_v2.uniform(-40, 40) for _ in range(3))}
         for i in module.inputs:
             if i.peer is not None:
                 continue
