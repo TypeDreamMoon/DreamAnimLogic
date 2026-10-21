@@ -1,0 +1,839 @@
+// AlsCharacter.dal -- AAlsCharacter (AlsCharacter.h / AlsCharacter.cpp) and the part of UAlsCharacterMovementComponent that is ALS's own
+// logic (AlsCharacterMovementComponent.cpp: the gait settings and the grounded movement settings) rewritten in DAL.
+//
+// ALS-Refactored (c) Sixze, MIT.  Source: Plugins/ALS-Refactored/Source/ALS/Private/AlsCharacter.cpp (C below),
+// AlsCharacter_Actions.cpp (CA), AlsCharacterMovementComponent.cpp (CMC), Public/AlsCharacter.h.  Every method carries the file:line
+// of the C++ it ports; names, members and the order of the calls follow the C++ (names of the C++ functions in snake_case, `pub` ones
+// as in the C++).  The animation instance copies the state of this logic (peer reads) and calls Jump() on its peer.
+//
+// In (milestone M1): the desired and the actual states (view mode, rotation mode, stance, gait, overlay mode, locomotion mode,
+// locomotion action), the view, the input direction, the locomotion state, gait selection and the max allowed gait, rotation (grounded,
+// in air, aiming, with the animation curves RotationYawSpeed / RotationYawOffset), the landing friction, jumping, and the push of the
+// gait settings to the movement component (CMC:894-1020).
+//
+// Not in (stubs, a later milestone): rolling, mantling and ragdolling (AlsCharacter_Actions.cpp) -- their pub methods exist with
+// the ALS signatures so that AlsInput and the landing code can call them; the root motion driver of mantling will go into the
+// pre_movement block.  Dropped for good (single player, no moving bases): everything that replicates (Server* / Client* / Multicast* /
+// OnRep_*, view network smoothing, the network branches of RefreshLocomotion), RefreshMovementBase and the movement base parts of the
+// Refresh* functions, RefreshMeshProperties (mesh tick options), the DisplayDebug family, the BlueprintImplementableEvents (OnGaitChanged
+// ...: language gap G19) and the extension points RefreshCustom*Rotation.
+//
+// Differences that follow from DAL (each one is listed in als-dal-rewrite.md section 7):
+//   * the hooks of the engine (OnMovementModeChanged, OnStartCrouch / OnEndCrouch, OnJumped) are polled in poll_hooks() from the host
+//     reads movement_mode / is_crouching and from the jump request.  The `on movement_mode_changed` & co. handlers run at the start of the
+//     logic's next update, one frame after the movement component calls the C++ hook, while the ALS Tick reads the new locomotion mode and
+//     stance in the same frame; polling at the start of the after_movement block keeps that order;
+//   * the host commands run after the update block, so SetActorRotation is mirrored in ActorRotationNow, which the rest of the block reads
+//     where the C++ calls GetActorRotation() after having rotated the actor;
+//   * the movement component keeps a copy of the rotation mode, the stance and the gait settings: here they are this logic's own
+//     RotationMode / Stance and the settings are looked up where they are used (a `settings` value cannot be stored);
+//   * RefreshGroundedMovementSettings runs inside PhysWalking in UE (with the velocity at the start of the movement): push_movement_settings()
+//     runs at the end of the after_movement block with the velocity at the end of the movement, which is the same value one frame later.
+
+use "als_lib.dal";
+
+peer Anim: AlsAnimationInstance;                       // AlsCharacter.h:57 AnimationInstance: Jump() is called on it (queued)
+logic AlsCharacter : actor in after_movement;          // the ALS Tick runs after the movement component (als-dal-rewrite.md 1.9)
+
+param Settings: AlsCharacterSettings;                  // AlsCharacter.h:31
+param MovementSettings: AlsMovementSettings;           // AlsCharacter.h:34
+
+// ---- what the host tells us, sampled at the start of every update block ---------------------------------------------------------
+input Velocity: vec3 <- host.velocity;                                           // GetVelocity()                            C:1376
+input Acceleration: vec3 <- host.acceleration;                                   // CMC->GetCurrentAcceleration()            C:1119
+input MaxAcceleration: float <- host.max_acceleration;                           // CMC->GetMaxAcceleration()                C:1119 (the ground value on the ground, CMC:292)
+input PrePenetrationVelocity: vec3 <- host.pre_penetration_velocity;             // TryConsumePrePenetrationAdjustmentVelocity, consumed by the read   C:1402
+input PrePenetrationVelocityValid: bool <- host.pre_penetration_velocity_valid;
+input ControlRotation: rotator <- host.control_rotation;                         // Super::GetViewRotation()                 C:101, C:1252
+input ActorRotation: quat <- host.actor_rotation;                                // GetActorRotation()                       C:110
+input IsGrounded: bool <- host.is_grounded;                                      // IsMovingOnGround()                       CMC:333 (PhysWalking only runs on the ground)
+input IsCrouching: bool <- host.is_crouching;                                    // bIsCrouched: OnStartCrouch / OnEndCrouch C:834, C:855
+input CharacterMovementMode: MovementMode <- host.movement_mode;                 // OnMovementModeChanged                    C:469
+input HasAnyRootMotion: bool <- host.has_root_motion;                            // HasAnyRootMotion()                       C:1521
+input RotationYawSpeedCurve: float <- host.anim_curve("RotationYawSpeed");       // GetCurveValue(RotationYawSpeedCurveName) C:1814 (AlsConstants.h:81)
+input RotationYawOffsetCurve: float <- host.anim_curve("RotationYawOffset");     // GetCurveValue(RotationYawOffsetCurveName) C:1650
+
+// ---- state: AlsCharacter.h:36-110 and the members of the movement component the logic reads (AlsCharacterMovementComponent.h:93-105) ------
+state bDesiredAiming: bool;                                                      // :38
+state DesiredRotationMode: AlsRotationMode = AlsRotationMode.ViewDirection;      // :41
+state DesiredStance: AlsStance = AlsStance.Standing;                             // :44
+state DesiredGait: AlsGait = AlsGait.Running;                                    // :47
+state ViewMode: AlsViewMode = AlsViewMode.ThirdPerson;                           // :50
+state OverlayMode: AlsOverlayMode = AlsOverlayMode.Default;                      // :54
+state LocomotionMode: AlsLocomotionMode = AlsLocomotionMode.Grounded;            // :60
+state RotationMode: AlsRotationMode = AlsRotationMode.ViewDirection;             // :63 (the movement component's copy is the same value)
+state Stance: AlsStance = AlsStance.Standing;                                    // :66 (idem)
+state Gait: AlsGait = AlsGait.Walking;                                           // :69
+state LocomotionAction: AlsLocomotionAction;                                     // :72 (no tag: no action)
+state ReplicatedViewRotation: rotator;                                           // :81 (the raw view rotation, normalized)
+state ViewState: AlsViewState;                                                   // :84
+state InputDirection: vec3;                                                      // :87
+state DesiredVelocityYawAngle: float;                                            // :91
+state bHasDesiredVelocity: bool;                                                 // :94
+state LocomotionState: AlsLocomotionState;                                       // :97
+state MantlingState: AlsMantlingState;                                           // :100
+state RagdollingState: AlsRagdollingState;                                       // :106
+state RollingState: AlsRollingState;                                             // :109
+state MaxAllowedGait: AlsGait = AlsGait.Running;                                 // CMC.h:102
+state GaitAmount: float;                                                         // CMC.h:105
+
+// ---- bookkeeping of this rewrite -----------------------------------------------------------------------------------------------
+state ActorRotationNow: rotator;                                                 // GetActorRotation() as this update has changed it (host commands run after the block)
+state NewActorRotation: rotator;                                                 // the `FRotator& ActorRotation` that ConstrainAimingRotation edits (C:1680, C:1718)
+state PreviousMovementMode: MovementMode;                                        // poll_hooks(): the last mode the movement component had
+state bPreviousCrouched: bool;                                                   // poll_hooks(): the last crouched state
+state JumpRequestFrames: int;                                                    // Jump() issued the host command; the jump happens in the movement component, OnJumped follows
+timer BrakingFrictionFactorResetTimer = 0.5;                                     // C:538-544 (ResetDelay)
+
+// ================================================================================================================================
+// helpers
+// ================================================================================================================================
+
+fn rotators_equal(a: rotator, b: rotator) -> bool {                              // FRotator::Equals with the default tolerance KINDA_SMALL_NUMBER (used by C:1132)
+    return abs(normalize_axis(a.pitch - b.pitch)) <= KINDA_SMALL_NUMBER
+        && abs(normalize_axis(a.yaw - b.yaw)) <= KINDA_SMALL_NUMBER
+        && abs(normalize_axis(a.roll - b.roll)) <= KINDA_SMALL_NUMBER;
+}
+
+// SetActorRotation(Rotation, Teleport) as called at C:1715, C:1820, C:1901, C:1913, C:1923: the command runs after the block, the rest of the
+// block sees the new rotation at once (GetActorRotation() after a SetActorRotation, C:1822, C:1928).
+method set_actor_rotation_now(rotation: rotator, teleport: bool) {
+    ActorRotationNow = normalize_rotator(rotation);                              // GetActorRotation() reads the (normalized) quaternion back
+    host.set_actor_rotation(rotation, teleport);
+}
+
+// ================================================================================================================================
+// lifecycle: PreRegisterAllComponents, BeginPlay
+// ================================================================================================================================
+
+on begin_play {                                                                  // C:92-118 PreRegisterAllComponents, C:137-181 BeginPlay
+    // initial values, so that the animation instance reads the up-to-date state when it starts      C:94-115
+    RotationMode = bDesiredAiming ? AlsRotationMode.Aiming : DesiredRotationMode;       // :97
+    Stance = DesiredStance;                                                             // :98
+    Gait = DesiredGait;                                                                 // :99
+    ReplicatedViewRotation = normalize_rotator(ControlRotation);                        // :101 SetReplicatedViewRotation(Super::GetViewRotation().GetNormalized())
+    ViewState.Rotation = ReplicatedViewRotation;                                        // :107
+    ViewState.PreviousYawAngle = ViewState.Rotation.yaw;                                // :108
+    ActorRotationNow = normalize_rotator(to_rotator(ActorRotation));
+    set_target_yaw_angle(ActorRotationNow.yaw);                                         // :110-112
+    LocomotionState.InputYawAngle = ActorRotationNow.yaw;                               // :114
+    LocomotionState.VelocityYawAngle = ActorRotationNow.yaw;                            // :115
+    PreviousMovementMode = CharacterMovementMode;                                       // the movement component's first mode is not a change
+    bPreviousCrouched = IsCrouching;
+    // BeginPlay: update the states to use the initial desired values     C:168-178
+    apply_desired_stance();                                                             // :170
+    refresh_gait();                                                                     // :174 (the CMC copies of Stance / RotationMode :172, :178 are this logic's own)
+    refresh_rotation_mode();                                                            // :176
+    push_grounded_movement_settings();                                                  // the first PhysWalking would do it (CMC:335)
+}
+
+on timer BrakingFrictionFactorResetTimer {                                       // the timer lambda of C:540-544 (runs before the movement, like the timer manager)
+    host.set_braking_friction_factor(0.0);                                       // C:543
+}
+
+// ================================================================================================================================
+// the tick: AAlsCharacter::Tick, C:266-300
+// ================================================================================================================================
+
+// Before the movement component (FAlsRootMotionSource_Mantling::PrepareRootMotion, RMS:37, goes here, a later milestone).  The block exists so that the host
+// commands queued by the calls of AlsInput (Jump, SetDesiredStance ...) are handed to the host before the movement component runs.
+update(dt) in pre_movement {
+}
+
+update(dt) in after_movement {                                                   // C:266-300
+    poll_hooks();                                                                // OnMovementModeChanged, OnStartCrouch, OnEndCrouch, OnJumped: they ran inside the movement component
+    ActorRotationNow = normalize_rotator(to_rotator(ActorRotation));
+
+    // RefreshMovementBase();                                                    // :277 (no moving bases)
+    // RefreshMeshProperties();                                                  // :279 (mesh tick options)
+    refresh_input();                                                             // :281
+    refresh_locomotion_early();                                                  // :283
+    refresh_view(dt);                                                            // :285
+    refresh_locomotion();                                                        // :286
+    refresh_gait();                                                              // :287
+    refresh_rotation_mode();                                                     // :288
+    refresh_rotation(dt);                                                        // :290
+    // AutoStartMantling(); RefreshMantling(); RefreshRagdolling(dt); RefreshRolling(dt);    :292-295 (actions: a later milestone)
+    // Super::Tick(DeltaTime);                                                   // :297
+    refresh_locomotion_late();                                                   // :299
+    push_movement_settings();                                                    // CMC:335, see the header
+
+    if (JumpRequestFrames > 0) { JumpRequestFrames -= 1; }                       // a jump that did not start within two frames was not allowed
+}
+
+// What the engine would have told AAlsCharacter during the movement of this frame (C:469 OnMovementModeChanged, C:834 / C:855 OnStartCrouch /
+// OnEndCrouch, C:1473 OnJumped), taken from the host reads.
+method poll_hooks() {
+    // OnMovementModeChanged, C:469-491
+    if (CharacterMovementMode != PreviousMovementMode) {
+        PreviousMovementMode = CharacterMovementMode;
+        if (CharacterMovementMode == MovementMode.Walking || CharacterMovementMode == MovementMode.NavWalking) {
+            set_locomotion_mode(AlsLocomotionMode.Grounded);                     // :476-479
+        } else if (CharacterMovementMode == MovementMode.Falling) {
+            set_locomotion_mode(AlsLocomotionMode.InAir);                        // :481-483
+            if (JumpRequestFrames > 0) {                                         // OnJumped_Implementation, C:1473-1485 -> OnJumpedNetworked C:1496-1502
+                JumpRequestFrames = 0;
+                Anim.Jump();
+            }
+        } else {
+            set_locomotion_mode(AlsLocomotionMode.None);                         // :485-488
+        }
+    }
+    // OnStartCrouch / OnEndCrouch, C:834-871
+    if (IsCrouching != bPreviousCrouched) {
+        bPreviousCrouched = IsCrouching;
+        set_stance(IsCrouching ? AlsStance.Crouching : AlsStance.Standing);      // :852, :870
+    }
+}
+
+// ================================================================================================================================
+// view mode, aiming, rotation mode, stance, gait, overlay mode, locomotion mode, locomotion action
+// ================================================================================================================================
+
+pub method SetViewMode(NewViewMode: AlsViewMode) {                               // C:430-467 (the role check and the RPCs are dropped)
+    if (ViewMode == NewViewMode) { return; }
+    ViewMode = NewViewMode;                                                      // :442
+}
+
+method set_locomotion_mode(new_locomotion_mode: AlsLocomotionMode) {            // C:493-503
+    if (LocomotionMode != new_locomotion_mode) {
+        let previous_locomotion_mode = LocomotionMode;
+        LocomotionMode = new_locomotion_mode;
+        notify_locomotion_mode_changed(previous_locomotion_mode);
+    }
+}
+
+method notify_locomotion_mode_changed(previous_locomotion_mode: AlsLocomotionMode) {   // C:505-562
+    apply_desired_stance();                                                      // :507
+
+    if (LocomotionMode == AlsLocomotionMode.Grounded && previous_locomotion_mode == AlsLocomotionMode.InAir) {     // :509-510
+        if (Settings.Ragdolling.bStartRagdollingOnLand && LocomotionState.Velocity.z <= -Settings.Ragdolling.RagdollingOnLandSpeedThreshold) {
+            StartRagdolling();                                                   // :512-516
+        } else if (Settings.Rolling.bStartRollingOnLand && LocomotionState.Velocity.z <= -Settings.Rolling.RollingOnLandSpeedThreshold) {
+            // PlayRate 1.3 (:520)
+            StartRolling(LocomotionState.bHasVelocity ? LocomotionState.VelocityYawAngle : unwind_degrees(ActorRotationNow.yaw), 1.3);   // :522-525
+        } else {
+            // Increase friction for a short period of time to prevent sliding on the ground after landing.      :529-544
+            host.set_braking_friction_factor(LocomotionState.bHasInput ? 0.5 : 3.0);          // :531-536 (HasInput / NoInput factors)
+            start(BrakingFrictionFactorResetTimer);                                           // :538-544 SetTimer(ResetDelay 0.5 s)
+
+            // Block rotation towards the last input direction after landing to prevent legs from twisting into a spiral.    :546-549
+            LocomotionState.bRotationTowardsLastInputDirectionBlocked = true;
+        }
+    } else if (LocomotionMode == AlsLocomotionMode.InAir && LocomotionAction == AlsLocomotionAction.Rolling
+               && Settings.Rolling.bInterruptRollingWhenInAir) {                 // :552-554
+        StartRagdolling();                                                       // :558 (if the character is rolling, then enable ragdolling)
+    }
+    // OnLocomotionModeChanged(PreviousLocomotionMode);                          // :561 (Blueprint event, gap G19)
+}
+
+pub method SetDesiredAiming(bNewDesiredAiming: bool) {                           // C:564-593
+    if (bDesiredAiming == bNewDesiredAiming) { return; }
+    bDesiredAiming = bNewDesiredAiming;                                          // :576
+    // OnDesiredAimingChanged(!bDesiredAiming);                                  // :580 (Blueprint event)
+}
+
+pub method SetDesiredRotationMode(NewDesiredRotationMode: AlsRotationMode) {     // C:612-639
+    if (DesiredRotationMode == NewDesiredRotationMode) { return; }
+    DesiredRotationMode = NewDesiredRotationMode;                                // :624
+}
+
+method set_rotation_mode(new_rotation_mode: AlsRotationMode) {                   // C:651-663, with CMC:916-924 SetRotationMode merged (same value)
+    if (RotationMode != new_rotation_mode) {
+        RotationMode = new_rotation_mode;                                        // :659
+        notify_rotation_mode_changed();                                          // :661
+    }
+}
+
+method notify_rotation_mode_changed() {                                          // C:665-673
+    // This prevents the actor from rotating in the last input direction after the rotation mode
+    // has been changed and the actor is not moving at that moment.
+    LocomotionState.bRotationTowardsLastInputDirectionBlocked = true;            // :670
+}
+
+method refresh_rotation_mode() {                                                 // C:675-758
+    let aiming = bDesiredAiming || DesiredRotationMode == AlsRotationMode.Aiming;       // :677
+    let sprinting = MaxAllowedGait == AlsGait.Sprinting;                                // :678 (CMC->GetMaxAllowedGait())
+
+    if (ViewMode == AlsViewMode.FirstPerson) {                                          // :680
+        if (LocomotionMode == AlsLocomotionMode.InAir) {                                // :682
+            if (aiming && Settings.bAllowAimingWhenInAir) {
+                set_rotation_mode(AlsRotationMode.Aiming);                              // :686
+            } else {
+                set_rotation_mode(AlsRotationMode.ViewDirection);                       // :690
+            }
+            return;
+        }
+        // Grounded and other locomotion modes.                                         :696
+        if (aiming && (!sprinting || !Settings.bSprintHasPriorityOverAiming)) {
+            set_rotation_mode(AlsRotationMode.Aiming);                                  // :700
+        } else {
+            set_rotation_mode(AlsRotationMode.ViewDirection);                           // :704
+        }
+        return;
+    }
+
+    // Third person and other view modes.                                               :710
+    if (LocomotionMode == AlsLocomotionMode.InAir) {                                    // :712
+        if (aiming && Settings.bAllowAimingWhenInAir) {
+            set_rotation_mode(AlsRotationMode.Aiming);                                  // :716
+        } else if (aiming) {
+            set_rotation_mode(AlsRotationMode.ViewDirection);                           // :720
+        } else {
+            set_rotation_mode(DesiredRotationMode);                                     // :724
+        }
+        return;
+    }
+
+    // Grounded and other locomotion modes.                                             :730
+    if (sprinting) {                                                                    // :732
+        if (aiming && !Settings.bSprintHasPriorityOverAiming) {
+            set_rotation_mode(AlsRotationMode.Aiming);                                  // :736
+        } else if (Settings.bRotateToVelocityWhenSprinting) {
+            set_rotation_mode(AlsRotationMode.VelocityDirection);                       // :740
+        } else {
+            set_rotation_mode(DesiredRotationMode);                                     // :744
+        }
+    } else {                                                                            // Not sprinting. :747
+        if (aiming) {
+            set_rotation_mode(AlsRotationMode.Aiming);                                  // :751
+        } else {
+            set_rotation_mode(DesiredRotationMode);                                     // :755
+        }
+    }
+}
+
+pub method SetDesiredStance(NewDesiredStance: AlsStance) {                       // C:760-789
+    if (DesiredStance == NewDesiredStance) { return; }
+    DesiredStance = NewDesiredStance;                                            // :772
+    apply_desired_stance();                                                      // :788
+}
+
+method apply_desired_stance() {                                                  // C:801-825
+    if (!valid(LocomotionAction)) {                                              // :803
+        if (LocomotionMode == AlsLocomotionMode.Grounded) {                      // :805
+            if (DesiredStance == AlsStance.Standing) {
+                host.uncrouch();                                                 // :809
+            } else if (DesiredStance == AlsStance.Crouching) {
+                host.crouch();                                                   // :813
+            }
+        } else if (LocomotionMode == AlsLocomotionMode.InAir) {                  // :816
+            host.uncrouch();                                                     // :818
+        }
+    } else if (LocomotionAction == AlsLocomotionAction.Rolling && Settings.Rolling.bCrouchOnStart) {   // :821
+        host.crouch();                                                           // :823
+    }
+}
+
+method set_stance(new_stance: AlsStance) {                                       // C:873-885, with CMC:926-934 SetStance merged (same value)
+    if (Stance != new_stance) {
+        Stance = new_stance;                                                     // :881
+        // OnStanceChanged(PreviousStance);                                      // :883 (Blueprint event)
+    }
+}
+
+pub method SetDesiredGait(NewDesiredGait: AlsGait) {                             // C:889-916
+    if (DesiredGait == NewDesiredGait) { return; }
+    DesiredGait = NewDesiredGait;                                                // :901
+}
+
+method set_gait(new_gait: AlsGait) {                                             // C:928-938
+    if (Gait != new_gait) {
+        Gait = new_gait;                                                         // :934
+        // OnGaitChanged(PreviousGait);                                          // :936 (Blueprint event)
+    }
+}
+
+method refresh_gait() {                                                          // C:942-958
+    if (LocomotionMode != AlsLocomotionMode.Grounded) { return; }                // :944-947
+
+    let max_allowed_gait = calculate_max_allowed_gait();                         // :949
+
+    // Update the character max walk speed to the configured speeds based on the currently max allowed gait.
+    MaxAllowedGait = max_allowed_gait;                                           // :953 CMC->SetMaxAllowedGait
+
+    let actual_gait = calculate_actual_gait(max_allowed_gait);                   // :955
+    set_gait(actual_gait);                                                       // :957
+}
+
+view calculate_max_allowed_gait() -> AlsGait {                                   // C:960-977
+    // The maximum gait the character is currently allowed to be in, determined by the desired gait, the rotation mode, the stance ...
+    if (DesiredGait != AlsGait.Sprinting) { return DesiredGait; }                // :966-969
+    if (can_sprint()) { return AlsGait.Sprinting; }                              // :971-974
+    return AlsGait.Running;                                                      // :976
+}
+
+view calculate_actual_gait(max_allowed_gait: AlsGait) -> AlsGait {               // C:979-998
+    // Calculated by the actual movement of the character, so it can differ from the desired gait or the max allowed gait.
+    let gait_settings = MovementSettings.RotationModes[RotationMode].Stances[Stance];   // CMC:910-913 GaitSettings (the movement component's copy)
+    if (LocomotionState.Speed < get_max_walk_speed(gait_settings) + 10.0) { return AlsGait.Walking; }                                // :987-990
+    if (LocomotionState.Speed < get_max_run_speed(gait_settings) + 10.0 || max_allowed_gait != AlsGait.Sprinting) { return AlsGait.Running; }   // :992-995
+    return AlsGait.Sprinting;                                                    // :997
+}
+
+view can_sprint() -> bool {                                                      // C:1000-1027
+    // If the character is in view direction rotation mode, only allow sprinting if there is input and if the
+    // input direction is aligned with the view direction within 50 degrees.
+    if (!LocomotionState.bHasInput || Stance != AlsStance.Standing
+        || ((bDesiredAiming || DesiredRotationMode == AlsRotationMode.Aiming) && !Settings.bSprintHasPriorityOverAiming)) {
+        return false;                                                            // :1006-1010
+    }
+    if (ViewMode != AlsViewMode.FirstPerson
+        && (DesiredRotationMode == AlsRotationMode.VelocityDirection || Settings.bRotateToVelocityWhenSprinting)) {
+        return true;                                                             // :1012-1016
+    }
+    return abs(unwind_degrees(LocomotionState.InputYawAngle - ViewState.Rotation.yaw)) < 50.0;   // :1018-1026 (YawAngleThreshold)
+}
+
+pub method SetOverlayMode(NewOverlayMode: AlsOverlayMode) {                      // C:1029-1060
+    if (OverlayMode == NewOverlayMode) { return; }
+    OverlayMode = NewOverlayMode;                                                // :1043
+    // OnOverlayModeChanged(PreviousOverlayMode);                                // :1047 (Blueprint event)
+}
+
+pub method SetLocomotionAction(NewLocomotionAction: AlsLocomotionAction) {       // C:1079-1089 (called by the SetLocomotionAction notify state)
+    if (LocomotionAction != NewLocomotionAction) {
+        let previous_locomotion_action = LocomotionAction;
+        LocomotionAction = NewLocomotionAction;                                  // :1085
+        notify_locomotion_action_changed(previous_locomotion_action);
+    }
+}
+
+method notify_locomotion_action_changed(previous_locomotion_action: AlsLocomotionAction) {   // C:1091-1101
+    if (!valid(LocomotionAction)) {
+        host.set_input_blocked(false);                                           // :1095 CMC->SetInputBlocked(false)
+    }
+    apply_desired_stance();                                                      // :1098
+    // OnLocomotionActionChanged(PreviousLocomotionAction);                      // :1100 (Blueprint event)
+}
+
+// ================================================================================================================================
+// input, view, locomotion
+// ================================================================================================================================
+
+method refresh_input() {                                                         // C:1115-1128 (the role check :1117 is always true here)
+    InputDirection = normalize(Acceleration / MaxAcceleration);                  // :1119 + SetInputDirection :1108-1112 (GetSafeNormal; x / 0 is 0)
+    LocomotionState.bHasInput = length_sq(InputDirection) > KINDA_SMALL_NUMBER;  // :1122
+    if (LocomotionState.bHasInput) {
+        LocomotionState.InputYawAngle = direction_to_angle_xy(InputDirection);   // :1126
+    }
+}
+
+method refresh_view(dt: float) {                                                 // C:1222-1267 (no moving base, no network smoothing)
+    ViewState.PreviousYawAngle = ViewState.Rotation.yaw;                         // :1233
+    let view_rotation = normalize_rotator(ControlRotation);                      // :1252 Super::GetViewRotation().GetNormalized()
+    if (!rotators_equal(ReplicatedViewRotation, view_rotation)) {                // SetReplicatedViewRotation, C:1130-1143
+        ReplicatedViewRotation = view_rotation;                                  // :1134
+    }
+    ViewState.Rotation = ReplicatedViewRotation;                                 // :1258 (FinalRotation without smoothing, :1284-1289)
+
+    // Set the yaw speed by comparing the current and previous view yaw angle, divided by delta seconds.   :1260-1266
+    if (dt > SMALL_NUMBER) {
+        ViewState.YawSpeed = abs(ViewState.Rotation.yaw - ViewState.PreviousYawAngle) / dt;
+    }
+}
+
+method refresh_locomotion_early() {                                              // C:1335-1370 (the movement base branches :1337-1367 are dropped)
+    LocomotionState.bAimingLimitAppliedThisFrame = false;                        // :1369
+}
+
+method refresh_locomotion() {                                                    // C:1372-1437
+    LocomotionState.Velocity = Velocity;                                         // :1376
+
+    // The speed equals the length of the horizontal velocity, so it does not take vertical movement into account.   :1378-1383
+    LocomotionState.Speed = size_2d(LocomotionState.Velocity);                   // :1383 Size2D
+
+    LocomotionState.bHasVelocity = LocomotionState.Speed >= 1.0;                 // :1385-1387 (HasSpeedThreshold)
+
+    if (LocomotionState.bHasVelocity) {
+        LocomotionState.VelocityYawAngle = direction_to_angle_xy(LocomotionState.Velocity);   // :1391
+    }
+
+    // (the role check :1394 is always true; bSendInitialVelocityYawAngle / ServerSetInitialVelocityYawAngle :1396-1431 replicate)
+    if (Settings.bRotateTowardsDesiredVelocityInVelocityDirectionRotationMode) {         // :1399
+        if (PrePenetrationVelocityValid && size_2d(PrePenetrationVelocity) >= 1.0) {     // :1402-1403 TryConsumePrePenetrationAdjustmentVelocity
+            bHasDesiredVelocity = true;                                                  // :1406
+            DesiredVelocityYawAngle = direction_to_angle_xy(PrePenetrationVelocity);     // :1408 SetDesiredVelocityYawAngle
+        } else {
+            bHasDesiredVelocity = LocomotionState.bHasVelocity;                          // :1413
+            DesiredVelocityYawAngle = LocomotionState.VelocityYawAngle;                  // :1415
+        }
+    }
+
+    // Character is moving if has speed and current acceleration, or if the speed is greater than the moving speed threshold.   :1433
+    LocomotionState.bMoving = (LocomotionState.bHasInput && LocomotionState.bHasVelocity)
+                           || LocomotionState.Speed > Settings.MovingSpeedThreshold;     // :1435-1436
+}
+
+method refresh_locomotion_late() {                                               // C:1439-1447
+    if (!valid(LocomotionMode) || valid(LocomotionAction)) {
+        refresh_target_yaw_angle_using_actor_rotation();                         // :1441-1444
+    }
+    LocomotionState.bResetAimingLimit = !LocomotionState.bAimingLimitAppliedThisFrame;   // :1446
+}
+
+pub method Jump() {                                                              // C:1464-1471
+    if (Stance == AlsStance.Standing && !valid(LocomotionAction) && LocomotionMode == AlsLocomotionMode.Grounded) {
+        host.jump();                                                             // :1469 Super::Jump()
+        JumpRequestFrames = 2;                                                   // the movement component starts the jump and calls OnJumped (poll_hooks)
+    }
+}
+
+// ================================================================================================================================
+// rotation
+// ================================================================================================================================
+
+method refresh_rotation(dt: float) {                                             // C:1664-1668
+    refresh_grounded_rotation(dt);                                               // :1666
+    refresh_in_air_rotation(dt);                                                 // :1667
+}
+
+method refresh_grounded_rotation(dt: float) {                                    // C:1514-1662
+    if (valid(LocomotionAction) || LocomotionMode != AlsLocomotionMode.Grounded) { return; }     // :1516-1519
+
+    if (HasAnyRootMotion) {                                                      // :1521
+        refresh_target_yaw_angle_using_actor_rotation();                         // :1523
+        return;
+    }
+
+    if (!LocomotionState.bMoving) {                                              // Not moving.  :1527
+        apply_rotation_yaw_speed_animation_curve(dt);                            // :1531
+        // if (RefreshCustomGroundedNotMovingRotation(dt)) { return; }           // :1533 (extension point)
+
+        if (RotationMode == AlsRotationMode.Aiming || ViewMode == AlsViewMode.FirstPerson) {     // :1538
+            refresh_grounded_aiming_rotation(dt);                                // :1540
+            return;
+        }
+
+        if (RotationMode == AlsRotationMode.VelocityDirection) {                 // :1544
+            var target_yaw_angle = 0.0;
+            if (LocomotionState.bRotationTowardsLastInputDirectionBlocked) {     // :1548
+                // Rotate to the last target yaw angle (the movement base branch :1554-1558 is dropped).
+                target_yaw_angle = LocomotionState.TargetYawAngle;               // :1552
+            } else {
+                // Rotate to the last velocity direction.
+                target_yaw_angle = Settings.bRotateTowardsDesiredVelocityInVelocityDirectionRotationMode
+                    ? DesiredVelocityYawAngle : LocomotionState.VelocityYawAngle;       // :1565-1567
+            }
+            // RotationInterpolationHalfLife 0.1, TargetYawAngleRotationSpeed 800     :1570-1571
+            set_rotation_extra_smooth(target_yaw_angle, dt, 0.1, 800.0);         // :1573
+            return;
+        }
+
+        if (RotationMode == AlsRotationMode.ViewDirection) {                     // :1577
+            if ((!LocomotionState.bHasInput && LocomotionState.bRotationTowardsLastInputDirectionBlocked)
+                || !Settings.bAutoRotateOnAnyInputWhileNotMovingInViewDirectionRotationMode) {     // :1579-1580
+                refresh_target_yaw_angle_using_actor_rotation();                 // :1582
+                return;
+            }
+
+            // Rotate to the last view direction.
+            let target_yaw_angle = LocomotionState.bHasInput ? ViewState.Rotation.yaw : LocomotionState.TargetYawAngle;   // :1588-1590
+            let rotation_interpolation_half_life = calculate_grounded_moving_rotation_interpolation_half_life();         // :1592
+            set_rotation_extra_smooth(target_yaw_angle, dt, rotation_interpolation_half_life, 500.0);                   // :1594-1596
+            return;
+        }
+
+        refresh_target_yaw_angle_using_actor_rotation();                         // :1600
+        return;
+    }
+
+    // Moving.  :1604
+    // if (RefreshCustomGroundedMovingRotation(dt)) { return; }                  // :1606 (extension point)
+
+    if (RotationMode == AlsRotationMode.Aiming || ViewMode == AlsViewMode.FirstPerson) {         // :1611
+        refresh_grounded_aiming_rotation(dt);                                    // :1613
+        return;
+    }
+
+    if (RotationMode == AlsRotationMode.VelocityDirection
+        && (LocomotionState.bHasInput || !LocomotionState.bRotationTowardsLastInputDirectionBlocked)) {   // :1617-1618
+        LocomotionState.bRotationTowardsLastInputDirectionBlocked = false;       // :1620
+
+        let target_yaw_angle = Settings.bRotateTowardsDesiredVelocityInVelocityDirectionRotationMode
+            ? DesiredVelocityYawAngle : LocomotionState.VelocityYawAngle;        // :1622-1626
+        let rotation_interpolation_half_life = calculate_grounded_moving_rotation_interpolation_half_life();   // :1628
+        set_rotation_extra_smooth(target_yaw_angle, dt, rotation_interpolation_half_life, 800.0);             // :1630-1632
+        return;
+    }
+
+    if (RotationMode == AlsRotationMode.ViewDirection
+        && (LocomotionState.bHasInput || !LocomotionState.bRotationTowardsLastInputDirectionBlocked)) {         // :1636-1637
+        LocomotionState.bRotationTowardsLastInputDirectionBlocked = false;       // :1639
+
+        var target_yaw_angle = 0.0;
+        if (Gait == AlsGait.Sprinting) {                                         // :1643
+            target_yaw_angle = LocomotionState.VelocityYawAngle;                 // :1645
+        } else {
+            target_yaw_angle = ViewState.Rotation.yaw + RotationYawOffsetCurve;  // :1649-1650 (view yaw + the curve of the animation)
+        }
+
+        let rotation_interpolation_half_life = calculate_grounded_moving_rotation_interpolation_half_life();   // :1653
+        set_rotation_extra_smooth(target_yaw_angle, dt, rotation_interpolation_half_life, 500.0);             // :1655-1657
+        return;
+    }
+
+    refresh_target_yaw_angle_using_actor_rotation();                             // :1661
+}
+
+view calculate_grounded_moving_rotation_interpolation_half_life() -> float {     // C:1789-1810
+    // The rotation speed from the rotation speed curve of the movement gait settings, indexed by the gait amount.
+    let gait_settings = MovementSettings.RotationModes[RotationMode].Stances[Stance];        // :1795 GetGaitSettings()
+    var interpolation_half_life = 0.2;                                           // :1797 DefaultInterpolationHalfLife
+    if (valid(gait_settings.RotationInterpolationSpeedCurve)) {                  // :1800 ALS_ENSURE(IsValid(curve))
+        interpolation_half_life = gait_settings.RotationInterpolationSpeedCurve.eval(max(1.0, GaitAmount));    // :1801
+    }
+    // MinInterpolationHalfLifeMultiplier 0.333333, ReferenceViewYawSpeed 300     :1805-1806
+    return interpolation_half_life * lerp_clamped(1.0, 0.333333, ViewState.YawSpeed / 300.0);   // :1808-1809
+}
+
+method refresh_grounded_aiming_rotation(dt: float) {                             // C:1680-1716
+    NewActorRotation = ActorRotationNow;                                         // :1682
+
+    if (!LocomotionState.bHasInput && !LocomotionState.bMoving) {                // Not moving.  :1684
+        set_target_yaw_angle(ViewState.Rotation.yaw);                            // :1688
+
+        let constrained = constrain_aiming_rotation(dt, true);                   // :1690
+        if (!constrained) { return; }
+    } else {                                                                     // Moving.  :1695
+        // RotationInterpolationHalfLife 0.1, TargetYawAngleRotationSpeed 1000     :1699-1700
+        set_target_yaw_angle_smooth(ViewState.Rotation.yaw, dt, 1000.0);         // :1702
+
+        NewActorRotation.yaw = damper_exact_angle(unwind_degrees(NewActorRotation.yaw), LocomotionState.SmoothTargetYawAngle, dt, 0.1);   // :1704-1706
+
+        let constrained = constrain_aiming_rotation(dt, false);                  // :1708
+        if (constrained) {
+            // Cancel the extra smooth rotation, otherwise the actor will rotate too weirdly.      :1710
+            LocomotionState.SmoothTargetYawAngle = LocomotionState.TargetYawAngle;     // :1711
+        }
+    }
+
+    set_actor_rotation_now(NewActorRotation, false);                             // :1715
+}
+
+// Limits the actor's yaw relative to the view when aiming; edits NewActorRotation (the `FRotator& ActorRotation` of the C++).
+method constrain_aiming_rotation(dt: float, bApplySecondaryConstraint: bool) -> bool {      // C:1718-1787
+    LocomotionState.bAimingLimitAppliedThisFrame = true;                         // :1723
+
+    if (LocomotionState.bResetAimingLimit) {
+        LocomotionState.AimingYawAngleLimit = 180.0;                             // :1725-1728
+    }
+
+    var actor_yaw_angle_view_space = unwind_degrees(ViewState.Rotation.yaw - NewActorRotation.yaw);   // :1730
+
+    let min_aiming_yaw_angle_limit = Settings.AimingYawAngleLimit;               // :1732
+
+    if (abs(actor_yaw_angle_view_space) <= min_aiming_yaw_angle_limit + KINDA_SMALL_NUMBER) {     // :1734
+        LocomotionState.AimingYawAngleLimit = min_aiming_yaw_angle_limit;        // :1736
+        return false;                                                            // :1737
+    }
+
+    actor_yaw_angle_view_space = remap_angle_for_counter_clockwise_rotation(actor_yaw_angle_view_space);   // :1740
+
+    // Secondary constraint: increases the character's rotation speed; typically only when the character is not moving.   :1742-1745
+    if (bApplySecondaryConstraint) {
+        // Interpolate the angle only up to the point at which the constraints no longer apply, for a smoother completion.   :1749-1750
+        let target_actor_yaw_angle_view_space = clamp(actor_yaw_angle_view_space, -min_aiming_yaw_angle_limit, min_aiming_yaw_angle_limit);   // :1752
+        let delta_yaw_angle = unwind_degrees(target_actor_yaw_angle_view_space - actor_yaw_angle_view_space);      // :1753
+
+        if (is_nearly_zero(delta_yaw_angle, KINDA_SMALL_NUMBER)) {                   // :1755
+            actor_yaw_angle_view_space = target_actor_yaw_angle_view_space;      // :1757
+        } else {
+            // RotationInterpolationHalfLife 0.1 (:1747)
+            let interpolation_amount = damper_exact_alpha(dt, 0.1);              // :1761
+            actor_yaw_angle_view_space = unwind_degrees(actor_yaw_angle_view_space + delta_yaw_angle * interpolation_amount);   // :1762
+        }
+    }
+
+    // Primary constraint: the character may not rotate beyond a certain angle in the view space.   :1766
+    if (abs(actor_yaw_angle_view_space) > LocomotionState.AimingYawAngleLimit + KINDA_SMALL_NUMBER) {   // :1768
+        actor_yaw_angle_view_space = clamp(actor_yaw_angle_view_space, -LocomotionState.AimingYawAngleLimit, LocomotionState.AimingYawAngleLimit);   // :1770-1772
+    } else {
+        LocomotionState.AimingYawAngleLimit = max(abs(actor_yaw_angle_view_space), min_aiming_yaw_angle_limit);   // :1776
+    }
+
+    let previous_actor_yaw_angle = NewActorRotation.yaw;                         // :1779
+
+    NewActorRotation.yaw = unwind_degrees(ViewState.Rotation.yaw - actor_yaw_angle_view_space);   // :1781
+
+    // KINDA_SMALL_NUMBER: converting back to a world space rotation may introduce rounding error.   :1783-1784
+    return !is_nearly_zero(unwind_degrees(NewActorRotation.yaw - previous_actor_yaw_angle), KINDA_SMALL_NUMBER);   // :1786
+}
+
+method apply_rotation_yaw_speed_animation_curve(dt: float) {                     // C:1812-1824
+    let delta_yaw_angle = RotationYawSpeedCurve * dt;                            // :1814
+    if (abs(delta_yaw_angle) > SMALL_NUMBER) {                                   // :1815
+        var new_rotation = ActorRotationNow;                                     // :1817
+        new_rotation.yaw += delta_yaw_angle;                                     // :1818
+        set_actor_rotation_now(new_rotation, false);                             // :1820
+        refresh_target_yaw_angle_using_actor_rotation();                         // :1822
+    }
+}
+
+method refresh_in_air_rotation(dt: float) {                                      // C:1826-1871
+    if (valid(LocomotionAction) || LocomotionMode != AlsLocomotionMode.InAir) { return; }       // :1828-1831
+
+    // if (RefreshCustomInAirRotation(dt)) { return; }                           // :1833 (extension point)
+
+    if (RotationMode == AlsRotationMode.Aiming || ViewMode == AlsViewMode.FirstPerson) {         // :1838
+        refresh_in_air_aiming_rotation(dt);                                      // :1840
+        return;
+    }
+
+    if (RotationMode == AlsRotationMode.VelocityDirection || RotationMode == AlsRotationMode.ViewDirection) {   // :1844
+        // RotationInterpolationHalfLife 0.2 (:1846)
+        if (Settings.InAirRotationMode == AlsInAirRotationMode.KeepViewSpaceRotation) {          // :1850
+            set_rotation_smooth(ViewState.Rotation.yaw - LocomotionState.TargetYawAngleViewSpace, dt, 0.2);   // :1851-1852
+        } else if (Settings.InAirRotationMode == AlsInAirRotationMode.RotateToVelocity && LocomotionState.bMoving) {   // :1855-1856
+            set_rotation_smooth(LocomotionState.VelocityYawAngle, dt, 0.2);      // :1858 (not moving: the default branch, like the C++ fall through)
+        } else {
+            refresh_target_yaw_angle_using_actor_rotation();                     // :1863
+        }
+        return;
+    }
+
+    refresh_target_yaw_angle_using_actor_rotation();                             // :1870
+}
+
+method refresh_in_air_aiming_rotation(dt: float) {                               // C:1878-1891
+    // RotationInterpolationHalfLife 0.1 (:1880)
+    set_target_yaw_angle(ViewState.Rotation.yaw);                                // :1882
+
+    var new_rotation = ActorRotationNow;                                         // :1884
+    new_rotation.yaw = damper_exact_angle(unwind_degrees(new_rotation.yaw), LocomotionState.SmoothTargetYawAngle, dt, 0.1);   // :1885-1886
+
+    NewActorRotation = new_rotation;
+    constrain_aiming_rotation(dt, false);                                        // :1888 (the result is not used)
+    set_actor_rotation_now(NewActorRotation, false);                             // :1890
+}
+
+method set_rotation_smooth(target_yaw_angle: float, dt: float, interpolation_half_life: float) {      // C:1893-1902
+    set_target_yaw_angle(target_yaw_angle);                                      // :1895
+
+    var new_rotation = ActorRotationNow;                                         // :1897
+    new_rotation.yaw = damper_exact_angle(unwind_degrees(new_rotation.yaw), LocomotionState.SmoothTargetYawAngle, dt, interpolation_half_life);   // :1898-1899
+
+    set_actor_rotation_now(new_rotation, false);                                 // :1901
+}
+
+method set_rotation_extra_smooth(target_yaw_angle: float, dt: float, interpolation_half_life: float, target_yaw_angle_rotation_speed: float) {   // C:1904-1914
+    set_target_yaw_angle_smooth(target_yaw_angle, dt, target_yaw_angle_rotation_speed);   // :1907
+
+    var new_rotation = ActorRotationNow;                                         // :1909
+    new_rotation.yaw = damper_exact_angle(unwind_degrees(new_rotation.yaw), LocomotionState.SmoothTargetYawAngle, dt, interpolation_half_life);   // :1910-1911
+
+    set_actor_rotation_now(new_rotation, false);                                 // :1913
+}
+
+method set_rotation_instant(target_yaw_angle: float, teleport: bool) {           // C:1916-1924
+    set_target_yaw_angle(target_yaw_angle);                                      // :1918
+
+    var new_rotation = ActorRotationNow;                                         // :1920
+    new_rotation.yaw = target_yaw_angle;                                         // :1921
+
+    set_actor_rotation_now(new_rotation, teleport);                              // :1923
+}
+
+method refresh_target_yaw_angle_using_actor_rotation() {                         // C:1926-1931
+    set_target_yaw_angle(ActorRotationNow.yaw);                                  // :1928-1930
+}
+
+method set_target_yaw_angle(target_yaw_angle: float) {                           // C:1933-1940
+    LocomotionState.TargetYawAngle = unwind_degrees(target_yaw_angle);           // :1935
+    LocomotionState.SmoothTargetYawAngle = LocomotionState.TargetYawAngle;       // :1937
+    refresh_target_yaw_angle_view_space();                                       // :1939
+}
+
+method set_target_yaw_angle_smooth(target_yaw_angle: float, dt: float, rotation_speed: float) {      // C:1942-1950
+    LocomotionState.TargetYawAngle = unwind_degrees(target_yaw_angle);           // :1944
+    LocomotionState.SmoothTargetYawAngle = interpolate_angle_constant(LocomotionState.SmoothTargetYawAngle, LocomotionState.TargetYawAngle, dt, rotation_speed);   // :1946-1947
+    refresh_target_yaw_angle_view_space();                                       // :1949
+}
+
+method refresh_target_yaw_angle_view_space() {                                   // C:1952-1956
+    LocomotionState.TargetYawAngleViewSpace = unwind_degrees(ViewState.Rotation.yaw - LocomotionState.TargetYawAngle);   // :1954-1955
+}
+
+// ================================================================================================================================
+// the movement component: gait settings and grounded movement settings (AlsCharacterMovementComponent.cpp)
+// ================================================================================================================================
+
+// RefreshGroundedMovementSettings, CMC:936-1020, called by PhysWalking (CMC:335) while the character is walking on the ground.
+method push_movement_settings() {
+    if (!IsGrounded) { return; }
+    push_grounded_movement_settings();
+}
+
+// The body of RefreshGroundedMovementSettings, CMC:936-1020.
+method push_grounded_movement_settings() {
+    let gait_settings = MovementSettings.RotationModes[RotationMode].Stances[Stance];            // CMC:910-913 GaitSettings
+    var walk_speed = gait_settings.WalkForwardSpeed;                             // :938
+    var run_speed = gait_settings.RunForwardSpeed;                               // :939
+
+    if (gait_settings.bAllowDirectionDependentMovementSpeed && length_sq(Velocity) > KINDA_SMALL_NUMBER) {   // :941-943
+        // Ideally actor rotation, but ALS controls it itself and does not replicate it: the view rotation of the controller.   :945-954
+        let view_rotation_gravity_space = get_twist(to_quat(ControlRotation), vec3(0.0, 0.0, 1.0));    // :956 UAlsRotation::GetTwist about the up axis
+        let velocity_view_space = unrotate(view_rotation_gravity_space, Velocity).xy;                  // :958
+        let velocity_yaw_angle_view_space = direction_to_angle(velocity_view_space);                   // :959
+
+        let forward_speed_amount = 1.0 - clamp01(range_pct(MovementSettings.VelocityAngleToSpeedInterpolationRange.Min,
+                                                           MovementSettings.VelocityAngleToSpeedInterpolationRange.Max,
+                                                           abs(velocity_yaw_angle_view_space)));      // :961-964
+
+        walk_speed = lerp(gait_settings.WalkBackwardSpeed, gait_settings.WalkForwardSpeed, forward_speed_amount);    // :966
+        run_speed = lerp(gait_settings.RunBackwardSpeed, gait_settings.RunForwardSpeed, forward_speed_amount);       // :967
+    }
+
+    // Map the character's current speed to the speed ranges from the movement settings, so that the mapped range
+    // can be used in calculations for consistent results.     :970-971
+    let speed = size_2d(Velocity);                                               // :973
+
+    if (speed > run_speed) {                                                     // :975
+        GaitAmount = map_range_clamped(run_speed, gait_settings.SprintSpeed, 2.0, 3.0, speed);       // :977
+    } else if (speed > walk_speed) {                                             // :979
+        GaitAmount = map_range_clamped(walk_speed, run_speed, 1.0, 2.0, speed);  // :981
+    } else {
+        GaitAmount = map_range_clamped(0.0, walk_speed, 0.0, 1.0, speed);        // :985
+    }
+
+    var max_walk_speed = gait_settings.RunForwardSpeed;                          // :1002
+    if (MaxAllowedGait == AlsGait.Walking) {                                     // :988
+        max_walk_speed = walk_speed;                                             // :990
+    } else if (MaxAllowedGait == AlsGait.Running) {                              // :992
+        max_walk_speed = run_speed;                                              // :994
+    } else if (MaxAllowedGait == AlsGait.Sprinting) {                            // :996
+        max_walk_speed = gait_settings.SprintSpeed;                              // :998
+    }
+    host.set_max_walk_speed(max_walk_speed);                                     // :990-1002
+    host.set_max_walk_speed_crouched(max_walk_speed);                            // :1005
+
+    // Acceleration, deceleration and ground friction from a curve of the gait amount.   :1007-1018
+    if (valid(gait_settings.AccelerationAndDecelerationAndGroundFrictionCurve)) {            // :1010 ALS_ENSURE(IsValid(curve))
+        let acceleration_and_deceleration_and_ground_friction = gait_settings.AccelerationAndDecelerationAndGroundFrictionCurve.eval(GaitAmount);   // FloatCurves[0..2].Eval(GaitAmount)
+        host.set_max_acceleration_walking(acceleration_and_deceleration_and_ground_friction.x);          // :1016
+        host.set_braking_deceleration_walking(acceleration_and_deceleration_and_ground_friction.y);      // :1017
+        host.set_ground_friction(acceleration_and_deceleration_and_ground_friction.z);                   // :1018
+    }
+}
+
+// ================================================================================================================================
+// actions (AlsCharacter_Actions.cpp): a later milestone.  The signatures are ALS's; the bodies do what the C++ does when the action is not
+// allowed to start.
+// ================================================================================================================================
+
+pub method StartRolling(TargetYawAngle: float, PlayRate: float) {                // CA:57-71 (IsRollingAllowedToStart is false: no montage playing is possible yet)
+}
+
+pub method StartRollingGrounded(PlayRate: float) {                               // CA:34-55
+}
+
+pub method StartMantling() -> bool {                                             // CA:141-165 (no mantling yet: false)
+    return false;
+}
+
+pub method StartRagdolling() {                                                   // CA:717-844 (IsRagdollingAllowedToStart is false while the host cannot ragdoll)
+}
+
+pub method StopRagdolling() -> bool {                                            // CA:1026-1165 (IsRagdollingAllowedToStop is false when not ragdolling)
+    return false;
+}

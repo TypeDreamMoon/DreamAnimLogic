@@ -1,0 +1,165 @@
+// AlsInput.dal -- the input of ALS-Refactored's example character (AAlsCharacterExample, Plugins/ALS-Refactored/Source/ALSExtras/Private/
+// AlsCharacterExample.cpp, EX below) rewritten in DAL: the Enhanced Input actions are translated into calls on the character logic and
+// into movement and controller commands.
+//
+// ALS-Refactored (c) Sixze, MIT.  The actions are named like the properties of the example without the "Action" suffix, so that the host
+// finds IA_Als_Move, IA_Als_Look ... (the Blender host resolves `Move` as IA_Als_Move with the prefix IA_Als_, Unreal assigns the
+// UInputAction assets to the DalAction_<name> properties).  The triggers of each action are the ones of AlsCharacterExample.cpp:73-87:
+// Triggered (and Canceled where the example binds it).
+//
+// Runs before the movement component (the PlayerController's tick in Unreal): AddMovementInput has to reach the movement component of the
+// same frame.  The CMC, the character logic and the animation follow (AlsCharacter.dal, in the after_movement slot).
+//
+// Not here: the camera (SwitchShoulder only flips the flag the camera logic will read), the input mapping context (NotifyControllerChanged:
+// the host's input setup; the example sets InputYawScale / InputPitchScale to 1, which is SessionConfig.for_dal_input() in Blender), CalcCamera,
+// DisplayDebug.
+//
+// Differences that follow from DAL: the view rotation Input_OnMove uses is the controller's control rotation (the example asks the player
+// camera manager for the exact camera rotation and falls back to the view state), and the toggles read the state of the character that was
+// sampled at the start of the block, not at the moment of the event.
+
+use "als_lib.dal";
+
+peer Character: AlsCharacter;
+logic AlsInput : actor in pre_movement;
+
+// AlsCharacterExample.h:62-72
+param LookUpMouseSensitivity: float = 1.0;
+param LookRightMouseSensitivity: float = 1.0;
+param LookUpRate: float = 90.0;
+param LookRightRate: float = 240.0;
+
+// the Enhanced Input actions the example binds (EX:62-88)
+action LookMouse: vec2;
+action Look: vec2;
+action Move: vec2;
+action Sprint: bool;
+action Walk: bool;
+action Crouch: bool;
+action Jump: bool;
+action Aim: bool;
+action Ragdoll: bool;
+action Roll: bool;
+action RotationMode: bool;
+action ViewMode: bool;
+action SwitchShoulder: bool;
+
+input ControlRotation: rotator <- host.control_rotation;                  // the exact view rotation of Input_OnMove (EX:117-119)
+input CharacterDesiredGait: AlsGait <- Character.DesiredGait;              // GetDesiredGait()
+input CharacterDesiredStance: AlsStance <- Character.DesiredStance;        // GetDesiredStance()
+input CharacterStance: AlsStance <- Character.Stance;                      // GetStance()
+input CharacterDesiredRotationMode: AlsRotationMode <- Character.DesiredRotationMode;   // GetDesiredRotationMode()
+input CharacterViewMode: AlsViewMode <- Character.ViewMode;                // GetViewMode()
+
+state bRightShoulder: bool = true;                                         // UAlsCameraComponent::bRightShoulder (ALSCamera/Public/AlsCameraComponent.h:76)
+
+// ---- look: EX:91-105 -------------------------------------------------------------------------------------------------------------
+method input_on_look_mouse(look_value: vec2) {                             // EX:91-97
+    host.add_controller_pitch_input(look_value.y * LookUpMouseSensitivity);        // :95
+    host.add_controller_yaw_input(look_value.x * LookRightMouseSensitivity);       // :96
+}
+
+method input_on_look(look_value: vec2) {                                   // EX:99-105
+    host.add_controller_pitch_input(look_value.y * LookUpRate);                    // :103
+    host.add_controller_yaw_input(look_value.x * LookRightRate);                   // :104
+}
+
+// ---- move: EX:107-125 --------------------------------------------------------------------------------------------------------------
+method input_on_move(move_value: vec2) {                                   // EX:107-125
+    let value = clamp_magnitude01_2d(move_value);                                   // :109
+
+    // Use exact camera rotation instead of target rotation whenever possible.   :115
+    let forward_direction = angle_to_direction_xy(ControlRotation.yaw);             // :121
+    let right_direction = perpendicular_counter_clockwise_xy(forward_direction);    // :122
+
+    host.add_movement_input(forward_direction * value.y + right_direction * value.x, 1.0);   // :124
+}
+
+// ---- gait, stance, aiming, modes: EX:127-214 -------------------------------------------------------------------------------------------
+method input_on_sprint(sprint_value: bool) {                               // EX:127-130
+    Character.SetDesiredGait(sprint_value ? AlsGait.Sprinting : AlsGait.Running);   // :129
+}
+
+method input_on_walk() {                                                   // EX:132-142
+    if (CharacterDesiredGait == AlsGait.Walking) {                                  // :134
+        Character.SetDesiredGait(AlsGait.Running);                                  // :136
+    } else if (CharacterDesiredGait == AlsGait.Running) {                           // :138
+        Character.SetDesiredGait(AlsGait.Walking);                                  // :140
+    }
+}
+
+method input_on_crouch() {                                                 // EX:144-154
+    if (CharacterDesiredStance == AlsStance.Standing) {                             // :146
+        Character.SetDesiredStance(AlsStance.Crouching);                            // :148
+    } else if (CharacterDesiredStance == AlsStance.Crouching) {                     // :150
+        Character.SetDesiredStance(AlsStance.Standing);                             // :152
+    }
+}
+
+method input_on_jump(jump_value: bool) {                                   // EX:156-182
+    if (jump_value) {                                                               // :158
+        let stopped_ragdolling = Character.StopRagdolling();                        // :160
+        if (stopped_ragdolling) { return; }                                         // :162
+
+        let mantled = Character.StartMantling();                                    // :165
+        if (mantled) { return; }                                                    // :167
+
+        if (CharacterStance == AlsStance.Crouching) {                               // :170
+            Character.SetDesiredStance(AlsStance.Standing);                         // :172
+            return;                                                                 // :173
+        }
+
+        Character.Jump();                                                           // :176
+    } else {
+        host.stop_jumping();                                                        // :180 StopJumping()
+    }
+}
+
+method input_on_aim(aim_value: bool) {                                     // EX:184-187
+    Character.SetDesiredAiming(aim_value);                                          // :186
+}
+
+method input_on_ragdoll() {                                                // EX:189-195
+    let stopped_ragdolling = Character.StopRagdolling();                            // :191
+    if (!stopped_ragdolling) {
+        Character.StartRagdolling();                                                // :193
+    }
+}
+
+method input_on_roll() {                                                   // EX:197-202
+    Character.StartRollingGrounded(1.3);                                            // :199-201 (PlayRate 1.3)
+}
+
+method input_on_rotation_mode() {                                          // EX:204-209
+    Character.SetDesiredRotationMode(CharacterDesiredRotationMode == AlsRotationMode.VelocityDirection
+                                     ? AlsRotationMode.ViewDirection : AlsRotationMode.VelocityDirection);   // :206-208
+}
+
+method input_on_view_mode() {                                              // EX:211-214
+    Character.SetViewMode(CharacterViewMode == AlsViewMode.ThirdPerson ? AlsViewMode.FirstPerson : AlsViewMode.ThirdPerson);   // :213
+}
+
+method input_on_switch_shoulder() {                                        // EX:216-220
+    bRightShoulder = !bRightShoulder;                                               // :219 Camera->SetRightShoulder(!Camera->IsRightShoulder())
+}
+
+// ---- the bindings of SetupPlayerInputComponent, EX:69-87 --------------------------------------------------------------------------
+on input LookMouse triggered { input_on_look_mouse(value); }              // :69
+on input LookMouse canceled { input_on_look_mouse(value); }               // :70
+on input Look triggered { input_on_look(value); }                         // :71
+on input Look canceled { input_on_look(value); }                          // :72
+on input Move triggered { input_on_move(value); }                         // :73
+on input Move canceled { input_on_move(value); }                          // :74
+on input Sprint triggered { input_on_sprint(value); }                     // :75
+on input Sprint canceled { input_on_sprint(value); }                      // :76
+on input Walk triggered { input_on_walk(); }                              // :77
+on input Crouch triggered { input_on_crouch(); }                          // :78
+on input Jump triggered { input_on_jump(value); }                         // :79
+on input Jump canceled { input_on_jump(value); }                          // :80
+on input Aim triggered { input_on_aim(value); }                           // :81
+on input Aim canceled { input_on_aim(value); }                            // :82
+on input Ragdoll triggered { input_on_ragdoll(); }                        // :83
+on input Roll triggered { input_on_roll(); }                              // :84
+on input RotationMode triggered { input_on_rotation_mode(); }             // :85
+on input ViewMode triggered { input_on_view_mode(); }                     // :86
+on input SwitchShoulder triggered { input_on_switch_shoulder(); }         // :87
