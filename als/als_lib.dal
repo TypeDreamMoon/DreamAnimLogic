@@ -613,3 +613,15 @@ fn get_max_run_speed(gait: AlsMovementGaitSettings) -> float {                  
 // ================================================================================================================================
 // Helpers of the animation instance (AlsAnimationInstance*.dal) go below this line, each with the ALS file:line it ports.
 // ================================================================================================================================
+
+// ---- additions for the anim instance ----------------------------------------------------------------------------------------
+const ZERO_ANIMWEIGHT_THRESH: float = 0.00001;                                                    // Math/VectorRegister.h:133, the epsilon of FAnimWeight
+
+fn is_full_weight(weight: float) -> bool { return weight >= 1.0 - ZERO_ANIMWEIGHT_THRESH; }        // FAnimWeight::IsFullWeight (AnimTypes.h:672)
+
+fn is_relevant(weight: float) -> bool { return weight > ZERO_ANIMWEIGHT_THRESH; }                  // FAnimWeight::IsRelevant (AnimTypes.h:666)
+
+fn movement_direction_cache(d: AlsMovementDirection) -> AlsMovementDirectionCache {               // AlsMovementDirection.h:25 FAlsMovementDirectionCache(EAlsMovementDirection)
+    return AlsMovementDirectionCache(bForward: d == AlsMovementDirection.Forward, bBackward: d == AlsMovementDirection.Backward,
+                                     bLeft: d == AlsMovementDirection.Left, bRight: d == AlsMovementDirection.Right);
+}

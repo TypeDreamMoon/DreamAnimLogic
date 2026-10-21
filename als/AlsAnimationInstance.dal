@@ -1,0 +1,1090 @@
+// AlsAnimationInstance.dal -- UAlsAnimationInstance of ALS-Refactored rewritten in DAL.
+//
+// ALS-Refactored (c) Sixze, MIT.  Ported from Source/ALS/Private/AlsAnimationInstance.cpp ("AI:" below), Public/AlsAnimationInstance.h,
+// Private/AlsAnimationInstanceProxy.cpp and State/*.h.  A .dab (Parent = AlsAnimationInstance) keeps reading Main.GroundedState.
+// VelocityBlend.ForwardAmount and calling Call(Self.RefreshGrounded): every state below has the name and type of the ALS member,
+// the `entry` functions are the UFUNCTIONs of the class, `GetControlRigInput` is the pure getter of the ControlRig node.
+//
+// Milestone M1 (als-dal-rewrite.md 7.3): everything except the parts marked "M2" -- foot lock (FeetState), the playback of the queued
+// transition / turn-in-place montages, the ground prediction sweep and the final ragdoll pose.  They keep their entries and states
+// (the .dab contract is complete but for RagdollingState.FinalRagdollPose) and carry a stub that says what is missing.
+//
+// Frame:  NativeUpdateAnimation (game thread, AI:98) and NativeThreadSafeUpdateAnimation (worker thread, AI:170) are the two halves of
+// update(dt); the entries run after it, when the animation graph calls Call(Self.X); NativePostUpdateAnimation (AI:194), which the
+// proxy of ALS runs on the game thread after the graph update, is the post_update block (and `post_flush`: its commands run the same
+// frame, as the transition montages that AI:208-210 play right there).
+logic AlsAnimationInstance : anim post_flush;
+use "als_lib.dal";
+
+param Settings: AlsAnimationInstanceSettings;                             // AI.h:40  (.dab: Defaults = { Settings = AIS_Als_Default; })
+// ALS reads Character->GetSettings()->TeleportDistanceThreshold (AI:162-164).  A peer input cannot reach into the settings of the peer
+// in the generated C++ (language gap, als-dal-rewrite.md section 7, A3), so the value is a parameter of its own; its default is CS_Als_Default's.
+param TeleportDistanceThreshold: float = 50.0;
+peer Character: AlsCharacter;                                             // AI.h:43
+
+// ---- what NativeUpdateAnimation copies from the character (AI:140-146, :381-385, :688-718, :162-164) ----------------------------------
+input CharacterViewMode: AlsViewMode <- Character.ViewMode;
+input CharacterLocomotionMode: AlsLocomotionMode <- Character.LocomotionMode;
+input CharacterRotationMode: AlsRotationMode <- Character.RotationMode;
+input CharacterStance: AlsStance <- Character.Stance;
+input CharacterGait: AlsGait <- Character.Gait;
+input CharacterOverlayMode: AlsOverlayMode <- Character.OverlayMode;
+input CharacterLocomotionAction: AlsLocomotionAction <- Character.LocomotionAction;
+input CharacterLocomotion: AlsLocomotionState <- Character.LocomotionState;         // Character->GetLocomotionState()
+input CharacterView: AlsViewState <- Character.ViewState;                           // Character->GetViewState()
+input CharacterRagdollingVelocity: vec3 <- Character.RagdollingState.Velocity;      // Character->GetRagdollingState().Velocity (AI:2061)
+
+// ---- host reads (game thread, sampled at the start of update) --------------------------------------------------------------------
+input ActorLocation: vec3 <- host.actor_location;                         // AI:745   Proxy.GetActorTransform()
+input ActorRotation: quat <- host.actor_rotation;                         // AI:747
+input ActorScale: float <- host.actor_scale;                              // AI:784   (ALS: the mesh component's scale Z)
+input CapsuleRadius: float <- host.capsule_radius;                        // AI:788
+input CapsuleHalfHeight: float <- host.capsule_half_height;               // AI:789
+input MovementMaxAcceleration: float <- host.max_acceleration;            // AI:709   CMC->GetMaxAcceleration()
+input MovementMaxBrakingDeceleration: float <- host.max_braking_deceleration;   // AI:710
+input MovementWalkableFloorZ: float <- host.walkable_floor_z;             // AI:711
+input ActorReady: bool <- host.actor_ready;                               // AI:227   Character->HasActorRegisteredAllComponents()
+input WorldTime: float <- host.time;                                      // AI:379   GetWorld()->GetTimeSeconds()
+
+// ---- animation curves of the previous evaluation (GetCurveValue; AI:288-375 read the same map, 0 when a curve is missing) ----------
+input CurveLayerHead: float <- host.anim_curve("LayerHead");                                          // UAlsConstants::Layer*CurveName
+input CurveLayerHeadAdditive: float <- host.anim_curve("LayerHeadAdditive");
+input CurveLayerHeadSlot: float <- host.anim_curve("LayerHeadSlot");
+input CurveLayerArmLeft: float <- host.anim_curve("LayerArmLeft");
+input CurveLayerArmLeftAdditive: float <- host.anim_curve("LayerArmLeftAdditive");
+input CurveLayerArmLeftLocalSpace: float <- host.anim_curve("LayerArmLeftLocalSpace");
+input CurveLayerArmLeftSlot: float <- host.anim_curve("LayerArmLeftSlot");
+input CurveLayerArmRight: float <- host.anim_curve("LayerArmRight");
+input CurveLayerArmRightAdditive: float <- host.anim_curve("LayerArmRightAdditive");
+input CurveLayerArmRightLocalSpace: float <- host.anim_curve("LayerArmRightLocalSpace");
+input CurveLayerArmRightSlot: float <- host.anim_curve("LayerArmRightSlot");
+input CurveLayerHandLeft: float <- host.anim_curve("LayerHandLeft");
+input CurveLayerHandRight: float <- host.anim_curve("LayerHandRight");
+input CurveLayerSpine: float <- host.anim_curve("LayerSpine");
+input CurveLayerSpineAdditive: float <- host.anim_curve("LayerSpineAdditive");
+input CurveLayerSpineSlot: float <- host.anim_curve("LayerSpineSlot");
+input CurveLayerPelvis: float <- host.anim_curve("LayerPelvis");
+input CurveLayerPelvisSlot: float <- host.anim_curve("LayerPelvisSlot");
+input CurveLayerLegs: float <- host.anim_curve("LayerLegs");
+input CurveLayerLegsSlot: float <- host.anim_curve("LayerLegsSlot");
+input CurvePoseGait: float <- host.anim_curve("PoseGait");
+input CurvePoseMoving: float <- host.anim_curve("PoseMoving");
+input CurvePoseStanding: float <- host.anim_curve("PoseStanding");
+input CurvePoseCrouching: float <- host.anim_curve("PoseCrouching");
+input CurvePoseGrounded: float <- host.anim_curve("PoseGrounded");
+input CurvePoseInAir: float <- host.anim_curve("PoseInAir");
+input CurvePoseAiming: float <- host.anim_curve("PoseAiming");
+input CurveViewBlock: float <- host.anim_curve("ViewBlock");
+input CurveHipsDirectionLock: float <- host.anim_curve("HipsDirectionLock");
+input CurveSprintBlock: float <- host.anim_curve("SprintBlock");
+input CurveGroundPredictionBlock: float <- host.anim_curve("GroundPredictionBlock");
+input CurveAllowTransitions: float <- host.anim_curve("AllowTransitions");
+input CurveFootPlanted: float <- host.anim_curve("FootPlanted");
+input CurveFeetCrossing: float <- host.anim_curve("FeetCrossing");
+
+// ---- state: the names and types a .dab reads (AI.h:67-143) ---------------------------------------------------------------------------
+state ViewMode: AlsViewMode = AlsViewMode.ThirdPerson;
+state LocomotionMode: AlsLocomotionMode = AlsLocomotionMode.Grounded;
+state RotationMode: AlsRotationMode = AlsRotationMode.ViewDirection;
+state Stance: AlsStance = AlsStance.Standing;
+state Gait: AlsGait = AlsGait.Walking;
+state OverlayMode: AlsOverlayMode = AlsOverlayMode.Default;
+state LocomotionAction: AlsLocomotionAction;
+state GroundedEntryMode: AlsGroundedEntryMode;
+state MovementBase: AlsMovementBaseState;
+state LayeringState: AlsLayeringState;
+state PoseState: AlsPoseState;
+state ViewState: AlsViewAnimationState;
+state SpineState: AlsSpineState;
+state HeadState: AlsHeadState;
+state LocomotionState: AlsLocomotionAnimationState;
+state LeanState: AlsLeanState;
+state GroundedState: AlsGroundedState;
+state StandingState: AlsStandingState;
+state CrouchingState: AlsCrouchingState;
+state InAirState: AlsInAirState;
+state FeetState: AlsFeetState;
+state TransitionsState: AlsTransitionsState;
+state DynamicTransitionsState: AlsDynamicTransitionsState;
+state RotateInPlaceState: AlsRotateInPlaceState;
+state TurnInPlaceState: AlsTurnInPlaceState;
+state RagdollingState: AlsRagdollingAnimationState;
+
+// Indicates that the animation instance has not been updated in a long time, so its current state may not be correct (AI.h:48).
+state bPendingUpdate: bool = true;
+state DeltaTimeWithoutTimeDilation: float = 1.0;                          // AI.h:51
+state TeleportedTime: float;                                              // AI.h:58   (read by the foot lock: M2)
+
+// ---- the entry points the graph calls --------------------------------------------------------------------------------------------------
+// (the 17 `linked` entries are the forwarders of UAlsLinkedAnimationInstance, LI:58-192; the rest are called as Main.X(...) on this instance)
+
+update(dt) {
+    // ---- NativeUpdateAnimation, the game thread half (AI:98-168) ----
+    // (AI:111-134 -- time dilation and the absolute mesh rotation of URO -- have no host reads / no Blender counterpart: als-dal-rewrite.md section 7, A3)
+    DeltaTimeWithoutTimeDilation = dt;
+
+    ViewMode = CharacterViewMode;                                          // AI:140
+    LocomotionMode = CharacterLocomotionMode;
+    RotationMode = CharacterRotationMode;
+    Stance = CharacterStance;
+    Gait = CharacterGait;
+    OverlayMode = CharacterOverlayMode;                                    // AI:145
+    if (LocomotionAction != CharacterLocomotionAction) {                   // AI:147-151
+        LocomotionAction = CharacterLocomotionAction;
+        GroundedEntryMode = AlsGroundedEntryMode.None;                     // ResetGroundedEntryMode()
+    }
+
+    let previous_location = LocomotionState.LocationWorldSpace;            // AI:153
+    refresh_movement_base_on_game_thread();                                // AI:155
+    refresh_view_on_game_thread();                                         // AI:156
+    refresh_locomotion_on_game_thread(dt);                                 // AI:157
+    refresh_in_air_on_game_thread();                                       // AI:158
+    refresh_feet_on_game_thread();                                         // AI:159  (M2)
+    refresh_ragdolling_on_game_thread();                                   // AI:160  (M2)
+
+    if (!bPendingUpdate && length_sq(LocomotionState.LocationWorldSpace - previous_location) > square(TeleportDistanceThreshold)) {
+        mark_teleported();                                                 // AI:162-167
+    }
+
+    // ---- NativeThreadSafeUpdateAnimation, the worker thread half (AI:170-192) ----
+    DynamicTransitionsState.bUpdatedThisFrame = false;                     // AI:183-185
+    RotateInPlaceState.bUpdatedThisFrame = false;
+    TurnInPlaceState.bUpdatedThisFrame = false;
+
+    refresh_layering();                                                    // AI:187
+    refresh_pose();                                                        // AI:188
+    refresh_view(dt);                                                      // AI:189
+    refresh_feet(dt);                                                      // AI:190  (M2)
+    refresh_transitions();                                                 // AI:191
+}
+
+// NativePostUpdateAnimation (AI:194-228), run by FAlsAnimationInstanceProxy::PostUpdate (AlsAnimationInstanceProxy.cpp:9) on the game
+// thread after the graph update (so after the entries the graph called): the montages queued by the entries start here.
+post_update {
+    play_queued_transition_animation();                                    // AI:208
+    play_queued_turn_in_place_animation();                                 // AI:209
+    stop_queued_transition_and_turn_in_place_animations();                 // AI:210
+    // Reset bPendingUpdate only when all components have been registered to ensure that all data the animation instance
+    // depends on is up to date (AI:224-227).
+    bPendingUpdate = !ActorReady;
+}
+
+// ---- calls from the character / the notifies (the public C++ functions of AlsAnimationInstance.h) -------------------------------
+
+pub method Jump() {                                                        // AI.h:402 (called from AAlsCharacter::OnJumped, C:1473)
+    InAirState.bJumpRequested = true;
+}
+
+pub method MarkTeleported() {                                              // AI.h:377 (called from AAlsCharacter::TransformUpdated, C:153)
+    mark_teleported();
+}
+
+method mark_teleported() {
+    TeleportedTime = WorldTime;
+}
+
+pub method SetGroundedEntryMode(NewGroundedEntryMode: AlsGroundedEntryMode) {   // AI.h:382 (the AlsAnimNotify_SetGroundedEntryMode notify, M2/L9)
+    GroundedEntryMode = NewGroundedEntryMode;
+}
+
+// ---- movement base (AI:259-286) -------------------------------------------------------------------------------------------------
+method refresh_movement_base_on_game_thread() {
+    // No moving bases in Blender (c3 has none, als-dal-rewrite.md G27): MovementBase keeps its defaults, bHasRelativeLocation is
+    // false, so every `if (MovementBase.bHasRelativeRotation)` branch of the ALS functions below is dead and left out.
+}
+
+// ---- layering and pose from the animation curves (AI:288-375) ------------------------------------------------------------------------
+method refresh_layering() {
+    LayeringState.HeadBlendAmount = CurveLayerHead;                                                  // AI:303
+    LayeringState.HeadAdditiveBlendAmount = CurveLayerHeadAdditive;
+    LayeringState.HeadSlotBlendAmount = CurveLayerHeadSlot;
+
+    // The mesh space blend will always be 1 unless the local space blend is 1.
+    LayeringState.ArmLeftBlendAmount = CurveLayerArmLeft;                                            // AI:309
+    LayeringState.ArmLeftAdditiveBlendAmount = CurveLayerArmLeftAdditive;
+    LayeringState.ArmLeftSlotBlendAmount = CurveLayerArmLeftSlot;
+    LayeringState.ArmLeftLocalSpaceBlendAmount = CurveLayerArmLeftLocalSpace;
+    LayeringState.ArmLeftMeshSpaceBlendAmount = is_full_weight(LayeringState.ArmLeftLocalSpaceBlendAmount) ? 0.0 : 1.0;   // !IsFullWeight
+
+    LayeringState.ArmRightBlendAmount = CurveLayerArmRight;                                          // AI:317
+    LayeringState.ArmRightAdditiveBlendAmount = CurveLayerArmRightAdditive;
+    LayeringState.ArmRightSlotBlendAmount = CurveLayerArmRightSlot;
+    LayeringState.ArmRightLocalSpaceBlendAmount = CurveLayerArmRightLocalSpace;
+    LayeringState.ArmRightMeshSpaceBlendAmount = is_full_weight(LayeringState.ArmRightLocalSpaceBlendAmount) ? 0.0 : 1.0;
+
+    LayeringState.HandLeftBlendAmount = CurveLayerHandLeft;                                          // AI:323
+    LayeringState.HandRightBlendAmount = CurveLayerHandRight;
+
+    LayeringState.SpineBlendAmount = CurveLayerSpine;                                                // AI:326
+    LayeringState.SpineAdditiveBlendAmount = CurveLayerSpineAdditive;
+    LayeringState.SpineSlotBlendAmount = CurveLayerSpineSlot;
+
+    LayeringState.PelvisBlendAmount = CurveLayerPelvis;                                              // AI:330
+    LayeringState.PelvisSlotBlendAmount = CurveLayerPelvisSlot;
+
+    LayeringState.LegsBlendAmount = CurveLayerLegs;                                                  // AI:333
+    LayeringState.LegsSlotBlendAmount = CurveLayerLegsSlot;
+}
+
+method refresh_pose() {
+    PoseState.GroundedAmount = CurvePoseGrounded;                                                    // AI:352
+    PoseState.InAirAmount = CurvePoseInAir;
+
+    PoseState.StandingAmount = CurvePoseStanding;                                                    // AI:355
+    PoseState.CrouchingAmount = CurvePoseCrouching;
+
+    PoseState.MovingAmount = CurvePoseMoving;                                                        // AI:358
+
+    PoseState.GaitAmount = clamp(CurvePoseGait, 0.0, 3.0);                                           // AI:360
+    PoseState.GaitWalkingAmount = clamp01(PoseState.GaitAmount);
+    PoseState.GaitRunningAmount = clamp01(PoseState.GaitAmount - 1.0);
+    PoseState.GaitSprintingAmount = clamp01(PoseState.GaitAmount - 2.0);
+
+    // Use the grounded pose curve value to "unweight" the gait pose curve. This is used to instantly get the full gait value from
+    // the very beginning of transitions to grounded states.
+    PoseState.UnweightedGaitAmount = PoseState.GroundedAmount > SMALL_NUMBER
+                                         ? PoseState.GaitAmount / PoseState.GroundedAmount                // AI:368
+                                         : PoseState.GaitAmount;
+
+    PoseState.UnweightedGaitWalkingAmount = clamp01(PoseState.UnweightedGaitAmount);                 // AI:372
+    PoseState.UnweightedGaitRunningAmount = clamp01(PoseState.UnweightedGaitAmount - 1.0);
+    PoseState.UnweightedGaitSprintingAmount = clamp01(PoseState.UnweightedGaitAmount - 2.0);
+}
+
+// ---- view (AI:377-406) ---------------------------------------------------------------------------------------------------------------
+method refresh_view_on_game_thread() {
+    ViewState.RotationWorldSpace = CharacterView.Rotation;                                           // AI:383
+    ViewState.YawSpeed = CharacterView.YawSpeed;                                                     // AI:384
+}
+
+method refresh_view(dt: float) {
+    if (!valid(LocomotionAction)) {                                                                  // AI:389
+        ViewState.YawAngle = unwind_degrees(ViewState.RotationWorldSpace.yaw - LocomotionState.RotationWorldSpace.yaw);
+        ViewState.PitchAngle = unwind_degrees(ViewState.RotationWorldSpace.pitch - LocomotionState.RotationWorldSpace.pitch);
+        ViewState.PitchAmount = 0.5 - ViewState.PitchAngle / 180.0;                                  // AI:397
+    }
+
+    let view_amount = 1.0 - clamp01(CurveViewBlock);                                                 // AI:400
+    let aiming_amount = clamp01(CurvePoseAiming);                                                    // AI:401
+
+    ViewState.HeadBlendAmount = view_amount * (1.0 - aiming_amount);                                 // AI:403
+
+    refresh_spine(view_amount * aiming_amount, dt);                                                  // AI:405
+}
+
+// ---- spine (AI:408-521) --------------------------------------------------------------------------------------------------------------
+view is_spine_rotation_allowed() -> bool {                                                           // AI:408 (virtual in ALS: the extension point)
+    return RotationMode == AlsRotationMode.Aiming || ViewMode == AlsViewMode.FirstPerson;
+}
+
+method refresh_spine(spine_blend_amount: float, dt: float) {
+    if (SpineState.bSpineRotationAllowed != is_spine_rotation_allowed()) {                           // AI:415
+        SpineState.bSpineRotationAllowed = !SpineState.bSpineRotationAllowed;
+
+        if (SpineState.bSpineRotationAllowed) {
+            // Remap SpineAmount from the [SpineAmount, 1] range to [0, 1] so that lerp between new LastYawAngle and
+            // ViewState.YawAngle with an alpha equal to SpineAmount still results in CurrentYawAngle.
+            if (is_full_weight(SpineState.SpineAmount)) {                                            // AI:424
+                SpineState.SpineAmountScale = 1.0;
+                SpineState.SpineAmountBias = 0.0;
+            } else {
+                SpineState.SpineAmountScale = 1.0 / (1.0 - SpineState.SpineAmount);                  // AI:431 (the divisor is above the weight epsilon here)
+                SpineState.SpineAmountBias = -SpineState.SpineAmount * SpineState.SpineAmountScale;
+            }
+        } else {
+            // Remap SpineAmount from the [0, SpineAmount] range to [0, 1] so that lerp between 0 and LastYawAngle with an alpha
+            // equal to SpineAmount still results in CurrentYawAngle.
+            SpineState.SpineAmountScale = !is_relevant(SpineState.SpineAmount) ? 1.0 : 1.0 / SpineState.SpineAmount;   // AI:440
+            SpineState.SpineAmountBias = 0.0;
+        }
+
+        SpineState.LastYawAngle = SpineState.YawAngle;                                               // AI:447
+        SpineState.LastYawAngleWorldSpace = LocomotionState.RotationWorldSpace.yaw;
+    }
+
+    if (SpineState.bSpineRotationAllowed) {                                                          // AI:451
+        if (bPendingUpdate || is_full_weight(SpineState.SpineAmount)) {
+            SpineState.SpineAmount = 1.0;
+            SpineState.YawAngle = ViewState.YawAngle;
+        } else {
+            let interpolation_half_life = 0.1;                                                       // AI:460
+            SpineState.SpineAmount = damper_exact(SpineState.SpineAmount, 1.0, dt, interpolation_half_life);
+            SpineState.YawAngle = lerp_angle(SpineState.LastYawAngle, ViewState.YawAngle,
+                                             SpineState.SpineAmount * SpineState.SpineAmountScale + SpineState.SpineAmountBias);   // AI:464
+        }
+    } else {                                                                                         // AI:469
+        if (bPendingUpdate || !is_relevant(SpineState.SpineAmount)) {
+            SpineState.SpineAmount = 0.0;
+            SpineState.YawAngle = 0.0;
+        } else {
+            let interpolation_half_life = 0.7;                                                       // AI:478
+            let reference_view_yaw_speed = 40.0;                                                     // AI:479
+
+            // Decrease the interpolation half life when the camera rotates quickly, otherwise the spine rotation may lag
+            // too much behind the character's rotation.
+            let interpolation_half_life_multiplier = ViewState.YawSpeed > reference_view_yaw_speed
+                                                         ? reference_view_yaw_speed / ViewState.YawSpeed           // AI:484
+                                                         : 1.0;
+
+            SpineState.SpineAmount = damper_exact(SpineState.SpineAmount, 0.0, dt,
+                                                  interpolation_half_life * interpolation_half_life_multiplier);   // AI:490
+
+            // (AI:493-498, the moving base offset of LastYawAngleWorldSpace, is dead without moving bases.)
+
+            // Offset the spine rotation to keep it unchanged in world space. This will result in smoother spine rotation when
+            // aiming stops.  Keep the offset within 30 degrees; otherwise, the spine rotation may lag too far behind the
+            // character rotation.
+            let max_yaw_angle_offset = 30.0;                                                         // AI:508
+            let yaw_angle_offset = clamp(unwind_degrees(SpineState.LastYawAngleWorldSpace - LocomotionState.RotationWorldSpace.yaw),
+                                         -max_yaw_angle_offset, max_yaw_angle_offset);               // AI:502-509
+
+            SpineState.LastYawAngleWorldSpace = unwind_degrees(yaw_angle_offset + LocomotionState.RotationWorldSpace.yaw);   // AI:511
+
+            SpineState.YawAngle = lerp_angle(0.0, SpineState.LastYawAngle + yaw_angle_offset,
+                                             SpineState.SpineAmount * SpineState.SpineAmountScale + SpineState.SpineAmountBias);   // AI:514
+        }
+    }
+
+    SpineState.FinalYawAngle = lerp_angle(0.0, SpineState.YawAngle, spine_blend_amount);             // AI:520
+}
+
+// ---- head (AI:523-679) ---------------------------------------------------------------------------------------------------------------
+entry InitializeHead() linked {                                                                    // AI:523  (.dab: Call(Self.InitializeHead, On = BecomeRelevant))
+    HeadState.bInitializationRequired = true;
+}
+
+entry RefreshHead(dt) linked {                                                                       // AI:528  (.dab: Call(Self.RefreshHead))
+    let first_person = ViewMode == AlsViewMode.FirstPerson;                                          // AI:546
+
+    // (AI:548-552, the moving base offset, is dead without moving bases.)
+
+    // Offset the angle to make it independent of character rotation.
+    HeadState.YawAngle -= LocomotionState.YawVelocityWorldSpace * dt;                                // AI:555
+
+    // Clamp the angle instead of using unwind_degrees() so that the head does not suddenly change the look side.
+    HeadState.YawAngle = clamp(HeadState.YawAngle, -180.0, 180.0);                                   // AI:558
+
+    var target_pitch_angle = 0.0;
+    var target_yaw_angle = 0.0;
+    var ready_to_switch_look_sides = false;
+
+    if (RotationMode == AlsRotationMode.VelocityDirection) {                                         // AI:564
+        // Look towards input direction.
+        target_pitch_angle = 0.0;                                                                    // AI:568
+
+        target_yaw_angle = unwind_degrees((LocomotionState.bHasInput ? LocomotionState.InputYawAngleWorldSpace
+                                                                     : LocomotionState.TargetYawAngleWorldSpace)
+                                          - LocomotionState.RotationWorldSpace.yaw);                // AI:570
+
+        let locomotion_yaw_speed_threshold = 20.0;                                                   // AI:574
+
+        if (abs(LocomotionState.YawVelocityWorldSpace) > locomotion_yaw_speed_threshold) {           // AI:576
+            // Favor the character rotation direction, over the shortest rotation direction, so that the rotation of the
+            // head remains synchronized with the rotation of the body.
+            target_yaw_angle = sign(LocomotionState.YawVelocityWorldSpace) * abs(target_yaw_angle);  // AI:581
+        } else if (abs(target_yaw_angle) > 180.0 - CounterClockwiseRotationAngleThreshold) {     // AI:583
+            // Do not rotate the head if the character is going to turn 180 degrees, or it may start rotating in the wrong direction.
+            target_yaw_angle = HeadState.YawAngle;                                                   // AI:586
+        }
+
+        HeadState.bSwitchingLookSides = false;                                                       // AI:589
+    } else {
+        // Look towards view direction.
+        target_pitch_angle = ViewState.PitchAngle;                                                   // AI:595
+        target_yaw_angle = ViewState.YawAngle;
+
+        // Keep the target angle in the [-175, 175] range, as the character often tends to break his neck when the target
+        // angle is close to 180 degrees.
+        target_yaw_angle = clamp(target_yaw_angle, -180.0 + CounterClockwiseRotationAngleThreshold,
+                                 180.0 - CounterClockwiseRotationAngleThreshold);                // AI:601
+
+        if (!first_person) {                                                                         // AI:605
+            let switch_sides_current_yaw_angle_threshold = 90.0;                                     // AI:607
+            let switch_sides_target_yaw_angle_threshold = 160.0;                                     // AI:608
+
+            if (HeadState.YawAngle >= switch_sides_current_yaw_angle_threshold
+                && target_yaw_angle <= -switch_sides_target_yaw_angle_threshold) {                   // AI:610
+                // Keep the target angle at 175 degrees if the character is looking at an angle greater than 90 degrees, and the
+                // target angle less than -160 degrees to prevent the character from switching look sides too often.
+                target_yaw_angle = 180.0 - CounterClockwiseRotationAngleThreshold;               // AI:616
+                ready_to_switch_look_sides = !LocomotionState.bHasInput;
+            } else if (HeadState.YawAngle <= -switch_sides_current_yaw_angle_threshold
+                       && target_yaw_angle >= switch_sides_target_yaw_angle_threshold) {             // AI:619
+                target_yaw_angle = -180.0 + CounterClockwiseRotationAngleThreshold;              // AI:622
+                ready_to_switch_look_sides = !LocomotionState.bHasInput;
+            }
+        }
+    }
+
+    if (HeadState.bInitializationRequired) {                                                         // AI:628
+        HeadState.bInitializationRequired = false;
+
+        HeadState.PitchAngle = target_pitch_angle;
+        HeadState.YawAngle = target_yaw_angle;
+        HeadState.YawVelocity = 0.0;
+        HeadState.bSwitchingLookSides = false;
+    } else {
+        // Use real-time delta time in first-person mode. Otherwise, if slow motion is active and the player quickly rotates the
+        // camera, it may intersect the skeletal mesh.
+        let effective_delta_time = first_person ? DeltaTimeWithoutTimeDilation : dt;                 // AI:642
+
+        HeadState.PitchAngle = damper_exact_angle(HeadState.PitchAngle, target_pitch_angle, effective_delta_time,
+                                                  first_person ? Settings.Head.FirstPersonPitchAngleInterpolationHalfLife
+                                                               : Settings.Head.PitchAngleInterpolationHalfLife);   // AI:644
+
+        if (ready_to_switch_look_sides) {                                                            // AI:649
+            HeadState.bSwitchingLookSides = true;
+        } else {
+            let delta_yaw_angle = unwind_degrees(target_yaw_angle - HeadState.YawAngle);             // AI:655
+            if (abs(delta_yaw_angle) <= 10.0) {
+                // Consider the switching completed if the current angle is close to the target.
+                HeadState.bSwitchingLookSides = false;                                               // AI:659
+            }
+        }
+
+        // Use the exact critical spring damper as it provides smooth head rotation. Use a different smoothing time when switching
+        // sides for even smoother head rotation.  https://theorangeduck.com/page/spring-roll-call#critical
+        let smoothing_time = half_life_to_smoothing_time(HeadState.bSwitchingLookSides
+                                                             ? Settings.Head.SwitchLookSidesYawAngleInterpolationHalfLife
+                                                             : first_person ? Settings.Head.FirstPersonYawAngleInterpolationHalfLife
+                                                                            : Settings.Head.YawAngleInterpolationHalfLife);   // AI:667
+
+        let head_yaw = critical_spring_damper(HeadState.YawAngle, HeadState.YawVelocity, target_yaw_angle, smoothing_time, dt);   // AI:675
+        HeadState.YawAngle = head_yaw.value;
+        HeadState.YawVelocity = head_yaw.velocity;
+    }
+
+    HeadState.YawAmount = HeadState.YawAngle / 360.0 + 0.5;                                          // AI:678
+}
+
+// ---- locomotion (AI:681-796) ---------------------------------------------------------------------------------------------------------
+method refresh_locomotion_on_game_thread(dt: float) {
+    let can_calculate_rate_of_change = !bPendingUpdate && dt > SMALL_NUMBER;                         // AI:686
+
+    LocomotionState.bHasInput = CharacterLocomotion.bHasInput;                                       // AI:690
+    LocomotionState.InputYawAngleWorldSpace = CharacterLocomotion.InputYawAngle;
+
+    let previous_velocity = LocomotionState.VelocityWorldSpace;                                      // AI:693 (no moving base: not rotated)
+
+    LocomotionState.Speed = CharacterLocomotion.Speed;                                               // AI:699
+    LocomotionState.VelocityWorldSpace = CharacterLocomotion.Velocity;
+    LocomotionState.VelocityYawAngleWorldSpace = CharacterLocomotion.VelocityYawAngle;
+
+    // The acceleration is not the character's: it is the change of the velocity since the previous animation update.
+    LocomotionState.AccelerationWorldSpace = can_calculate_rate_of_change
+                                                 ? (LocomotionState.VelocityWorldSpace - previous_velocity) / dt     // AI:703
+                                                 : VEC3_ZERO;
+
+    LocomotionState.MaxAcceleration = MovementMaxAcceleration;                                       // AI:709
+    LocomotionState.MaxBrakingDeceleration = MovementMaxBrakingDeceleration;
+    LocomotionState.WalkableFloorAngleCos = MovementWalkableFloorZ;                                  // AI:711
+
+    LocomotionState.bMoving = CharacterLocomotion.bMoving;                                           // AI:713
+
+    LocomotionState.bMovingSmooth = (CharacterLocomotion.bHasInput && CharacterLocomotion.bHasVelocity)
+                                    || CharacterLocomotion.Speed > Settings.General.MovingSmoothSpeedThreshold;   // AI:715
+
+    LocomotionState.TargetYawAngleWorldSpace = CharacterLocomotion.TargetYawAngle;                   // AI:718
+
+    let previous_yaw_angle = LocomotionState.RotationWorldSpace.yaw;                                 // AI:720
+
+    // (AI:732-777: with network smoothing off -- the only case without a network -- the transform is the actor transform.)
+    LocomotionState.LocationWorldSpace = ActorLocation;                                              // AI:745
+    LocomotionState.RotationWorldSpace = to_rotator(ActorRotation);                                  // AI:746
+    LocomotionState.RotationQuaternionWorldSpace = ActorRotation;                                    // AI:747
+
+    LocomotionState.YawVelocityWorldSpace = can_calculate_rate_of_change
+                                                ? unwind_degrees(LocomotionState.RotationWorldSpace.yaw - previous_yaw_angle) / dt   // AI:779
+                                                : 0.0;
+
+    LocomotionState.ScaleWorldSpace = ActorScale;                                                    // AI:784
+    LocomotionState.CapsuleRadius = CapsuleRadius;                                                   // AI:788
+    LocomotionState.CapsuleHalfHeight = CapsuleHalfHeight;
+}
+
+entry InitializeLean() linked {                                                                    // AI:792  (.dab: Call(Self.InitializeLean, On = BecomeRelevant))
+    LeanState.RightAmount = 0.0;
+    LeanState.ForwardAmount = 0.0;
+}
+
+// ---- grounded (AI:798-1097) -----------------------------------------------------------------------------------------------------------
+entry ResetGroundedEntryMode() linked {                                                            // AI.h:387
+    GroundedEntryMode = AlsGroundedEntryMode.None;
+}
+
+entry InitializeGrounded() linked {                                                                // AI:798
+    GroundedState.VelocityBlend.bInitializationRequired = true;
+}
+
+entry RefreshGrounded(dt) linked {                                                                   // AI:803  (.dab: Call(Self.RefreshGrounded))
+    refresh_velocity_blend(dt);                                                                      // AI:820
+    refresh_grounded_lean(dt);                                                                       // AI:821
+}
+
+// The velocity in the character's space (ALS: GetVelocity(), AI:824).
+view local_velocity() -> vec3 {
+    return unrotate(LocomotionState.RotationQuaternionWorldSpace, LocomotionState.VelocityWorldSpace);
+}
+
+// This value represents the current acceleration / deceleration. It is normalized to a range of -1 to 1, where -1 equals max braking
+// deceleration and 1 equals max acceleration from the character movement component (AI:829-848).
+view acceleration_amount() -> vec2 {
+    let max_acceleration = dot(LocomotionState.AccelerationWorldSpace, LocomotionState.VelocityWorldSpace) >= 0.0
+                               ? LocomotionState.MaxAcceleration
+                               : LocomotionState.MaxBrakingDeceleration;                              // AI:834
+
+    if (max_acceleration <= KINDA_SMALL_NUMBER) {                                                    // AI:840
+        return VEC2_ZERO;
+    }
+
+    let acceleration = unrotate(LocomotionState.RotationQuaternionWorldSpace, LocomotionState.AccelerationWorldSpace);   // AI:845
+    return clamp_magnitude01(acceleration / max_acceleration).xy;                                    // AI:847
+}
+
+method refresh_velocity_blend(dt: float) {                                                           // AI:850
+    // Calculate and interpolate the velocity blend amounts. This value represents the velocity amount of the character in each
+    // direction (normalized so that diagonals equal 0.5 for each direction) and is used in a blend multi node to produce better
+    // directional blending than a standard blend space.
+    var target_velocity_blend = VEC3_ZERO;                                                           // AI:859
+    let velocity = local_velocity();                                                                 // AI:858
+    if (length_sq(velocity) > SMALL_NUMBER) {                                                        // FVector3f::Normalize() (AI:861) fails at or below SMALL_NUMBER
+        let direction = normalize(velocity);
+        target_velocity_blend = direction / (abs(direction.x) + abs(direction.y) + abs(direction.z));   // AI:863 (the sum is >= 1 after normalizing)
+    }
+
+    let target_forward = clamp01(target_velocity_blend.x);                                           // AI:871
+    let target_backward = abs(clamp(target_velocity_blend.x, -1.0, 0.0));                            // AI:872
+    let target_left = abs(clamp(target_velocity_blend.y, -1.0, 0.0));                                // AI:873
+    let target_right = clamp01(target_velocity_blend.y);                                             // AI:874
+
+    if (GroundedState.VelocityBlend.bInitializationRequired || Settings.Grounded.VelocityBlendInterpolationHalfLife <= 0.0) {   // AI:867
+        GroundedState.VelocityBlend.bInitializationRequired = false;
+
+        GroundedState.VelocityBlend.ForwardAmount = target_forward;
+        GroundedState.VelocityBlend.BackwardAmount = target_backward;
+        GroundedState.VelocityBlend.LeftAmount = target_left;
+        GroundedState.VelocityBlend.RightAmount = target_right;
+    } else {
+        // We use damper_exact_alpha() instead of an interp_to(), because it is very sensitive to large delta time, at low FPS
+        // interpolation becomes almost instant which causes issues with character pose during the stop.
+        let interpolation_amount = damper_exact_alpha(dt, Settings.Grounded.VelocityBlendInterpolationHalfLife);   // AI:881
+
+        GroundedState.VelocityBlend.ForwardAmount = lerp(GroundedState.VelocityBlend.ForwardAmount, target_forward, interpolation_amount);   // AI:885
+        GroundedState.VelocityBlend.BackwardAmount = lerp(GroundedState.VelocityBlend.BackwardAmount, target_backward, interpolation_amount);
+        GroundedState.VelocityBlend.LeftAmount = lerp(GroundedState.VelocityBlend.LeftAmount, target_left, interpolation_amount);
+        GroundedState.VelocityBlend.RightAmount = lerp(GroundedState.VelocityBlend.RightAmount, target_right, interpolation_amount);
+    }
+}
+
+method refresh_grounded_lean(dt: float) {                                                            // AI:903
+    let target_lean_amount = acceleration_amount();                                                  // AI:905
+
+    if (bPendingUpdate || Settings.General.LeanInterpolationHalfLife <= 0.0) {                       // AI:907
+        LeanState.RightAmount = target_lean_amount.y;
+        LeanState.ForwardAmount = target_lean_amount.x;
+    } else {
+        let interpolation_amount = damper_exact_alpha(dt, Settings.General.LeanInterpolationHalfLife);   // AI:914
+
+        LeanState.RightAmount = lerp(LeanState.RightAmount, target_lean_amount.y, interpolation_amount);   // AI:916
+        LeanState.ForwardAmount = lerp(LeanState.ForwardAmount, target_lean_amount.x, interpolation_amount);
+    }
+}
+
+entry RefreshGroundedMovement() linked {                                                           // AI:921  (.dab: Call(Self.RefreshGroundedMovement))
+    GroundedState.HipsDirectionLockAmount = clamp(CurveHipsDirectionLock, -1.0, 1.0);                // AI:939
+
+    let velocity_yaw_angle_view_space = unwind_degrees(LocomotionState.VelocityYawAngleWorldSpace - ViewState.RotationWorldSpace.yaw);   // AI:941
+
+    refresh_movement_direction(velocity_yaw_angle_view_space);                                       // AI:945
+    refresh_rotation_yaw_offsets(velocity_yaw_angle_view_space);                                     // AI:946
+}
+
+entry SetHipsDirection(NewHipsDirection: AlsHipsDirection = AlsHipsDirection.Forward) linked {  // AI.h:392 (.dab: Call(Self.SetHipsDirection, NewHipsDirection = LeftForward))
+    GroundedState.HipsDirection = NewHipsDirection;
+}
+
+method refresh_movement_direction(velocity_yaw_angle_view_space: float) {                            // AI:949
+    // Calculate the movement direction. This value represents the direction in which the character is moving relative to the camera
+    // in view direction and aiming rotation modes. It used in cycle blending to transition to the appropriate directional state.
+    if (RotationMode == AlsRotationMode.VelocityDirection || Gait == AlsGait.Sprinting) {            // AI:954
+        GroundedState.MovementDirection = movement_direction_cache(AlsMovementDirection.Forward);
+        return;
+    }
+
+    let forward_half_angle = 70.0;                                                                   // AI:960
+    let angle_threshold = 5.0;                                                                       // AI:961
+
+    GroundedState.MovementDirection = movement_direction_cache(
+        calculate_movement_direction(velocity_yaw_angle_view_space, forward_half_angle, angle_threshold));  // AI:963
+}
+
+method refresh_rotation_yaw_offsets(velocity_yaw_angle_view_space: float) {                          // AI:966
+    // Rotation yaw offsets influence the rotation yaw offset curve in the animation graph. It is used to offset the character's
+    // rotation, creating more natural movement. These curves enable precise control of the offset for each movement direction.
+    GroundedState.RotationYawOffsets.ForwardAngle = Settings.Grounded.RotationYawOffsetForwardCurve.eval(velocity_yaw_angle_view_space);     // AI:973
+    GroundedState.RotationYawOffsets.BackwardAngle = Settings.Grounded.RotationYawOffsetBackwardCurve.eval(velocity_yaw_angle_view_space);
+    GroundedState.RotationYawOffsets.LeftAngle = Settings.Grounded.RotationYawOffsetLeftCurve.eval(velocity_yaw_angle_view_space);
+    GroundedState.RotationYawOffsets.RightAngle = Settings.Grounded.RotationYawOffsetRightCurve.eval(velocity_yaw_angle_view_space);
+}
+
+entry InitializeStandingMovement() linked {                                                        // AI:979
+    StandingState.SprintTime = 0.0;
+    StandingState.bPivotActive = false;
+}
+
+entry RefreshStandingMovement(dt) linked {                                                           // AI:985  (.dab: Call(Self.RefreshStandingMovement))
+    let speed = LocomotionState.Speed / LocomotionState.ScaleWorldSpace;                             // AI:1003
+
+    // Calculate the stride blend amount. This value is used within the blend spaces to scale the stride (distance feet travel) so
+    // that the character can walk or run at different movement speeds. It also allows the walk or run gait animations to blend
+    // independently while still matching the animation speed to the movement speed, preventing the character from needing to play
+    // a half walk + half run blend. The curves are used to map the stride amount to the speed for maximum control.
+    StandingState.StrideBlendAmount = lerp(Settings.Standing.StrideBlendAmountWalkCurve.eval(speed),
+                                           Settings.Standing.StrideBlendAmountRunCurve.eval(speed),
+                                           PoseState.UnweightedGaitRunningAmount);                   // AI:1010
+
+    // Calculate the walk run blend amount. This value is used within the blend spaces to blend between walking and running.
+    StandingState.WalkRunBlendAmount = Gait == AlsGait.Walking ? 0.0 : 1.0;                          // AI:1016
+
+    // Calculate the standing play rate by dividing the character's speed by the animated speed for each gait. The interpolation is
+    // determined by the gait amount curve that exists on every locomotion cycle so that the play rate is always in sync with the
+    // currently blended animation. The value is also divided by the stride blend and the capsule scale so that the play rate
+    // increases as the stride or scale gets smaller.
+    let walk_run_speed_amount = lerp(speed / Settings.Standing.AnimatedWalkSpeed,
+                                     speed / Settings.Standing.AnimatedRunSpeed,
+                                     PoseState.UnweightedGaitRunningAmount);                         // AI:1025
+
+    let walk_run_sprint_speed_amount = lerp(walk_run_speed_amount,
+                                            speed / Settings.Standing.AnimatedSprintSpeed,
+                                            PoseState.UnweightedGaitSprintingAmount);                // AI:1031
+
+    // Do not let the play rate be exactly zero, otherwise animation notifies may start to be triggered every frame until the play
+    // rate is changed.  A zero stride blend amount divides by zero: in C++ that is +-inf (or NaN), which the clamp turns into the
+    // upper bound (the speed is never negative); DAL's division gives 0 there, so the C++ result is spelled out (decision 6).
+    StandingState.PlayRate = StandingState.StrideBlendAmount == 0.0
+                                 ? 3.0
+                                 : clamp(walk_run_sprint_speed_amount / StandingState.StrideBlendAmount, KINDA_SMALL_NUMBER, 3.0);   // AI:1041
+
+    StandingState.SprintBlockAmount = clamp01(CurveSprintBlock);                                     // AI:1043
+
+    if (Gait != AlsGait.Sprinting) {                                                                 // AI:1045
+        StandingState.SprintTime = 0.0;
+        StandingState.SprintAccelerationAmount = 0.0;
+        return;
+    }
+
+    // Set the sprint acceleration amount to zero if more than 0.5 seconds have elapsed since the start of the sprint. Otherwise,
+    // use the acceleration amount as the sprint acceleration amount. This ensures that the acceleration animation is applied only
+    // at the beginning of the sprint.
+    let sprint_time_threshold = 0.5;                                                                 // AI:1056
+
+    StandingState.SprintTime = bPendingUpdate ? sprint_time_threshold : StandingState.SprintTime + dt;   // AI:1058
+
+    StandingState.SprintAccelerationAmount = StandingState.SprintTime >= sprint_time_threshold
+                                                 ? 0.0
+                                                 : acceleration_amount().x;                          // AI:1062
+}
+
+entry ActivatePivot() {                                                                            // AI:1067  (.dab: ActivatePivot = Main.ActivatePivot())
+    StandingState.bPivotActive = LocomotionState.Speed < Settings.Standing.PivotActivationSpeedThreshold;
+}
+
+entry ResetPivot() linked {                                                                        // AI.h:397
+    StandingState.bPivotActive = false;
+}
+
+entry RefreshCrouchingMovement() linked {                                                          // AI:1072  (.dab: Call(Self.RefreshCrouchingMovement))
+    let speed = LocomotionState.Speed / LocomotionState.ScaleWorldSpace;                             // AI:1090
+
+    CrouchingState.StrideBlendAmount = Settings.Crouching.StrideBlendAmountCurve.eval(speed);        // AI:1092
+
+    // The same zero divisor as in RefreshStandingMovement: +-inf / NaN clamp to the upper bound in C++.
+    let animated_speed = Settings.Crouching.AnimatedCrouchSpeed * CrouchingState.StrideBlendAmount;
+    CrouchingState.PlayRate = animated_speed == 0.0
+                                  ? 2.0
+                                  : clamp(speed / animated_speed, KINDA_SMALL_NUMBER, 2.0);          // AI:1094
+}
+
+// ---- in air (AI:1099-1243; the ground prediction sweep is M2) ---------------------------------------------------------------------------
+method refresh_in_air_on_game_thread() {                                                             // AI:1099
+    InAirState.bJumped = !bPendingUpdate && (InAirState.bJumped || InAirState.bJumpRequested);       // AI:1103
+    InAirState.bJumpRequested = false;
+}
+
+entry RefreshInAir(dt) linked {                                                                      // AI:1107  (.dab: Call(Self.RefreshInAir))
+    if (InAirState.bJumped) {                                                                        // AI:1124
+        let reference_speed = 600.0;                                                                 // AI:1126
+        let min_play_rate = 1.2;
+        let max_play_rate = 1.5;
+
+        InAirState.bJumped = false;
+        InAirState.JumpPlayRate = lerp_clamped(min_play_rate, max_play_rate, LocomotionState.Speed / reference_speed);   // AI:1131
+    }
+
+    // A separate variable for vertical speed is used to determine the speed at which the character landed on the ground.
+    InAirState.VerticalVelocityWorldSpace = LocomotionState.VelocityWorldSpace.z;                    // AI:1136
+
+    refresh_ground_prediction();                                                                     // AI:1138
+    refresh_in_air_lean(dt);                                                                         // AI:1139
+}
+
+method refresh_ground_prediction() {                                                                 // AI:1142
+    // Calculate the ground prediction weight by tracing in the velocity direction to find a walkable surface the character is
+    // falling toward and getting the "time" (range from 0 to 1, 1 being maximum, 0 being about to ground) till impact.
+    let vertical_velocity_threshold = -200.0;                                                        // AI:1148
+
+    if (InAirState.VerticalVelocityWorldSpace > vertical_velocity_threshold) {                       // AI:1150
+        InAirState.GroundPredictionAmount = 0.0;
+        return;
+    }
+
+    let allowance_amount = 1.0 - clamp01(CurveGroundPredictionBlock);                                // AI:1156
+    if (allowance_amount <= KINDA_SMALL_NUMBER) {                                                    // AI:1157
+        InAirState.GroundPredictionAmount = 0.0;
+        return;
+    }
+
+    // M2 (A6, AI:1163-1216): the capsule sweep along the velocity direction (host.sweep_capsule, a thread-safe query), the walkable
+    // test of the hit and GroundPredictionAmountCurve.eval(hit.time) * allowance_amount.  Until then nothing is predicted:
+    // the amount stays 0, so the pelvis of GetControlRigInput gets no offset in the air and the graph does not blend to landing early.
+    InAirState.GroundPredictionAmount = 0.0;
+}
+
+method refresh_in_air_lean(dt: float) {                                                              // AI:1219
+    // Use the velocity direction and amount to determine how much the character should lean while in the air. The lean amount
+    // curve uses the vertical velocity as a multiplier to smoothly reverse the leaning direction when transitioning from moving
+    // upward to downward.
+    let reference_speed = 350.0;                                                                     // AI:1225
+
+    let target_lean_amount = local_velocity() / reference_speed
+                             * Settings.InAir.LeanAmountCurve.eval(InAirState.VerticalVelocityWorldSpace);   // AI:1227
+
+    if (bPendingUpdate || Settings.General.LeanInterpolationHalfLife <= 0.0) {                       // AI:1231
+        LeanState.RightAmount = target_lean_amount.y;
+        LeanState.ForwardAmount = target_lean_amount.x;
+    } else {
+        let interpolation_amount = damper_exact_alpha(dt, Settings.General.LeanInterpolationHalfLife);   // AI:1238
+
+        LeanState.RightAmount = lerp(LeanState.RightAmount, target_lean_amount.y, interpolation_amount);   // AI:1240
+        LeanState.ForwardAmount = lerp(LeanState.ForwardAmount, target_lean_amount.x, interpolation_amount);
+    }
+}
+
+// ---- feet (AI:1245-1573): M2, the foot lock ---------------------------------------------------------------------------------------------
+method refresh_feet_on_game_thread() {                                                               // AI:1245
+    // M2 (A5): the pelvis and foot IK bone transforms of the previous evaluation (host.bone_*_transform), bValid / bBecameValid and
+    // the target transforms of both feet.  FeetState.bValid stays false until then, which is a valid state of ALS (it is what the
+    // first frames look like): GetControlRigInput reports bFootTransformsValid = false and the ControlRig leaves the feet alone.
+}
+
+method refresh_feet(dt: float) {                                                                     // AI:1297
+    // M2 (A5): ProcessFootLockTeleport / ProcessFootLockBaseChange / RefreshFootLock / ConstrainFootLock (AI:1307-1573).
+    // ALS returns here while !bValid; the two amounts below are plain curve reads (AI:1304-1305) that the standing graph blends
+    // the legs with, so they are produced already.
+    FeetState.FootPlantedAmount = clamp(CurveFootPlanted, -1.0, 1.0);
+    FeetState.FeetCrossingAmount = clamp01(CurveFeetCrossing);
+}
+
+// ---- transitions (AI:1575-1820; the montage playback is M2 / L9) ------------------------------------------------------------------------
+entry PlayQuickStopAnimation() {                                                                   // AI:1575  (.dab: Notifies = { StopQuick = Main.PlayQuickStopAnimation(); })
+    if (RotationMode != AlsRotationMode.VelocityDirection) {                                         // AI:1582
+        play_transition_left_animation(Settings.Transitions.QuickStopBlendInDuration, Settings.Transitions.QuickStopBlendOutDuration,
+                                       Settings.Transitions.QuickStopPlayRate.x, Settings.Transitions.QuickStopStartTime, false);
+        return;
+    }
+
+    var remaining_yaw_angle = unwind_degrees((LocomotionState.bHasInput ? LocomotionState.InputYawAngleWorldSpace
+                                                                       : LocomotionState.TargetYawAngleWorldSpace)
+                                             - LocomotionState.RotationWorldSpace.yaw);              // AI:1589
+
+    remaining_yaw_angle = remap_angle_for_counter_clockwise_rotation(remaining_yaw_angle);           // AI:1595
+
+    // Scale quick stop animation play rate based on how far the character is going to rotate. At 180 degrees, the play rate will
+    // be maximal.
+    let play_rate = lerp(Settings.Transitions.QuickStopPlayRate.x, Settings.Transitions.QuickStopPlayRate.y,
+                         abs(remaining_yaw_angle) / 180.0);                                          // AI:1603 / :1609
+
+    if (remaining_yaw_angle <= 0.0) {                                                                // AI:1600
+        play_transition_left_animation(Settings.Transitions.QuickStopBlendInDuration, Settings.Transitions.QuickStopBlendOutDuration,
+                                       play_rate, Settings.Transitions.QuickStopStartTime, false);
+    } else {
+        play_transition_right_animation(Settings.Transitions.QuickStopBlendInDuration, Settings.Transitions.QuickStopBlendOutDuration,
+                                        play_rate, Settings.Transitions.QuickStopStartTime, false);
+    }
+}
+
+// .dab: Main.PlayTransitionAnimation(Sequence = A_Als_Stop_Right, PlayRate = 1.5, StartTime = 0.4)
+entry PlayTransitionAnimation(Sequence: sequence, BlendInDuration: float = 0.2, BlendOutDuration: float = 0.2, PlayRate: float = 1.0,
+                              StartTime: float = 0.0, bFromStandingIdleOnly: bool = false) {         // AI:1614
+    play_transition_animation(Sequence, BlendInDuration, BlendOutDuration, PlayRate, StartTime, bFromStandingIdleOnly);
+}
+
+entry PlayTransitionLeftAnimation(BlendInDuration: float = 0.2, BlendOutDuration: float = 0.2, PlayRate: float = 1.0,
+                                  StartTime: float = 0.0, bFromStandingIdleOnly: bool = false) {     // AI:1636
+    play_transition_left_animation(BlendInDuration, BlendOutDuration, PlayRate, StartTime, bFromStandingIdleOnly);
+}
+
+entry PlayTransitionRightAnimation(BlendInDuration: float = 0.2, BlendOutDuration: float = 0.2, PlayRate: float = 1.0,
+                                   StartTime: float = 0.0, bFromStandingIdleOnly: bool = false) {    // AI:1650
+    play_transition_right_animation(BlendInDuration, BlendOutDuration, PlayRate, StartTime, bFromStandingIdleOnly);
+}
+
+entry StopTransitionAndTurnInPlaceAnimations(BlendOutDuration: float = -1.0) {                   // AI:1664
+    TransitionsState.bStopTransitionsQueued = true;
+    TransitionsState.QueuedStopTransitionsBlendOutDuration = BlendOutDuration;
+    // (AI:1669-1672: on the game thread ALS stops at once; here the stop is queued for the post_update of the same frame.)
+}
+
+method play_transition_animation(sequence_to_play: sequence, blend_in_duration: float, blend_out_duration: float, play_rate: float,
+                                 start_time: float, from_standing_idle_only: bool) {                 // AI:1614
+    if (from_standing_idle_only && (LocomotionState.bMoving || Stance != AlsStance.Standing)) {      // AI:1617
+        return;
+    }
+
+    // Animation montages can't be played in the worker thread, so queue them up to play later in the game thread.
+    TransitionsState.QueuedTransitionSequence = sequence_to_play;                                    // AI:1624
+    TransitionsState.QueuedTransitionBlendInDuration = blend_in_duration;
+    TransitionsState.QueuedTransitionBlendOutDuration = blend_out_duration;
+    TransitionsState.QueuedTransitionPlayRate = play_rate;
+    TransitionsState.QueuedTransitionStartTime = start_time;
+}
+
+method play_transition_left_animation(blend_in_duration: float, blend_out_duration: float, play_rate: float, start_time: float,
+                                      from_standing_idle_only: bool) {                               // AI:1636
+    play_transition_animation(Stance == AlsStance.Crouching ? Settings.Transitions.CrouchingLeftSequence
+                                                            : Settings.Transitions.StandingLeftSequence,
+                              blend_in_duration, blend_out_duration, play_rate, start_time, from_standing_idle_only);   // AI:1644
+}
+
+method play_transition_right_animation(blend_in_duration: float, blend_out_duration: float, play_rate: float, start_time: float,
+                                       from_standing_idle_only: bool) {                              // AI:1650
+    play_transition_animation(Stance == AlsStance.Crouching ? Settings.Transitions.CrouchingRightSequence
+                                                            : Settings.Transitions.StandingRightSequence,
+                              blend_in_duration, blend_out_duration, play_rate, start_time, from_standing_idle_only);   // AI:1658
+}
+
+method refresh_transitions() {                                                                       // AI:1675
+    // The allow transitions curve is modified within certain states, so that transitions allowed will be true while in those states.
+    TransitionsState.bTransitionsAllowed = is_full_weight(CurveAllowTransitions);                    // AI:1679
+}
+
+entry RefreshDynamicTransitions() linked {                                                         // AI:1682  (.dab: Call(Self.RefreshDynamicTransitions))
+    if (DynamicTransitionsState.bUpdatedThisFrame) {                                                 // AI:1695
+        return;
+    }
+
+    DynamicTransitionsState.bUpdatedThisFrame = true;                                                // AI:1700
+
+    if (DynamicTransitionsState.FrameDelay > 0) {                                                    // AI:1702
+        DynamicTransitionsState.FrameDelay -= 1;
+        return;
+    }
+
+    if (!TransitionsState.bTransitionsAllowed) {                                                     // AI:1708
+        return;
+    }
+
+    // Check each foot to see if the location difference between the foot lock and its desired / target location exceeds a
+    // threshold. If it does, play an additive transition animation on that foot. The currently set transition plays the second
+    // half of a 2 foot transition animation, so that only a single foot moves.
+    // M2 (A5): the foot lock fills FeetState.*.LockAmount / TargetLocationWorldSpace / LockLocationWorldSpace; until then every
+    // LockAmount is 0, no transition is allowed and this entry only keeps the frame delay counting.
+    let foot_lock_distance_threshold_squared = square(Settings.DynamicTransitions.FootLockDistanceThreshold * LocomotionState.ScaleWorldSpace);   // AI:1717
+
+    let foot_lock_left_distance_squared = length_sq(FeetState.Left.TargetLocationWorldSpace - FeetState.Left.LockLocationWorldSpace);   // AI:1721
+    let foot_lock_right_distance_squared = length_sq(FeetState.Right.TargetLocationWorldSpace - FeetState.Right.LockLocationWorldSpace);
+
+    let transition_left_allowed = is_relevant(FeetState.Left.LockAmount)
+                                  && foot_lock_left_distance_squared > foot_lock_distance_threshold_squared;    // AI:1729
+    let transition_right_allowed = is_relevant(FeetState.Right.LockAmount)
+                                   && foot_lock_right_distance_squared > foot_lock_distance_threshold_squared;  // AI:1733
+
+    if (!transition_left_allowed && !transition_right_allowed) {                                     // AI:1737
+        return;
+    }
+
+    var dynamic_transition_sequence: sequence = none;                                                // AI:1742
+    // If both transitions are allowed, choose the one with a greater lock distance.
+    if (!transition_left_allowed || (transition_right_allowed && foot_lock_left_distance_squared < foot_lock_right_distance_squared)) {   // AI:1746
+        dynamic_transition_sequence = Stance == AlsStance.Crouching ? Settings.DynamicTransitions.CrouchingRightSequence
+                                                                    : Settings.DynamicTransitions.StandingRightSequence;
+    } else if (!transition_right_allowed || foot_lock_left_distance_squared >= foot_lock_right_distance_squared) {   // AI:1752
+        dynamic_transition_sequence = Stance == AlsStance.Crouching ? Settings.DynamicTransitions.CrouchingLeftSequence
+                                                                    : Settings.DynamicTransitions.StandingLeftSequence;
+    }
+
+    if (valid(dynamic_transition_sequence)) {                                                        // AI:1759
+        // Block next dynamic transitions for about 2 frames to give the animation blueprint some time to properly react to the animation.
+        DynamicTransitionsState.FrameDelay = 2;                                                      // AI:1763
+
+        // Animation montages can't be played in the worker thread, so queue them up to play later in the game thread.
+        TransitionsState.QueuedTransitionSequence = dynamic_transition_sequence;                     // AI:1767
+        TransitionsState.QueuedTransitionBlendInDuration = Settings.DynamicTransitions.BlendDuration;
+        TransitionsState.QueuedTransitionBlendOutDuration = Settings.DynamicTransitions.BlendDuration;
+        TransitionsState.QueuedTransitionPlayRate = Settings.DynamicTransitions.PlayRate;
+        TransitionsState.QueuedTransitionStartTime = 0.0;
+    }
+}
+
+method play_queued_transition_animation() {                                                          // AI:1780
+    if (TransitionsState.bStopTransitionsQueued || !valid(TransitionsState.QueuedTransitionSequence)) {   // AI:1784
+        return;
+    }
+
+    // M2 (A5 / L9): host.play_slot_animation(TransitionsState.QueuedTransitionSequence, "Transition", BlendIn, BlendOut, PlayRate, 1, 0.0,
+    // StartTime) -- PlaySlotAnimationAsDynamicMontage (AI:1789), the command of the dynamic montage (G22).  The queue is consumed
+    // as in ALS so that it does not keep a stale sequence.
+
+    TransitionsState.QueuedTransitionSequence = none;                                                // AI:1793
+    TransitionsState.QueuedTransitionBlendInDuration = 0.0;
+    TransitionsState.QueuedTransitionBlendOutDuration = 0.0;
+    TransitionsState.QueuedTransitionPlayRate = 1.0;
+    TransitionsState.QueuedTransitionStartTime = 0.0;
+}
+
+method stop_queued_transition_and_turn_in_place_animations() {                                       // AI:1800
+    if (!TransitionsState.bStopTransitionsQueued) {                                                  // AI:1804
+        return;
+    }
+
+    // M2 (A5 / L9): host.stop_montages_with_slot("Transition" / "TurnInPlaceStanding" / "TurnInPlaceCrouching",
+    // TransitionsState.QueuedStopTransitionsBlendOutDuration)  (AI:1809-1816).
+
+    TransitionsState.bStopTransitionsQueued = false;                                                 // AI:1818
+    TransitionsState.QueuedStopTransitionsBlendOutDuration = -1.0;
+}
+
+// ---- rotate in place (AI:1822-1891) ---------------------------------------------------------------------------------------------------
+view is_rotate_in_place_allowed() -> bool {                                                          // AI:1822 (virtual in ALS)
+    return RotationMode == AlsRotationMode.Aiming || ViewMode == AlsViewMode.FirstPerson;
+}
+
+entry RefreshRotateInPlace(dt) linked {                                                              // AI:1827  (.dab: Call(Self.RefreshRotateInPlace))
+    if (RotateInPlaceState.bUpdatedThisFrame) {                                                      // AI:1840
+        return;
+    }
+
+    RotateInPlaceState.bUpdatedThisFrame = true;                                                     // AI:1845
+
+    if (LocomotionState.bMoving || !is_rotate_in_place_allowed()) {                                  // AI:1847
+        RotateInPlaceState.bRotatingLeft = false;
+        RotateInPlaceState.bRotatingRight = false;
+    } else {
+        let first_person = ViewMode == AlsViewMode.FirstPerson && RotationMode != AlsRotationMode.Aiming;   // AI:1854
+
+        let view_yaw_angle_threshold = first_person
+                                           ? Settings.RotateInPlace.FirstPersonViewYawAngleThreshold
+                                           : Settings.RotateInPlace.ViewYawAngleThreshold;           // AI:1856
+
+        // Check if the character should rotate left or right by checking if the view yaw angle exceeds the threshold.
+        RotateInPlaceState.bRotatingLeft = ViewState.YawAngle < -view_yaw_angle_threshold;           // AI:1864
+        RotateInPlaceState.bRotatingRight = ViewState.YawAngle > view_yaw_angle_threshold;
+    }
+
+    let play_rate_interpolation_half_life = 0.15;                                                    // AI:1868
+
+    if (!RotateInPlaceState.bRotatingLeft && !RotateInPlaceState.bRotatingRight) {                   // AI:1870
+        RotateInPlaceState.PlayRate = bPendingUpdate
+                                          ? Settings.RotateInPlace.PlayRate.x
+                                          : damper_exact(RotateInPlaceState.PlayRate, Settings.RotateInPlace.PlayRate.x, dt,
+                                                         play_rate_interpolation_half_life);         // AI:1872
+        return;
+    }
+
+    // If the character should rotate, set the play rate to scale with the view yaw speed. This makes the character rotate faster
+    // when moving the camera faster.
+    let play_rate = map_range_clamped(Settings.RotateInPlace.ReferenceViewYawSpeed.x, Settings.RotateInPlace.ReferenceViewYawSpeed.y,
+                                      Settings.RotateInPlace.PlayRate.x, Settings.RotateInPlace.PlayRate.y, ViewState.YawSpeed);   // AI:1882
+
+    RotateInPlaceState.PlayRate = bPendingUpdate
+                                      ? play_rate
+                                      : damper_exact(RotateInPlaceState.PlayRate, play_rate, dt, play_rate_interpolation_half_life);   // AI:1887
+}
+
+// ---- turn in place (AI:1893-2046; the selection of the turn and its playback are M2) --------------------------------------------------------
+view is_turn_in_place_allowed() -> bool {                                                            // AI:1893 (virtual in ALS)
+    return RotationMode == AlsRotationMode.ViewDirection && ViewMode != AlsViewMode.FirstPerson;
+}
+
+entry InitializeTurnInPlace() linked {                                                             // AI:1898  (.dab: Call(Self.InitializeTurnInPlace, On = BecomeRelevant))
+    TurnInPlaceState.ActivationDelay = 0.0;
+}
+
+entry RefreshTurnInPlace(dt) linked {                                                                // AI:1903  (.dab: Call(Self.RefreshTurnInPlace))
+    if (TurnInPlaceState.bUpdatedThisFrame) {                                                        // AI:1916
+        return;
+    }
+
+    TurnInPlaceState.bUpdatedThisFrame = true;                                                       // AI:1921
+
+    if (!TransitionsState.bTransitionsAllowed || !is_turn_in_place_allowed()) {                      // AI:1923
+        TurnInPlaceState.ActivationDelay = 0.0;
+        return;
+    }
+
+    // Check if the view yaw speed is below the threshold and if the view yaw angle is outside the threshold. If so, begin counting
+    // the activation delay time. If not, reset the activation delay time. This ensures the conditions remain true for a sustained
+    // time before turning in place.
+    if (ViewState.YawSpeed >= Settings.TurnInPlace.ViewYawSpeedThreshold
+        || abs(ViewState.YawAngle) <= Settings.TurnInPlace.ViewYawAngleThreshold) {                  // AI:1933
+        TurnInPlaceState.ActivationDelay = 0.0;
+        return;
+    }
+
+    TurnInPlaceState.ActivationDelay = TurnInPlaceState.ActivationDelay + dt;                        // AI:1940
+
+    let activation_delay = map_range_clamped(Settings.TurnInPlace.ViewYawAngleThreshold, 180.0,
+                                             Settings.TurnInPlace.ViewYawAngleToActivationDelay.x,
+                                             Settings.TurnInPlace.ViewYawAngleToActivationDelay.y,
+                                             abs(ViewState.YawAngle));                               // AI:1942
+
+    // Check if the activation delay time exceeds the set delay (mapped to the view yaw angle). If so, start a turn in place.
+    if (TurnInPlaceState.ActivationDelay <= activation_delay) {                                      // AI:1950
+        return;
+    }
+
+    // M2 (A5, AI:1955-2009): select one of the eight turn settings (standing / crouching x 90 / 180 x left / right: bTurnLeft =
+    // remap_angle_for_counter_clockwise_rotation(ViewState.YawAngle) <= 0, 180 when abs(ViewState.YawAngle) >= Turn180AngleThreshold)
+    // and queue it with the slot name and ViewState.YawAngle; post_update plays it (play_queued_turn_in_place_animation).
+}
+
+method play_queued_turn_in_place_animation() {                                                       // AI:2012
+    // M2 (A5 / L9, AI:2016-2045): the montage of the queued turn (PlaySlotAnimationAsDynamicMontage_WithBlendSettings, inertialized
+    // blend out) and TurnInPlaceState.PlayRate = settings.PlayRate * abs(QueuedTurnYawAngle / AnimatedTurnAngle).  There is no queue
+    // yet (RefreshTurnInPlace does not select a turn), so there is nothing to play.
+}
+
+// ---- ragdolling (AI:2048-2073) -------------------------------------------------------------------------------------------------------------
+method refresh_ragdolling_on_game_thread() {                                                         // AI:2048
+    if (LocomotionAction != AlsLocomotionAction.Ragdolling) {                                        // AI:2052
+        return;
+    }
+
+    // Scale the flail play rate by the root speed. The faster the ragdoll moves, the faster the character will flail.
+    let reference_speed = 1000.0;                                                                    // AI:2059
+
+    RagdollingState.FlailPlayRate = clamp01(length(CharacterRagdollingVelocity) / reference_speed);  // AI:2061
+    // M2 (A9, AI:2064-2073): RagdollingState.FinalRagdollPose, the FPoseSnapshot SnapshotFinalRagdollPose() takes when the ragdoll
+    // stops.  It has no type in DAL yet (it needs the snapshot_pose command, L9, and a snapshot value): the one path of the 82 a
+    // .dab reads that this instance does not export (als-dal-rewrite.md section 7, A3).
+}
+
+// ---- ControlRig input (AI:235-257) ------------------------------------------------------------------------------------------------------------
+// A pure, thread-safe getter: the pin of the ControlRig node of AB_Als (.dab: RigInput = Self.GetControlRigInput()).
+pub view GetControlRigInput() -> AlsControlRigInput {
+    // In addition to being on the ground, allow pelvis offset if the character is in the air, but only if GroundPredictionAmount
+    // is non-zero.
+    let pelvis_offset_amount = clamp01(PoseState.GroundedAmount + PoseState.InAirAmount * InAirState.GroundPredictionAmount);   // AI:240
+
+    return AlsControlRigInput(bUseHandIkBones: Settings.General.bUseHandIkBones,                    // AI:245
+                              bUseFootIkBones: Settings.General.bUseFootIkBones,
+                              bFootTransformsValid: FeetState.bValid,
+                              VelocityBlendForwardAmount: GroundedState.VelocityBlend.ForwardAmount,
+                              VelocityBlendBackwardAmount: GroundedState.VelocityBlend.BackwardAmount,
+                              SpineYawAngle: SpineState.FinalYawAngle,
+                              PelvisOffsetAmount: pelvis_offset_amount,
+                              FootLeftLocation: FeetState.Left.FinalLocation,
+                              FootLeftRotation: FeetState.Left.FinalRotation,
+                              FootRightLocation: FeetState.Right.FinalLocation,
+                              FootRightRotation: FeetState.Right.FinalRotation);
+}

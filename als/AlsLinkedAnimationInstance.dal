@@ -1,0 +1,6 @@
+// AlsLinkedAnimationInstance.dal -- UAlsLinkedAnimationInstance of ALS-Refactored (c) Sixze, MIT: Source/ALS/{Public,Private}/AlsLinkedAnimationInstance.{h,cpp}
+//
+// The class of the linked animation graphs of AB_Als (Parent = AlsLinkedAnimationInstance, Aliases = { Main = Self.GetParent(); }).
+// There is nothing to write: `linked(AlsAnimationInstance)` makes the compiler generate Parent / Character / GetParent() and one
+// forwarder per `linked` entry of AlsAnimationInstance.dal (LI:58-192: Call(Self.RefreshGrounded) -> Parent->RefreshGrounded()).
+logic AlsLinkedAnimationInstance : anim linked(AlsAnimationInstance);
