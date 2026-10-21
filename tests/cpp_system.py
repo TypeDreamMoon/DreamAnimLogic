@@ -17,7 +17,9 @@ from dal import harness, ir
 from dal.cppbackend import CppGen, CppOptions, generate_cpp
 
 
-def make_system_driver(modules: dict[str, ir.Module], frames: list[dict], schedule: list[tuple[str, str | None]]) -> str:
+def make_system_driver(modules: dict[str, ir.Module], frames: list[dict], schedule: list[tuple[str, str | None]],
+                       params: dict[str, dict] | None = None) -> str:
+    """``params`` is ``{logic: {param name: settings data}}``: the data of the settings params (as for ``cpp_driver.settings_setup``)."""
     gens = {n: CppGen(m, CppOptions()) for n, m in modules.items()}
     L = [
         '#include "StubEngine.h"',
@@ -80,6 +82,9 @@ def make_system_driver(modules: dict[str, ir.Module], frames: list[dict], schedu
         L += [f"\tL_{n}.StubOwner = &Pawn;", f"\tL_{n}.StubWorld = &World;"]
     for n in anims:
         L += [f"\tL_{n}.StubPawn = &Pawn;", f"\tL_{n}.StubWorld = &World;", f"\tL_{n}.StubSkelMesh = &Mesh;"]
+    for n, m in modules.items():                                            # settings params: data assets built from the given data
+        for line in cd.settings_setup(m, (params or {}).get(n, {})):
+            L.append(line.replace("Dal_P_", f"Dal_P_{n}_").replace("Obj.", f"L_{n}."))
     for n in actors:
         if gens[n].phased:
             L.append(f"\tL_{n}.RegisterComponentTickFunctions(true);")
@@ -95,6 +100,11 @@ def make_system_driver(modules: dict[str, ir.Module], frames: list[dict], schedu
         for key, fmt in cd._SIMPLE.items():
             if key in f:
                 L.append("\t\t" + fmt(f[key]))
+        if "time" in f:
+            L.append(f"\t\tWorld.Time = {cd._num(f['time'])};")
+        for cname, cv in f.get("curves", {}).items():                          # the animation curves of the previous evaluation
+            for n in anims:
+                L.append(f'\t\tL_{n}.StubCurves["{cname}"] = {cd._num(cv)}f;')
         for n, m in modules.items():
             for name, v in f.get("free", {}).get(n, {}).items():
                 inp = m.find_input(name)
@@ -166,7 +176,7 @@ def parse_system_output(modules: dict[str, ir.Module], text: str) -> list[dict]:
 
 
 def build_and_run_system(modules: dict[str, ir.Module], frames: list[dict], schedule: list[tuple[str, str | None]] | None = None,
-                         warnings_as_errors: bool = True, keep_dir: str | None = None):
+                         warnings_as_errors: bool = True, keep_dir: str | None = None, params: dict[str, dict] | None = None):
     compiler = cd.find_compiler()
     if compiler is None:
         raise RuntimeError("no C++ compiler")
@@ -207,7 +217,7 @@ def build_and_run_system(modules: dict[str, ir.Module], frames: list[dict], sche
                     f.write("// intentionally empty\n")
         driver = os.path.join(work, "driver.cpp")
         with open(driver, "w", encoding="utf-8", newline="\n") as f:
-            f.write(make_system_driver(modules, frames, schedule))
+            f.write(make_system_driver(modules, frames, schedule, params))
         includes = [inc, gen]
         sources = [(driver, "UObject")]
         for name in sorted(files):
