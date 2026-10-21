@@ -90,6 +90,8 @@ def py_effects(calls):
             out.append(("montage_instance_stop", f"Slot_{args[0]}", STUB_BLEND_OUT if args[1] < 0 else float(args[1]), 0.0))
         elif name == "montage_stop_source":
             out.append(("montage_instance_stop", f"Instance_{args[0]}", STUB_BLEND_OUT if args[1] < 0 else float(args[1]), 0.0))
+        elif name == "set_movement_mode":             # the sub mode is sent only when the program wrote it; the stand-in always logs it
+            out.append((name, float(args[0]), float(args[1]) if len(args) > 1 else 0.0))
         elif name == "montage_play":
             out.append(("montage_play", args[0], float(args[1])))
             if args[2]:

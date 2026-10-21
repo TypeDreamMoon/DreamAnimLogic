@@ -528,10 +528,11 @@ public:
 	virtual float GetMaxBrakingDeceleration() const { return StubMaxBrakingDeceleration; }
 	virtual bool IsMovingOnGround() const { return StubGrounded; }
 	virtual bool IsCrouching() const { return StubCrouching; }
-	virtual void SetMovementMode(EMovementMode NewMovementMode, uint8 /*NewCustomMode*/ = 0)
+	virtual void SetMovementMode(EMovementMode NewMovementMode, uint8 NewCustomMode = 0)
 	{
 		MovementMode = NewMovementMode;
-		StubLog::Emit("set_movement_mode", {static_cast<int>(NewMovementMode)});
+		CustomMovementMode = NewCustomMode;
+		StubLog::Emit("set_movement_mode", {static_cast<int>(NewMovementMode), static_cast<int>(NewCustomMode)});
 	}
 };
 
@@ -584,6 +585,11 @@ class UDalCharacterMovementComponent : public UCharacterMovementComponent
 public:
 	FLoggedFloat MaxAccelerationWalking{"set_max_acceleration_walking"};
 	FLoggedBool bInputBlocked{"set_input_blocked"};
+	void SetRootMotionOverride(const FVector& InVelocity, const FQuat& RotationDelta)
+	{
+		StubLog::Emit("root_motion_override", {InVelocity.X, InVelocity.Y, InVelocity.Z, RotationDelta.X, RotationDelta.Y, RotationDelta.Z, RotationDelta.W});
+	}
+	void ClearRootMotionOverride() { StubLog::Emit("root_motion_clear", {}); }
 	FVector StubPrePenetration;
 	bool StubPrePenetrationValid = false;
 	bool TryConsumePrePenetrationAdjustmentVelocity(FVector& OutVelocity)
@@ -728,10 +734,66 @@ struct FAnimNotifyEvent
 	TObjectPtr<UAnimNotifyState> NotifyStateClass;
 };
 
+struct FFrameRate
+{
+	double Rate = 30.0;
+	double AsDecimal() const { return Rate; }
+};
+
 class UAnimSequenceBase : public UObject
 {
 public:
 	std::string StubName;
+	float StubLength = 0.0f;
+	float RateScale = 1.0f;
+	float StubSamplingRate = 0.0f;
+	float GetPlayLength() const { return StubLength; }
+	FFrameRate GetSamplingFrameRate() const { return FFrameRate{StubSamplingRate}; }
+};
+
+// root motion of an animation sequence: the stand-in moves the root in a straight line at StubRootVelocity (clamped to the length)
+struct FAnimExtractContext
+{
+	double CurrentTime = 0.0;
+	FAnimExtractContext() = default;
+	explicit FAnimExtractContext(double InCurrentTime) : CurrentTime(InCurrentTime) {}
+};
+
+class UAnimSequence : public UAnimSequenceBase
+{
+public:
+	double StubRootVelocity[3] = {0.0, 0.0, 0.0};
+	FTransform ExtractRootTrackTransform(const FAnimExtractContext& Context, const void* /*BoneContainer*/) const
+	{
+		const double T = std::min(std::max(Context.CurrentTime, 0.0), static_cast<double>(StubLength));
+		return FTransform(FQuat(0.0, 0.0, 0.0, 1.0), FVector(StubRootVelocity[0] * T, StubRootVelocity[1] * T, StubRootVelocity[2] * T), FVector(1.0, 1.0, 1.0));
+	}
+};
+
+struct FAnimSegment
+{
+	UAnimSequenceBase* StubReference = nullptr;
+	float StartPos = 0.0f;
+	float AnimStartTime = 0.0f;
+	float AnimEndTime = 0.0f;
+	float AnimPlayRate = 1.0f;
+	UAnimSequenceBase* GetAnimReference() const { return StubReference; }
+	float GetLength() const { return (AnimEndTime - AnimStartTime) / AnimPlayRate; }
+	float GetEndPos() const { return StartPos + GetLength(); }
+	float ConvertTrackPosToAnimPos(const float TrackPos) const { return AnimStartTime + (TrackPos - StartPos) * AnimPlayRate; }
+};
+
+struct FAnimTrack
+{
+	TArray<FAnimSegment> AnimSegments;
+	const FAnimSegment* GetSegmentAtTime(float Time) const
+	{
+		for (const FAnimSegment& Segment : AnimSegments)
+		{
+			if (Time >= Segment.StartPos && Time <= Segment.GetEndPos()) { return &Segment; }
+		}
+		return nullptr;
+	}
 };
 
 struct FBranchingPointNotifyPayload
@@ -772,6 +834,7 @@ struct FMontageBlendSettings
 struct FSlotAnimationTrack
 {
 	FName SlotName;
+	FAnimTrack AnimTrack;
 };
 
 class UAnimMontage : public UAnimSequenceBase

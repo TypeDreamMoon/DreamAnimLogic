@@ -518,11 +518,11 @@ class UeHost(HostV1):
         """CharacterMovement->bUseControllerDesiredRotation = b"""
         self._set_cmc("use_controller_desired_rotation", bool(value))
 
-    def set_movement_mode(self, mode):
-        """CharacterMovement->SetMovementMode(Mode)"""
+    def set_movement_mode(self, mode, sub=0):
+        """CharacterMovement->SetMovementMode(Mode, SubMode)"""
         cmc = self._get_cmc()
         if cmc is not None:
-            cmc.set_movement_mode(getattr(unreal.MovementMode, _MODE_NAMES[int(mode)]), 0)
+            cmc.set_movement_mode(getattr(unreal.MovementMode, _MODE_NAMES[int(mode)]), int(sub))
 
     def jump(self):
         """Character->Jump()"""
@@ -620,7 +620,10 @@ class UeHost(HostV1):
                                                         float(blend_out_trigger), float(start_time))
 
     # Not in the editor session (no Python API reaches them; the commands do nothing here, the generated C++ and the Blender host have them):
-    # montage_stop_source (the montage instance of a notify), stop_montages_with_slot (FAnimMontageInstance tracks), snapshot_pose (FPoseSnapshot).
+    # montage_stop_source (the montage instance of a notify), stop_montages_with_slot (FAnimMontageInstance tracks), snapshot_pose (FPoseSnapshot),
+    # root_motion_override / root_motion_clear (the root motion source of DalRuntime's movement component), the montage asset queries
+    # (montage_length, montage_rate_scale, montage_sampling_rate, montage_blend_in_time, montage_blend_in_option, montage_root_transform,
+    # montage_last_root_transform: they answer their neutral defaults).
 
     # ---- commands: controller / camera ---------------------------------------------------------------------------------------------------
 

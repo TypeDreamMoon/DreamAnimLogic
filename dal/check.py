@@ -1998,7 +1998,7 @@ class Checker:
                 args.append(v)
         if not ok:
             return None
-        return ir.Command(s.name, args, place)
+        return ir.Command(s.name, args, place, n if cmd.sparse else None)
 
     def state_place(self, e: ir.Expr) -> tuple | None:
         """``(state, (member, ...))`` when ``e`` is a state or a member of a struct state (the places a command can fill), else None."""

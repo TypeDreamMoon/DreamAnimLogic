@@ -30,6 +30,9 @@ update(dt) {
     host.set_orient_rotation_to_movement(B);
     host.set_use_controller_desired_rotation(!B);
     host.set_movement_mode(Mode);
+    host.set_movement_mode(Mode, 2);
+    host.root_motion_override(V, quat(0.0, 0.0, 0.0, 1.0));
+    host.root_motion_clear();
     if (B) { host.jump(); } else { host.stop_jumping(); }
     if (S > 0) { host.crouch(); } else { host.uncrouch(); }
     host.add_movement_input(V);

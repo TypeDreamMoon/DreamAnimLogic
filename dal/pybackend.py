@@ -279,7 +279,8 @@ class PyGen:
                 out.append(f"{pad}return" + (f" {self.val(s.value)}" if s.value is not None else ""))
             elif isinstance(s, ir.Command):
                 implicit = ["self._source" for _x in COMMANDS[s.name].implicit]               # host.montage_stop_source: the montage instance of the notify
-                out.append(f"{pad}self._cmd({', '.join([repr(s.name)] + implicit + [self.cmd_arg(a) for a in s.args])})")
+                sent = s.args if s.written is None else s.args[:s.written]                  # a sparse command: only what the program wrote
+                out.append(f"{pad}self._cmd({', '.join([repr(s.name)] + implicit + [self.cmd_arg(a) for a in sent])})")
             elif isinstance(s, ir.For):
                 out.append(f"{pad}for {s.var} in range({s.lo}, {s.hi}):")
                 out.extend(self.stmts(s.body, depth + 1) or [f"{pad}{INDENT}pass"])

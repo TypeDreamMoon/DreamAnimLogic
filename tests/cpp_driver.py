@@ -509,6 +509,7 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
     by_name = {i.host.arg: i for i in module.inputs if i.host and i.host.item == "action"}
     notify_inputs = {i.host.arg for i in module.inputs if i.host and i.host.item == "notify"}
     anim_notifies = set(gen.anim_notify_funcs())
+    scripted_assets: set[str] = set()                         # the montage assets some frame scripted (names)
     for n, f in enumerate(frames):
         L.append(f"\t// ---- frame {n}")
         L.append("\t{")
@@ -555,6 +556,26 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
             active = "true" if st.get("active") else "false"
             key = f"&Montage_{name}" if module.find_montage(name) is not None else f'DalMontage("{name}")'       # a montage value: the asset of that name
             L.append(f"\t\t{target}.StubMontages[{key}] = UAnimInstance::FStubMontage{{{playing}, {active}, {_num(st.get('position', 0.0))}f, {sec}}};")
+        assets = dict(f.get("montage_assets", {}))
+        for name in sorted(scripted_assets - set(assets)):
+            assets[name] = None                               # not scripted in this frame: the stand-in forgets what an earlier frame said about it
+        scripted_assets.update(f.get("montage_assets", {}))
+        for name, asset in assets.items():
+            sampling = 0.0 if asset is None else asset.get("sampling_rate", 30.0)
+            asset = asset or {}
+            L += [f'\t\t{{ UAnimMontage* DalAsset = DalMontage("{name}");',
+                  f"\t\t\tDalAsset->StubLength = {_num(asset.get('length', 0.0))}f; DalAsset->RateScale = {_num(asset.get('rate_scale', 1.0))}f;",
+                  f"\t\t\tDalAsset->StubSamplingRate = {_num(sampling)}f;",
+                  f"\t\t\tDalAsset->BlendIn.BlendTime = {_num(asset.get('blend_in_time', 0.25))}f;",
+                  f"\t\t\tDalAsset->BlendIn.Option = static_cast<EAlphaBlendOption>({int(asset.get('blend_in_option', 0))});",
+                  "\t\t\tDalAsset->SlotAnimTracks.Reset();"]
+            if asset.get("root_velocity") is not None:
+                v = asset["root_velocity"]
+                L += [f"\t\t\tstatic UAnimSequence DalSeq_{name}; DalSeq_{name}.StubLength = {_num(asset.get('length', 0.0))}f;",
+                      f"\t\t\tDalSeq_{name}.StubRootVelocity[0] = {_num(v[0])}; DalSeq_{name}.StubRootVelocity[1] = {_num(v[1])}; DalSeq_{name}.StubRootVelocity[2] = {_num(v[2])};",
+                      f"\t\t\tFSlotAnimationTrack DalTrack; FAnimSegment DalSegment; DalSegment.StubReference = &DalSeq_{name}; DalSegment.AnimEndTime = {_num(asset.get('length', 0.0))}f;",
+                      "\t\t\tDalTrack.AnimTrack.AnimSegments.Add(DalSegment); DalAsset->SlotAnimTracks.Add(DalTrack);"]
+            L.append("\t\t}")
         if actor:
             L.append("\t\tWorld.StubActors.clear();")
             for k, (tid, loc) in enumerate(f.get("targets", [])[:8]):

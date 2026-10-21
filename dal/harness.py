@@ -51,6 +51,7 @@ class ScriptedHost(MockHost):
         self._notifies = frame.get("notifies", {})
         self.events = [tuple(e) for e in frame.get("events", [])]
         self.montages = dict(frame.get("montages", {}))
+        self.montage_assets = {k: dict(v) for k, v in frame.get("montage_assets", {}).items()}
         self.targets = [(tid, tuple(loc)) for tid, loc in frame.get("targets", [])]
         world = frame.get("world", {})
         self.ground_z = world.get("ground_z")

@@ -113,6 +113,9 @@ struct TArray
 		return static_cast<int32>(Before - V.size());
 	}
 	void Reset() { V.clear(); }
+	bool IsEmpty() const { return V.empty(); }
+	T& Last() { return V.back(); }
+	const T& Last() const { return V.back(); }
 	T& operator[](int32 I) { return V[static_cast<size_t>(I)]; }
 	const T& operator[](int32 I) const { return V[static_cast<size_t>(I)]; }
 	auto begin() { return V.begin(); }

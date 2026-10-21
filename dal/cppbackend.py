@@ -499,7 +499,9 @@ EXEC: dict[str, tuple[list[str], list[str]]] = {
     "set_rotation_rate": ([_G_MOVEMENT], ["DalMovement->RotationRate = FRotator(DalCommand.R);"]),
     "set_orient_rotation_to_movement": ([_G_MOVEMENT], ["DalMovement->bOrientRotationToMovement = DalCommand.B0;"]),
     "set_use_controller_desired_rotation": ([_G_MOVEMENT], ["DalMovement->bUseControllerDesiredRotation = DalCommand.B0;"]),
-    "set_movement_mode": ([_G_MOVEMENT], ["DalMovement->SetMovementMode(static_cast<EMovementMode>(DalCommand.Mode));"]),
+    "set_movement_mode": ([_G_MOVEMENT], ["DalMovement->SetMovementMode(static_cast<EMovementMode>(DalCommand.Mode));"]),        # (with a sub mode: see execute_body)
+    "root_motion_override": ([_G_MOVEMENT, _G_ALS_MOVEMENT], ["DalAlsMovement->SetRootMotionOverride(FVector(DalCommand.V), FQuat(DalCommand.Q));"]),
+    "root_motion_clear": ([_G_MOVEMENT, _G_ALS_MOVEMENT], ["DalAlsMovement->ClearRootMotionOverride();"]),
     "jump": ([_G_CHARACTER], ["DalCharacter->Jump();"]),
     "stop_jumping": ([_G_CHARACTER], ["DalCharacter->StopJumping();"]),
     "crouch": ([_G_CHARACTER], ["DalCharacter->Crouch();"]),
@@ -596,6 +598,8 @@ _MESH_ITEMS = ("ragdoll_supported", "mesh_world_transform", "bone_component_tran
 _WORLD_ITEMS = ("time", "time_dilation", "real_delta_time")                                          # read from the UWorld
 _MOVEMENT_ITEMS = ("velocity", "acceleration", "max_acceleration", "max_braking_deceleration", "walkable_floor_z", "movement_mode_custom",
                    "max_walk_speed", "movement_mode", "is_grounded", "is_crouching")
+_MONTAGE_ASSET_QUERIES = frozenset(("montage_length", "montage_rate_scale", "montage_sampling_rate", "montage_blend_in_time", "montage_blend_in_option",
+                                    "montage_root_transform", "montage_last_root_transform"))
 _PAWN_ITEMS = ("actor_location", "actor_rotation", "control_rotation", "action", "actor_ready", "actor_time_dilation")
 
 
@@ -671,6 +675,8 @@ class CppGen:
                     used_queries.add(e.name)
         self.cmds = [n for n in COMMANDS if n in used_cmds]
         self.uses_source = "montage_stop_source" in used_cmds        # a command that names the montage instance of the notify being handled
+        self.mode_sub = any(isinstance(s, ir.Command) and s.name == "set_movement_mode" and s.written == 2          # a program that writes the custom sub mode
+                            for _label, body in module.bodies() for s in ir.walk_stmts(body))
         # a command whose montage is a `montage` value (settings data) rather than a declared montage
         self.asset_montages = any(isinstance(s, ir.Command) and s.args and s.args[0].ty is MONTAGE_ASSET and COMMANDS[s.name].params
                                   and COMMANDS[s.name].params[0] == "montage"
@@ -748,7 +754,8 @@ class CppGen:
         """The arguments of the DalHost::Cmd:: constructor: the implicit ones first (the montage instance of the notify being handled), then
         what the program wrote; a montage value has no section, so the `none` that stands for it is left out."""
         out = ["DalCurrentInstance" for _x in COMMANDS[s.name].implicit]
-        out += [self.cmd_arg(a) for a in s.args if not (isinstance(a, ir.Lit) and a.ty is NONE_T)]
+        sent = s.args if s.written is None else s.args[:s.written]                       # a sparse command: only what the program wrote
+        out += [self.cmd_arg(a) for a in sent if not (isinstance(a, ir.Lit) and a.ty is NONE_T)]
         return out
 
     def stmts(self, body: list[ir.Stmt], depth: int) -> list[str]:
@@ -1372,6 +1379,8 @@ class CppGen:
                 guards = [_G_RESOLVED if g == _G_ASSET else g for g in guards]
             if c == "montage_play" and not self.m.montages:
                 body = body[:1]                                  # only montage values: no sections to jump to
+            if c == "set_movement_mode" and self.mode_sub:
+                body = ["DalMovement->SetMovementMode(static_cast<EMovementMode>(DalCommand.Mode), static_cast<uint8>(DalCommand.Count));"]
             if c == "snapshot_pose":
                 body = []
                 for k, (dotted, member) in enumerate(self.snapshots):
@@ -1487,6 +1496,52 @@ class CppGen:
                               doc="host.montage_is_playing: is the montage (an asset value) playing on the animation instance.",
                               body=["const UAnimInstance* DalAnim = DalGetAnimInstance();",
                                     "return DalAnim != nullptr && DalMontage != nullptr && DalAnim->Montage_IsPlaying(DalMontage);"]))
+        for name, ret, expr in (("montage_length", "float", "DalMontage->GetPlayLength()"), ("montage_rate_scale", "float", "DalMontage->RateScale"),
+                                ("montage_sampling_rate", "float", "static_cast<float>(DalMontage->GetSamplingFrameRate().AsDecimal())"),
+                                ("montage_blend_in_time", "float", "DalMontage->BlendIn.GetBlendTime()"),
+                                ("montage_blend_in_option", "EAlphaBlendOption", "DalMontage->BlendIn.GetBlendOption()")):
+            if name in q:
+                none = {"montage_length": "0.0f", "montage_rate_scale": "1.0f", "montage_sampling_rate": "0.0f", "montage_blend_in_time": "0.25f",
+                        "montage_blend_in_option": "EAlphaBlendOption::Linear"}[name]
+                out.append(Method(ret, query_cpp(name), "const UAnimMontage* DalMontage",
+                                  doc=f"host.{name}: what the montage asset says (a pure read of the asset).",
+                                  body=[f"return DalMontage != nullptr ? {expr} : {none};"]))
+        if "montage_root_transform" in q:
+            out.append(Method("FTransform3f", "DalMontageRootTransform", "const UAnimMontage* DalMontage, const float DalTime",
+                              doc="host.montage_root_transform: the root bone's absolute transform in component space at a time, "
+                                  "from the first slot track of the montage (as UAlsMontageUtility::ExtractRootTransformFromMontage).", body=[
+                "if (DalMontage == nullptr || DalMontage->SlotAnimTracks.IsEmpty())",
+                "{",
+                "\treturn FTransform3f();",
+                "}",
+                "const FAnimTrack& DalTrack = DalMontage->SlotAnimTracks[0].AnimTrack;",
+                "const FAnimSegment* DalSegment = DalTrack.GetSegmentAtTime(FMath::Max(0.0f, DalTime));",
+                "if (DalSegment == nullptr && !DalTrack.AnimSegments.IsEmpty())",
+                "{",
+                "\tDalSegment = &DalTrack.AnimSegments.Last();",
+                "}",
+                "const UAnimSequence* DalSequence = DalSegment != nullptr ? Cast<UAnimSequence>(DalSegment->GetAnimReference()) : nullptr;",
+                "if (DalSequence == nullptr)",
+                "{",
+                "\treturn FTransform3f();",
+                "}",
+                "const FAnimExtractContext DalContext(static_cast<double>(DalSegment->ConvertTrackPosToAnimPos(DalTime)));",
+                "return FTransform3f(DalSequence->ExtractRootTrackTransform(DalContext, nullptr));"]))
+        if "montage_last_root_transform" in q:
+            out.append(Method("FTransform3f", "DalMontageLastRootTransform", "const UAnimMontage* DalMontage",
+                              doc="host.montage_last_root_transform: the root bone's absolute transform at the end of the montage's last segment.", body=[
+                "if (DalMontage == nullptr || DalMontage->SlotAnimTracks.IsEmpty() || DalMontage->SlotAnimTracks[0].AnimTrack.AnimSegments.IsEmpty())",
+                "{",
+                "\treturn FTransform3f();",
+                "}",
+                "const FAnimSegment& DalSegment = DalMontage->SlotAnimTracks[0].AnimTrack.AnimSegments.Last();",
+                "const UAnimSequence* DalSequence = Cast<UAnimSequence>(DalSegment.GetAnimReference());",
+                "if (DalSequence == nullptr)",
+                "{",
+                "\treturn FTransform3f();",
+                "}",
+                "const FAnimExtractContext DalContext(static_cast<double>(DalSegment.GetEndPos()));",
+                "return FTransform3f(DalSequence->ExtractRootTrackTransform(DalContext, nullptr));"]))
         if "primitive_valid" in q:
             out.append(Method("bool", "DalPrimitiveValid", "const UPrimitiveComponent* DalPrimitive", body=["return IsValid(DalPrimitive);"]))
         if "primitive_speed" in q:
@@ -2240,6 +2295,10 @@ class CppGen:
         if self.bind_input:
             for x in ("EnhancedInputComponent.h", "InputAction.h", "InputActionValue.h"):
                 add(x)
+        if _MONTAGE_ASSET_QUERIES & set(self.queries):
+            add("Animation/AnimMontage.h")
+        if {"montage_root_transform", "montage_last_root_transform"} & set(self.queries):
+            add("Animation/AnimSequence.h")
         if self.needs_anim:
             add("Animation/AnimInstance.h")
             add("Animation/AnimMontage.h")

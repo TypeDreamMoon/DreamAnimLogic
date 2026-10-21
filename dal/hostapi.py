@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from . import runtime as rt
-from .types import BOOL, CHANNEL, CHANNEL_SET, FLOAT, HIT, INT, MONTAGE_ASSET, MONTAGE_BLEND_MODE, MOVEMENT_MODE, PRIMITIVE, QUAT, ROOT_MOTION_MODE, ROTATOR, SEQUENCE, TRANSFORM, VEC2, VEC3, Type
+from .types import BLEND_OPTION, BOOL, CHANNEL, CHANNEL_SET, FLOAT, HIT, INT, MONTAGE_ASSET, MONTAGE_BLEND_MODE, MOVEMENT_MODE, PRIMITIVE, QUAT, ROOT_MOTION_MODE, ROTATOR, SEQUENCE, TRANSFORM, VEC2, VEC3, Type
 
 
 # ---- reads ---------------------------------------------------------------------------------------------------
@@ -198,7 +198,9 @@ COMMANDS: dict[str, Command] = {
         _c("set_rotation_rate", [ROTATOR], ue="CharacterMovement->RotationRate = r"),
         _c("set_orient_rotation_to_movement", [BOOL], ue="CharacterMovement->bOrientRotationToMovement = b"),
         _c("set_use_controller_desired_rotation", [BOOL], ue="CharacterMovement->bUseControllerDesiredRotation = b"),
-        _c("set_movement_mode", [MOVEMENT_MODE], ue="CharacterMovement->SetMovementMode(Mode)"),
+        _c("set_movement_mode", [MOVEMENT_MODE, INT], 1, (0,), sparse=True,
+           doc="the second argument is the custom sub mode (MOVE_Custom's CustomMovementMode); a program that leaves it out sends the mode alone",
+           ue="CharacterMovement->SetMovementMode(Mode, SubMode)"),
         _c("jump", [], ue="Character->Jump()"),
         _c("stop_jumping", [], ue="Character->StopJumping()"),
         _c("crouch", [], ue="Character->Crouch()"),
@@ -236,6 +238,12 @@ COMMANDS: dict[str, Command] = {
         _c("snapshot_pose", ["place"], doc="save the current pose into a snapshot state (a state of type snapshot, or a snapshot member of a struct state); "
                                            "the host gets the dotted path of the place; valid(State) is true from the next update (animation logic)",
            ue="AnimInstance->SnapshotPose(<the FPoseSnapshot state or member>)"),
+        # v4: root motion override (the character is driven by the logic: climbing; MOVE_Custom with a sub mode is its movement mode)
+        _c("root_motion_override", [VEC3, QUAT],
+           doc="root motion for the next movement update: velocity (cm/s, world space) and the rotation to apply (a delta of the actor's rotation); "
+               "it stays in effect until root_motion_clear()",
+           ue="UDalCharacterMovementComponent::SetRootMotionOverride(Velocity, RotationDelta): an override root motion source (DalRuntime)"),
+        _c("root_motion_clear", [], doc="end the root motion override", ue="UDalCharacterMovementComponent::ClearRootMotionOverride() (DalRuntime)"),
         # controller / camera (v2)
         _c("set_control_rotation", [ROTATOR], ue="Controller->SetControlRotation(Rotation)"),
         _c("camera_set_arm_length", [FLOAT], ue="SpringArm->TargetArmLength = v"),
@@ -283,6 +291,19 @@ QUERIES: dict[str, Query] = {
         Query("primitive_can_step_up", (PRIMITIVE,), BOOL, "can the character step onto the component", "Component->CanCharacterStepUp(Pawn)", True),
         Query("primitive_transform", (PRIMITIVE,), TRANSFORM, "world transform of the component", "Component->GetComponentTransform()", True),
         Query("montage_is_playing", (MONTAGE_ASSET,), BOOL, "is the montage (an asset value) playing", "AnimInstance->Montage_IsPlaying(Montage)", True),
+        # v4: what an animation montage asset says about itself (pure, any thread)
+        Query("montage_length", (MONTAGE_ASSET,), FLOAT, "play length of the montage in seconds (0 for none)", "Montage->GetPlayLength()", True),
+        Query("montage_rate_scale", (MONTAGE_ASSET,), FLOAT, "rate scale of the montage (1 for none)", "Montage->RateScale", True),
+        Query("montage_sampling_rate", (MONTAGE_ASSET,), FLOAT, "sampling frame rate of the montage, frames per second (0 for none)",
+              "Montage->GetSamplingFrameRate().AsDecimal()", True),
+        Query("montage_blend_in_time", (MONTAGE_ASSET,), FLOAT, "blend in time of the montage in seconds", "Montage->BlendIn.GetBlendTime()", True),
+        Query("montage_blend_in_option", (MONTAGE_ASSET,), BLEND_OPTION, "blend in easing of the montage", "Montage->BlendIn.GetBlendOption()", True),
+        Query("montage_root_transform", (MONTAGE_ASSET, FLOAT), TRANSFORM,
+              "absolute root bone transform of the montage at a time (component space), taken from its first slot track "
+              "(UAlsMontageUtility::ExtractRootTransformFromMontage)",
+              "Segment->GetAnimReference()->ExtractRootTrackTransform(FAnimExtractContext(Segment->ConvertTrackPosToAnimPos(Time)), nullptr)", True),
+        Query("montage_last_root_transform", (MONTAGE_ASSET,), TRANSFORM, "absolute root bone transform at the end of the montage's last segment",
+              "AnimTrack.AnimSegments.Last(): ExtractRootTrackTransform(FAnimExtractContext(Segment.GetEndPos()), nullptr)", True),
         Query("target_count", (), INT, "number of targetable actors", "actors with the tag DalTargetTag (DalTarget), collected once per tick"),
         Query("target_id", (INT,), INT, "stable id of the i-th target", "AActor::GetUniqueID()"),
         Query("target_location", (INT,), VEC3, "location of the i-th target", "Actor->GetActorLocation()"),
@@ -562,8 +583,9 @@ class HostV1(HostV0):
     def set_use_controller_desired_rotation(self, value: bool) -> None:
         """cm.p.use_controller_desired_rotation = value"""
 
-    def set_movement_mode(self, mode) -> None:
-        """cm.set_movement_mode(int(mode)) -- EMovementMode numbering (None 0, Walking 1, Falling 3 are modelled)"""
+    def set_movement_mode(self, mode, sub=0) -> None:
+        """cm.set_movement_mode(int(mode)) -- EMovementMode numbering (None 0, Walking 1, Falling 3 are modelled).  ``sub`` is the custom sub mode:
+        a program that does not write it does not send it (``sparse``), so a host written for the one-argument command keeps working."""
 
     def jump(self) -> None:
         """cm.jump()"""
@@ -626,6 +648,43 @@ class HostV1(HostV0):
     def montage_is_playing(self, name) -> bool:
         """manager.is_playing(montage) for a montage asset value (the asset's name); the same as ``montage_playing`` for a declared montage"""
         return bool(self.montage_playing(name)) if name is not None else False
+
+    def root_motion_override(self, velocity, rotation_delta) -> None:
+        """character movement: while the override is set, root motion = ``Transform(rotation_delta, velocity * dt)`` replaces the movement's own
+        velocity update (c3: ``cm.root_motion_override = (velocity, rotation_delta)``, applied in the custom movement mode's ``_phys_custom``)"""
+
+    def root_motion_clear(self) -> None:
+        """character movement: end the root motion override (``cm.root_motion_override = None``)"""
+
+    # ---- queries: what a montage asset says about itself --------------------------------------------------------------
+    def montage_length(self, name) -> float:
+        """``Montage.length`` of the asset named ``name`` (0.0 for none / unknown)"""
+        return 0.0
+
+    def montage_rate_scale(self, name) -> float:
+        """``Montage.rate_scale`` (1.0 for none / unknown)"""
+        return 1.0
+
+    def montage_sampling_rate(self, name) -> float:
+        """frames per second the montage's animation is sampled at (c3: ``sequence.sampling_rate``; 0.0 for none / unknown)"""
+        return 0.0
+
+    def montage_blend_in_time(self, name) -> float:
+        """``Montage.blend_in.time`` (0.25 for none / unknown)"""
+        return 0.25
+
+    def montage_blend_in_option(self, name):
+        """``Montage.blend_in.option`` as a ``BlendOption`` (Linear for none / unknown)"""
+        return rt.BlendOption.Linear
+
+    def montage_root_transform(self, name, time):
+        """the root bone's absolute transform in component space at ``time`` (c3: the root track of the montage's first slot track's segment at that time;
+        identity for none / unknown)"""
+        return rt.Transform()
+
+    def montage_last_root_transform(self, name):
+        """the root bone's absolute transform at the end of the montage's last segment (identity for none / unknown)"""
+        return rt.Transform()
 
     # ---- commands: controller / camera --------------------------------------------------------------------------------
     def set_control_rotation(self, rotation) -> None:

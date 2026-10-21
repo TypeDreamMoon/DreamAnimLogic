@@ -45,6 +45,8 @@ class MockHost(HostV1):
         self.bones: dict[str, dict] = {}         # scripted pose: bone name -> {"component": transform, "world": transform}
         self.skeleton: dict[str, dict] = {}      # scripted reference skeleton: bone name -> {"parent": name or None, "translation": (x, y, z)}
         self.snapshots: list[str] = []           # the names of the pose snapshots taken (snapshot_pose), oldest first
+        self.montage_assets: dict[str, dict] = {}   # scripted montage assets: name -> length, rate_scale, sampling_rate, blend_in_time, blend_in_option,
+                                                    # root_velocity (the root moves in a straight line, clamped to the length)
 
     # ---- reads ---------------------------------------------------------------------------------------------------------
     def action(self, name, ty):
@@ -82,6 +84,38 @@ class MockHost(HostV1):
 
     def montage_active(self, name):
         return bool(self._montage(name).get("active", self._montage(name).get("playing", False)))
+
+    # ---- what a montage asset says about itself (scripted: ``montage_assets``) -------------------------------------------------------
+    def _asset(self, name) -> dict:
+        return self.montage_assets.get(name, {}) if name is not None else {}
+
+    def montage_length(self, name):
+        return float(self._asset(name).get("length", 0.0))
+
+    def montage_rate_scale(self, name):
+        return float(self._asset(name).get("rate_scale", 1.0))
+
+    def montage_sampling_rate(self, name):
+        return float(self._asset(name).get("sampling_rate", 30.0)) if name is not None and name in self.montage_assets else 0.0
+
+    def montage_blend_in_time(self, name):
+        return float(self._asset(name).get("blend_in_time", 0.25))
+
+    def montage_blend_in_option(self, name):
+        return rt.BlendOption(int(self._asset(name).get("blend_in_option", 0)))
+
+    def _root_at(self, name, time):
+        velocity = self._asset(name).get("root_velocity")
+        if velocity is None:
+            return rt.Transform()
+        t = min(max(float(time), 0.0), float(self._asset(name).get("length", 0.0)))
+        return rt.Transform(rt.Vec3(velocity[0] * t, velocity[1] * t, velocity[2] * t))
+
+    def montage_root_transform(self, name, time):
+        return self._root_at(name, time)
+
+    def montage_last_root_transform(self, name):
+        return self._root_at(name, self._asset(name).get("length", 0.0))
 
     def montage_position(self, name):
         return float(self._montage(name).get("position", 0.0))

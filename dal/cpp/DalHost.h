@@ -202,6 +202,8 @@ namespace DalHost
 		CameraSetFov,
 		// v4
 		MontageSetPosition,
+		RootMotionOverride,
+		RootMotionClear,
 		MontageStopSource,
 		PlaySlotAnimation,
 		StopMontagesWithSlot,
@@ -221,6 +223,7 @@ namespace DalHost
 		FVector3f V = FVector3f(0.0f, 0.0f, 0.0f);
 		FRotator3f R = FRotator3f(0.0f, 0.0f, 0.0f);
 		// v4
+		FQuat4f Q = FQuat4f(0.0f, 0.0f, 0.0f, 1.0f);         // root_motion_override: the rotation delta
 		FName Name;                            // slot name, or the dotted path of the snapshot state
 		int32 Count = 0;                       // play_slot_animation: loops
 		int32 Instance = INDEX_NONE;           // montage_stop_source: the montage instance that raised the notify
@@ -299,12 +302,23 @@ namespace DalHost
 			return C;
 		}
 
-		inline FCommand SetMovementMode(int32 Mode)
+		inline FCommand SetMovementMode(int32 Mode, int32 Sub = 0)
 		{
 			FCommand C = Make(ECommand::SetMovementMode);
 			C.Mode = Mode;
+			C.Count = Sub;                                    // the custom sub mode (MOVE_Custom)
 			return C;
 		}
+
+		inline FCommand RootMotionOverride(const FVector3f& Velocity, const FQuat4f& RotationDelta)
+		{
+			FCommand C = Make(ECommand::RootMotionOverride);
+			C.V = Velocity;
+			C.Q = RotationDelta;
+			return C;
+		}
+
+		inline FCommand RootMotionClear() { return Make(ECommand::RootMotionClear); }
 
 		inline FCommand AddMovementInput(const FVector3f& Direction, float Scale)
 		{

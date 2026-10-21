@@ -249,6 +249,7 @@ class Command(Stmt):
     name: str
     args: list[Expr]
     place: tuple | None = None       # host.snapshot_pose(place): (state name, member path) of the snapshot the command fills
+    written: int | None = None       # a `sparse` command: how many arguments the program wrote (the host is sent those); None = all of them
 
 
 @dataclass

@@ -241,7 +241,8 @@ class Evaluator:
                 raise _ReturnValue(None if s.value is None else vals.copy_value(self.ev(s.value, env)))
             elif k is ir.Command:
                 implicit = [self.owner._source for _x in COMMANDS[s.name].implicit]      # host.montage_stop_source: the montage instance of the notify
-                self.owner.emit_command(s.name, implicit + [command_arg(a, self.ev(a, env)) for a in s.args])
+                sent = s.args if s.written is None else s.args[:s.written]                  # a sparse command: only what the program wrote
+                self.owner.emit_command(s.name, implicit + [command_arg(a, self.ev(a, env)) for a in sent])
             elif k is ir.ExprStmt:
                 self.ev(s.expr, env)
             elif k is ir.For:
