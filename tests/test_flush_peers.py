@@ -205,6 +205,16 @@ class FlushPeersCppTests(unittest.TestCase):
                 else:
                     self.assertEqual(inp_step, ["stop_jumping", "uncrouch"], (options, i))
 
+    def test_a_caller_without_commands_of_its_own_hands_the_peers_over_too(self):
+        files_ = {"Chr.dal": CHR, "Inp.dal": ALONE}
+        mods = {n[:-4]: dal.check_source(files_[n], n, files=files_).module for n in ("Chr.dal", "Inp.dal")}
+        schedule = harness.default_schedule(mods)
+        frames = tcc.round_frames(harness.random_system_frames(mods, 4, 1))
+        cpp, output = cpp_system.build_and_run_system(mods, frames, schedule)
+        if tcc.COMPILER[0] == "msvc":
+            self.assertNotIn("warning", output.lower(), output)
+        self.assertEqual([c[0] for c in cpp[0]["Inp"]["__cmds__"]], ["jump"])
+
 
 if __name__ == "__main__":
     unittest.main()

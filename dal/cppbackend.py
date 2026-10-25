@@ -1513,6 +1513,8 @@ class CppGen:
         return out
 
     def execute_body(self) -> list[str]:
+        if not self.cmds:                                        # a logic with flush_peers and no commands of its own: nothing to run here
+            return ["(void)DalCommand;"]
         out = ["switch (DalCommand.Kind)", "{"]
         for c in self.cmds:
             guards, body = EXEC[c]
