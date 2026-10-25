@@ -32,6 +32,7 @@ from dal import runtime as rt
 from dal import settings as dsettings
 from dal.interp import Interpreter
 from dal.pybackend import load_class
+from dal.types import TRANSFORM
 
 
 
@@ -53,10 +54,12 @@ HAVE_SOURCE = os.path.isdir(os.path.join(ALS_SOURCE, "Public", "State"))
 DT = 1.0 / 60.0
 
 ANIM_STUB = """
-// stand-in for als/AlsAnimationInstance.dal: the character only calls Jump() on it
+// stand-in for als/AlsAnimationInstance.dal: the character only calls Jump() and SnapshotFinalRagdollPose() on it
 logic AlsAnimationInstance;
 state Jumps: int;
+state Snapshots: int;
 pub method Jump() { Jumps += 1; }
+pub method SnapshotFinalRagdollPose() { Snapshots += 1; }
 update(dt) { Jumps += 0; }
 """
 
@@ -171,9 +174,9 @@ def interpolate_constant(current, target, dt, speed):
 class Rig:
     """AlsInput + AlsCharacter + the animation stand-in on one actor, with scripted host values that persist from frame to frame."""
 
-    def __init__(self, backend="python", settings=None, movement=None, resolver=None, character_params=None, **host):
+    def __init__(self, backend="python", settings=None, movement=None, resolver=None, character_params=None, host_class=None, **host):
         self.mods = modules()
-        self.hosts = {n: harness.ScriptedHost() for n in self.mods}
+        self.hosts = {n: (host_class or harness.ScriptedHost)() for n in self.mods}
         params = {"AlsCharacter": {"Settings": CHARACTER_SETTINGS if settings is None else settings,
                                    "MovementSettings": movement_settings() if movement is None else movement}}
         if resolver is not None:
@@ -192,7 +195,8 @@ class Rig:
         self.host = {"dt": DT, "velocity": (0.0, 0.0, 0.0), "acceleration": (0.0, 0.0, 0.0), "max_acceleration": 2000.0,
                      "max_braking_deceleration": 1500.0, "max_walk_speed": 375.0, "movement_mode": WALKING_MODE, "is_grounded": True,
                      "is_crouching": False, "actor_location": (0.0, 0.0, 0.0), "actor_rotation": yaw_quat(0.0), "control_rotation": (0.0, 0.0, 0.0),
-                     "has_root_motion": False, "actor_ready": True, "pre_penetration_velocity": (0.0, 0.0, 0.0), "pre_penetration_velocity_valid": False}
+                     "has_root_motion": False, "actor_ready": True, "pre_penetration_velocity": (0.0, 0.0, 0.0), "pre_penetration_velocity_valid": False,
+                     "capsule_radius": 30.0, "capsule_half_height": 90.0, "actor_scale": 1.0, "ragdoll_supported": False}
         self.host.update(host)
         self.last: dict = {}
         self.trace: list = []
@@ -227,12 +231,15 @@ class Rig:
     def anim(self):
         return self.objs["AlsAnimationInstance"]
 
-    def step(self, events=(), curves=None, dt=None, hooks=(), auto_hooks=True, **host):
+    def step(self, events=(), curves=None, dt=None, hooks=(), auto_hooks=True, between=None, **host):
         """One frame: ``host`` values replace the scripted ones from now on, ``events`` reach AlsInput (``(action, phase, value)``).
 
         ``hooks`` are the events the movement component raises while it moves the character, between the pre_movement and the after_movement
         slot (``("jumped",)``, ``("landed", hit)``, ``("notify_begin", name, payload, instance)`` ...); with ``auto_hooks`` a change of the host
-        values ``movement_mode`` / ``is_crouching`` raises ``movement_mode_changed`` / ``crouch_started`` / ``crouch_ended`` by itself."""
+        values ``movement_mode`` / ``is_crouching`` raises ``movement_mode_changed`` / ``crouch_started`` / ``crouch_ended`` by itself.
+
+        ``between(rig)`` stands in for the movement component: it is called when the slots before the movement are done (``rig.blocks`` has the
+        commands of each block so far) and returns ``(host values the later slots read, hooks)``."""
         if dt is not None:
             host["dt"] = dt
         previous = (self.host.get("movement_mode"), self.host.get("is_crouching"))
@@ -248,12 +255,20 @@ class Rig:
             self.hosts[n].load(f)
         armed = False
         self.trace = []
+        self.blocks = []
         for n, slot in self.schedule:
             if slot == "after_movement" and not armed:
-                armed = True                              # the movement component records the pre-penetration velocity between the two slots:
-                for h in self.hosts.values():             # the reads of the blocks before it consumed the scripted one, so arm it again
-                    h.pre_penetration_velocity = f.get("pre_penetration_velocity", rt.VEC3_ZERO)
-                    h.pre_penetration_velocity_valid = f.get("pre_penetration_velocity_valid", False)
+                armed = True
+                if between is not None:                   # the movement component runs: what it did is what the later slots read
+                    updates, extra = between(self)
+                    self.host.update(updates)
+                    raised.extend(extra)
+                    f = self._frame([], curves)
+                    for h in self.hosts.values():
+                        h.load(f)
+                for h in self.hosts.values():             # the movement component records the pre-penetration velocity between the two slots:
+                    h.pre_penetration_velocity = f.get("pre_penetration_velocity", rt.VEC3_ZERO)      # the reads of the blocks before it consumed the
+                    h.pre_penetration_velocity_valid = f.get("pre_penetration_velocity_valid", False)  # scripted one, so arm it again
                 for h in self.hosts.values():             # and the hooks it raised while it moved reach every logic that listens
                     h.events.extend(tuple(e) for e in raised)
             before = len(self.hosts[n].calls)
@@ -262,6 +277,7 @@ class Rig:
             else:
                 self.objs[n].update_phase(slot, f["dt"])
             self.trace.append((n, slot, [c[0] for c in self.hosts[n].calls[before:]]))        # which block handed which commands to the host
+            self.blocks.append((n, slot, list(self.hosts[n].calls[before:])))
         self.cmds = {n: list(h.calls) for n, h in self.hosts.items()}
         for h in self.hosts.values():
             h.calls.clear()
@@ -314,7 +330,7 @@ class Case(unittest.TestCase):
 
 CITATION = re.compile(r"(\w+\.(?:h|cpp):\d+|\b(?:C|CA|CMC|EX|AI|RMS):\d+|//\s*:\d+)")
 DECLARATION = re.compile(r"^(?:pub\s+)?(?:method|view)\s+(\w+)|^fn\s+(\w+)|^update\(dt\)|^on begin_play|^on timer\s+(\w+)|^on input\s+(\w+)"
-                         r"|^on (?:movement_mode_changed|jumped|crouch_started|crouch_ended)")
+                         r"|^on (?:movement_mode_changed|jumped|crouch_started|crouch_ended|physics_rotation|notify\w*)|^notify(?:_state)?\s+(\w+)")
 
 
 class FilesTests(Case):
@@ -349,8 +365,10 @@ class FilesTests(Case):
         self.assertEqual([(p.name, p.logic) for p in inp.peers], [("Character", "AlsCharacter")])
         self.assertTrue(char.slot_events)                                                           # the hooks of the movement component reach the Tick of the same tick
         self.assertEqual([(o.relation, o.peer, o.slots) for o in inp.order], [("before", "Character", ("pre_movement",))])      # its calls are flushed by the character's block
-        self.assertEqual(sorted(h.event for h in char.handlers if h.event in ("movement_mode_changed", "jumped", "crouch_started", "crouch_ended")),
-                         ["crouch_ended", "crouch_started", "jumped", "movement_mode_changed"])
+        self.assertEqual(sorted(h.event for h in char.handlers if h.event in ("movement_mode_changed", "jumped", "crouch_started", "crouch_ended", "physics_rotation")),
+                         ["crouch_ended", "crouch_started", "jumped", "movement_mode_changed", "physics_rotation"])
+        self.assertEqual(sorted(n.name for n in char.notifies),
+                         ["AlsAnimNotifyState_EarlyBlendOut", "AlsAnimNotifyState_SetLocomotionAction", "AlsAnimNotifyState_SetRootMotionScale"])
         pub = sorted(x.name for x in char.methods if x.pub)
         for name in ("Jump", "SetDesiredGait", "SetDesiredStance", "SetDesiredAiming", "SetDesiredRotationMode", "SetViewMode", "SetOverlayMode",
                      "SetLocomotionAction", "StartMantling", "StartRagdolling", "StopRagdolling", "StartRolling", "StartRollingGrounded"):
@@ -1144,7 +1162,8 @@ class InputMappingTests(Case):
             rig.step(events=[("SwitchShoulder", "triggered", True)])
             self.assertFalse(rig.inp.snapshot()["bRightShoulder"])
 
-    def test_the_actions_that_start_an_action_do_nothing_yet(self):
+    def test_the_actions_that_start_an_action_need_what_they_act_with(self):
+        # no roll montage in the settings, no ragdoll in the host: the keys do nothing (the actions themselves: test_als_actions.py)
         for action in ("Ragdoll", "Roll"):
             for rig in rigs():
                 rig.step(events=[(action, "triggered", True)])
@@ -1250,17 +1269,29 @@ def system_params(seed, polyline=False):
                              "MovementSettings": harness.random_settings(types["MovementSettings"], seed + 1, polyline=polyline)}}
 
 
-def system_frames(count, seed, real_anim=False):
+NOTIFY_ACTION = "AlsAnimNotifyState_SetLocomotionAction"
+NOTIFY_SCALE = "AlsAnimNotifyState_SetRootMotionScale"
+NOTIFY_EARLY = "AlsAnimNotifyState_EarlyBlendOut"
+ACTION_TAGS = ("", "Als.LocomotionAction.Rolling", "Als.LocomotionAction.Mantling", "Als.LocomotionAction.Ragdolling", "Als.LocomotionAction.GettingUp")
+
+
+def system_frames(count, seed, real_anim=False, notifies=False, ragdoll=True):
     """Random frames for the system: host values, input events of AlsInput, the animation curves the character reads, and the hooks the movement
-    component raises between the two slots (a change of the movement mode, of the crouch, a jump)."""
+    component raises between the two slots (a change of the movement mode, of the crouch, a jump, the physics rotation); with ``notifies`` also
+    the events of the three notify states of the actions (the generated C++ gets them from the driver patch only where it can: not here)."""
     mods = modules(real_anim)
     frames = harness.random_system_frames(mods, count, seed)
     rng = random.Random(seed * 31 + 7)
     step = next(i for i, (n, slot) in enumerate(harness.default_schedule(mods)) if (n, slot) == ("AlsCharacter", "after_movement"))
     mode, crouching = 1, False
     for f in frames:
+        if rng.random() < 0.5:                                                 # mostly on the ground: the actions start there
+            f["movement_mode"], f["is_grounded"] = 1, True
         f["curves"] = {"RotationYawSpeed": rng.choice([0.0, rng.uniform(-120.0, 120.0)]), "RotationYawOffset": rng.choice([0.0, rng.uniform(-40.0, 40.0)])}
         f["control_rotation"] = (rng.uniform(-60.0, 60.0), rng.uniform(-180.0, 180.0), 0.0)
+        f["bones"] = {"pelvis": {"component": harness._rand_value(rng, TRANSFORM, 50.0), "world": harness._rand_value(rng, TRANSFORM, 100.0)}}     # the pelvis the ragdoll reads
+        if not ragdoll:
+            f["ragdoll_supported"] = False                                     # a host without a ragdoll: the roll is the action the keys start
         hooks = []
         if f["movement_mode"] != mode:
             hooks.append(("movement_mode_changed", mode, f["movement_mode"]))
@@ -1270,13 +1301,53 @@ def system_frames(count, seed, real_anim=False):
             crouching = f["is_crouching"]
         if rng.random() < 0.08:
             hooks.append(("jumped",))
+        if rng.random() < 0.5:
+            hooks.append(("physics_rotation", f["dt"]))
+        if notifies:
+            action = {"LocomotionAction": rng.choice(ACTION_TAGS)}
+            if rng.random() < 0.15:
+                hooks.append(("notify_begin", NOTIFY_ACTION, action, rng.randint(1, 3)))
+            if rng.random() < 0.15:
+                hooks.append(("notify_end", NOTIFY_ACTION, action, rng.randint(1, 3)))
+            if rng.random() < 0.1:
+                hooks.append(("notify_begin", NOTIFY_SCALE, {"TranslationScale": rng.choice([0.5, 1.0, 2.0])}, 1))
+            if rng.random() < 0.1:
+                hooks.append(("notify_end", NOTIFY_SCALE, {"TranslationScale": rng.choice([0.5, 1.0, 2.0])}, 1))
+            if rng.random() < 0.2:
+                hooks.append(("notify_tick", NOTIFY_EARLY, {"BlendOutDuration": rng.choice([0.1, 0.4]), "bCheckInput": rng.random() < 0.5,
+                                                            "bCheckLocomotionMode": rng.random() < 0.5, "bCheckRotationMode": rng.random() < 0.5,
+                                                            "bCheckStance": rng.random() < 0.5}, rng.randint(1, 3)))
         f["step_events"] = {step: hooks} if hooks else {}
     return frames
 
 
+class EchoHost(harness.ScriptedHost):
+    """The scripted host of the system runs, with the commands the stand-in engine applies to what the logics read next: SetActorLocation
+    SetVelocity and SetMovementMode (all logics share one engine, so the change reaches every host)."""
+
+    def __init__(self):
+        super().__init__()
+        self.peers: list = [self]
+
+    def record(self, name, args):
+        super().record(name, args)
+        if name == "set_actor_location":
+            for h in self.peers:
+                h.actor_location = tuple(args[0])
+        elif name == "set_velocity":
+            for h in self.peers:
+                h.velocity = tuple(args[0])
+        elif name == "set_movement_mode":
+            for h in self.peers:
+                h.movement_mode = int(args[0])
+                h.movement_mode_custom = int(args[1]) if len(args) > 1 else 0
+
+
 def run_system(mods, frames, backend, params, schedule=None):
     """``harness.run_system`` with the params of the logics (settings data)."""
-    hosts = {n: harness.ScriptedHost() for n in mods}
+    hosts = {n: EchoHost() for n in mods}
+    for h in hosts.values():
+        h.peers = list(hosts.values())
     objs = {}
     for n, m in mods.items():
         p = params.get(n, {})
@@ -1352,6 +1423,9 @@ class GeneratedCppShapeTests(Case):
         self.has(c, "DalPhaseTicks[0].TickGroup = TG_PrePhysics;")
         self.has(c, "DalPhaseTicks[1].AddPrerequisite(DalMovement, DalMovement->PrimaryComponentTick);")    # after the movement component
         self.has(c, "Anim->DalQueue_Jump();")                                               # the animation instance is called through its queue
+        for notify_class in ("UAlsAnimNotifyState_SetLocomotionAction", "UAlsAnimNotifyState_SetRootMotionScale", "UAlsAnimNotifyState_EarlyBlendOut"):
+            self.has(h + c, notify_class)                                                   # the classes of the montages' notify states are the ALS ones
+        self.has(h, "MantlingHigh;")                                                        # one UAlsMantlingSettings per kind of mantle
         for command in ("SetActorRotation", "SetMaxWalkSpeed", "SetGroundFriction", "SetBrakingFrictionFactor", "SetInputBlocked"):
             self.has(c, f"DalHost::Cmd::{command}(")
         self.assertEqual(len(re.findall(r"BindAction\(", inp["AlsInput.cpp"])), 19)         # the 19 bindings of SetupPlayerInputComponent (EX:69-87)
@@ -1387,9 +1461,11 @@ class BackendAgreementTests(Case):
         def patch(text, modules_, frames):
             return input_events_patch(text, modules_, frames)
 
-        for seed in (1, 2):
+        for seed, ragdoll in ((1, True), (2, True), (3, False)):
             params = system_params(seed, polyline=True)                       # the stand-in engine evaluates polylines
-            frames = tcc.round_frames(system_frames(60, seed))
+            if not ragdoll:
+                params["AlsCharacter"]["Settings"].setdefault("Rolling", {})["Montage"] = "A_Roll"      # the keys roll: a montage that exists
+            frames = tcc.round_frames(system_frames(60, seed, ragdoll=ragdoll))
             with als_host_v2.cpp_environment(settings={"AlsCharacter": params["AlsCharacter"]}, driver_patch=patch) as env:
                 try:
                     cpp, output = env.run(mods, frames)
@@ -1402,6 +1478,8 @@ class BackendAgreementTests(Case):
             self.assertGreater(sum(len(f["AlsCharacter"]["__cmds__"]) for f in cpp), 100)
             seen = {c[0] for f in cpp for logic in ("AlsInput", "AlsCharacter") for c in f[logic]["__cmds__"]}
             self.assertTrue({"add_movement_input", "add_controller_yaw_input", "set_actor_rotation", "set_max_walk_speed"} <= seen, seen)   # the input events reached AlsInput
+            if not ragdoll:
+                self.assertTrue({"montage_play", "crouch"} <= seen, seen)                                # the roll: the montage and the crouch of its stance
 
 
 def input_events_patch(text, modules_, frames):
@@ -1415,11 +1493,18 @@ def input_events_patch(text, modules_, frames):
                         + "".join(f"\tUInputAction Action_{a};\n" for a in actions), 1)
     text = text.replace("\tL_AlsInput.StubWorld = &World;\n", "\tL_AlsInput.StubWorld = &World;\n"
                         + "".join(f"\tL_AlsInput.DalAction_{a} = &Action_{a};\n" for a in actions), 1)
+    text = text.replace("\tMesh.StubAsset = &MeshAsset; Mesh.StubOwner = &Pawn;\n",
+                        "\tUPhysicsAsset Phys;\n\tMesh.StubPhysics = &Phys;\n\tMesh.StubAsset = &MeshAsset; Mesh.StubOwner = &Pawn;\n", 1)
     marker = "\t\tStubLog::Lines().clear();\n"
     chunks = text.split(marker)
     out = [chunks[0]]
     for k, chunk in enumerate(chunks[1:]):
         lines = ""
+        fr = frames[k]
+        if "root_motion_mode" in fr:                                           # what the actions read of the mesh: the root motion mode of its animation instance, its physics asset
+            lines += f"\t\tL_AlsAnimationInstance.RootMotionMode = static_cast<ERootMotionMode::Type>({int(fr['root_motion_mode'])});\n"
+        if "ragdoll_supported" in fr:
+            lines += '\t\tPhys.StubBodies = {"pelvis", "spine_03"};\n' if fr["ragdoll_supported"] else '\t\tPhys.StubBodies = {"pelvis"};\n'
         if "StubCurves[" not in text:                                          # the animation curves the character reads through the mesh's animation instance
             for cname, cv in frames[k].get("curves", {}).items():
                 lines += f'\t\tL_AlsAnimationInstance.StubCurves["{cname}"] = {cpp_driver._num(cv)}f;\n'

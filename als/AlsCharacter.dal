@@ -6,28 +6,37 @@
 // of the C++ it ports; names, members and the order of the calls follow the C++ (names of the C++ functions in snake_case, `pub` ones
 // as in the C++).  The animation instance copies the state of this logic (peer reads) and calls Jump() on its peer.
 //
-// In (milestone M1): the desired and the actual states (view mode, rotation mode, stance, gait, overlay mode, locomotion mode,
+// In (milestones M1 and M3): the desired and the actual states (view mode, rotation mode, stance, gait, overlay mode, locomotion mode,
 // locomotion action), the view, the input direction, the locomotion state, gait selection and the max allowed gait, rotation (grounded,
-// in air, aiming, with the animation curves RotationYawSpeed / RotationYawOffset), the landing friction, jumping, and the push of the
-// gait settings to the movement component (CMC:894-1020).
+// in air, aiming, with the animation curves RotationYawSpeed / RotationYawOffset), the landing friction, jumping, the push of the
+// gait settings to the movement component (CMC:894-1020), and the actions of AlsCharacter_Actions.cpp:
+//   * rolling (CA:22-139): start conditions and direction, the montage, the rotation towards the target yaw while rolling;
+//   * mantling (CA:141-713, RMS:37-128): the forward / downward traces and overlaps, the selection of the mantling settings, the start time,
+//     the root motion source as a driver in the pre_movement block (root_motion_override + the custom movement mode), stopping;
+//   * the three notify states the actions end on: SetLocomotionAction, SetRootMotionScale and EarlyBlendOut (Notifies/*).
 //
-// Not in (stubs, a later milestone): rolling, mantling and ragdolling (AlsCharacter_Actions.cpp) -- their pub methods exist with
-// the ALS signatures so that AlsInput and the landing code can call them; the root motion driver of mantling will go into the
-// pre_movement block.  Dropped for good (single player, no moving bases): everything that replicates (Server* / Client* / Multicast* /
-// OnRep_*, view network smoothing, the network branches of RefreshLocomotion), RefreshMovementBase and the movement base parts of the
-// Refresh* functions, RefreshMeshProperties (mesh tick options), the DisplayDebug family, the BlueprintImplementableEvents (OnGaitChanged
-// ...: language gap G19) and the extension points RefreshCustom*Rotation.
+// Not in (stubs, the next port): ragdolling and the get up (CA:717-1170) -- StartRagdolling / StopRagdolling exist with the ALS signatures so
+// that AlsInput and the landing code can call them.
+//
+// Dropped for good (single player, no moving bases): everything that replicates (Server* / Client* / Multicast* / OnRep_*, view network
+// smoothing, the network branches of RefreshLocomotion), RefreshMovementBase and the movement base parts of the Refresh* functions (the
+// mantling target primitive is always in world space), RefreshMeshProperties (mesh tick options), the DisplayDebug family, the
+// BlueprintImplementableEvents (OnGaitChanged, OnMantlingStarted, OnRagdollingEnded ...: language gap G19) and the extension points
+// RefreshCustom*Rotation.
 //
 // Differences that follow from DAL (each one is listed in als-dal-rewrite.md section 7):
-//   * the hooks of the engine (OnMovementModeChanged, OnStartCrouch / OnEndCrouch, OnJumped) are `on` handlers, and the logic is
-//     `slot_events`: an event the movement component raises inside its tick is handled at the start of the next tick slot of the same
-//     tick, which is the order of the C++ (the hook ran inside the movement component, before AAlsCharacter::Tick);
-//   * the host commands run after the update block, so SetActorRotation is mirrored in ActorRotationNow, which the rest of the block reads
-//     where the C++ calls GetActorRotation() after having rotated the actor;
+//   * the hooks of the engine (OnMovementModeChanged, OnStartCrouch / OnEndCrouch, OnJumped, PhysicsRotation) are `on` handlers, and the
+//     logic is `slot_events`: an event the movement component raises inside its tick is handled at the start of the next tick slot of
+//     the same tick, which is the order of the C++ (the hook ran inside the movement component, before AAlsCharacter::Tick);
+//   * the host commands run after the update block, so what the C++ does to the actor and reads back at once is mirrored in this logic's
+//     state: SetActorRotation in ActorRotationNow, SetMovementMode and the OnMovementModeChanged call inside it (the locomotion mode) in
+//     MovementModeNow / LocomotionMode; both mirrors are taken from the host again at the start of the next after_movement block;
 //   * the movement component keeps a copy of the rotation mode, the stance and the gait settings: here they are this logic's own
-//     RotationMode / Stance and the settings are looked up where they are used (a `settings` value cannot be stored);
+//     RotationMode / Stance and the settings are looked up where they are used;
 //   * RefreshGroundedMovementSettings runs inside PhysWalking in UE (with the velocity at the start of the movement): push_movement_settings()
-//     runs at the end of the after_movement block with the velocity at the end of the movement, which is the same value one frame later.
+//     runs at the end of the after_movement block with the velocity at the end of the movement, which is the same value one frame later;
+//   * a data asset cannot be handed around in DAL, so SelectMantlingSettings (a Blueprint event in ALS) is the enum AlsMantlingSettingsKind
+//     and views that read the selected asset's members out of the `param`s MantlingHigh ... (see als/bindings.json for the data assets);
 
 use "als_lib.dal";
 
@@ -37,6 +46,12 @@ logic AlsCharacter : actor slot_events in after_movement;   // the ALS Tick runs
 param Settings: AlsCharacterSettings;                  // AlsCharacter.h:31
 param MovementSettings: AlsMovementSettings;           // AlsCharacter.h:34
 
+// The mantling settings AlsCharacter::SelectMantlingSettings (CA:577, overridden in B_Als_Character) chooses from, one param per data asset.
+param MantlingHigh: AlsMantlingSettings;               // MS_Als_High
+param MantlingHighInAir: AlsMantlingSettings;          // MS_Als_High_InAir
+param MantlingLow: AlsMantlingSettings;                // MS_Als_Low
+param MantlingLowBox: AlsMantlingSettings;             // MS_Als_Low_Box
+
 // ---- what the host tells us, sampled at the start of every update block ---------------------------------------------------------
 input Velocity: vec3 <- host.velocity;                                           // GetVelocity()                            C:1376
 input Acceleration: vec3 <- host.acceleration;                                   // CMC->GetCurrentAcceleration()            C:1119
@@ -44,9 +59,16 @@ input MaxAcceleration: float <- host.max_acceleration;                          
 input PrePenetrationVelocity: vec3 <- host.pre_penetration_velocity;             // TryConsumePrePenetrationAdjustmentVelocity, consumed by the read   C:1402
 input PrePenetrationVelocityValid: bool <- host.pre_penetration_velocity_valid;
 input ControlRotation: rotator <- host.control_rotation;                         // Super::GetViewRotation()                 C:101, C:1252
+input ActorLocation: vec3 <- host.actor_location;                                // GetActorLocation()                       CA:174
 input ActorRotation: quat <- host.actor_rotation;                                // GetActorRotation()                       C:110
 input IsGrounded: bool <- host.is_grounded;                                      // IsMovingOnGround()                       CMC:333 (PhysWalking only runs on the ground)
+input CharacterMovementMode: MovementMode <- host.movement_mode;                 // GetCharacterMovement()->MovementMode     (MovementModeNow is taken from it at the start of the Tick)
 input HasAnyRootMotion: bool <- host.has_root_motion;                            // HasAnyRootMotion()                       C:1521
+input RootMotionModeOfAnimation: RootMotionMode <- host.root_motion_mode;        // GetAnimInstance()->RootMotionMode        CA:106
+input CapsuleRadius: float <- host.capsule_radius;                               // GetCapsuleComponent()->GetScaledCapsuleRadius()      CA:209
+input CapsuleHalfHeight: float <- host.capsule_half_height;                      // GetCapsuleComponent()->GetScaledCapsuleHalfHeight()  CA:210
+input CapsuleScale: float <- host.actor_scale;                                   // GetCapsuleComponent()->GetComponentScale().Z         CA:208
+input MeshWorldTransform: transform <- host.mesh_world_transform;                // GetMesh()->GetComponentTransform(): GetBaseRotationOffset() is the actor's rotation to it   CA:517
 input RotationYawSpeedCurve: float <- host.anim_curve("RotationYawSpeed");       // GetCurveValue(RotationYawSpeedCurveName) C:1814 (AlsConstants.h:81)
 input RotationYawOffsetCurve: float <- host.anim_curve("RotationYawOffset");     // GetCurveValue(RotationYawOffsetCurveName) C:1650
 
@@ -76,8 +98,48 @@ state GaitAmount: float;                                                        
 
 // ---- bookkeeping of this rewrite -----------------------------------------------------------------------------------------------
 state ActorRotationNow: rotator;                                                 // GetActorRotation() as this update has changed it (host commands run after the block)
+state bActorRotationMirrored: bool;                                              // ActorRotationNow was set by a hook handler: the block that follows keeps it
 state NewActorRotation: rotator;                                                 // the `FRotator& ActorRotation` that ConstrainAimingRotation edits (C:1680, C:1718)
+state MovementModeNow: MovementMode;                                             // GetCharacterMovement()->MovementMode, including the set_movement_mode calls of this block (host commands run after it)
+state MantlingSource: AlsMantlingRootMotionSource;                               // the FAlsRootMotionSource_Mantling the movement component would hold (RMS.h)
+state MantlingSourceCount: int;                                                  // the ids ApplyRootMotionSource hands out (MantlingState.RootMotionSourceId)
+state AnimRootMotionTranslationScale: float = 1.0;                               // Character->GetAnimRootMotionTranslationScale(), as the SetRootMotionScale notify state left it
 timer BrakingFrictionFactorResetTimer = 0.5;                                     // C:538-544 (ResetDelay)
+
+// ---- types of the actions --------------------------------------------------------------------------------------------------------
+// The data assets SelectMantlingSettings (a Blueprint event in ALS, CA:577) returns: this enum names the param that holds the asset.
+enum AlsMantlingSettingsKind { High, HighInAir, Low, LowBox }
+
+// FAlsRootMotionSource_Mantling (RootMotionSources/AlsRootMotionSource_Mantling.h) with what PrepareRootMotion reads: the source's own
+// clock (FRootMotionSource::Time / Duration), the settings it was made with, and where it moves the actor from and to.
+struct AlsMantlingRootMotionSource {
+    bActive: bool;                                    // the movement component still holds the source (GetRootMotionSourceByID != nullptr)
+    bClearPending: bool;                              // the source finished in the last tick: the root motion override ends before the next one
+    Kind: AlsMantlingSettingsKind;                    // MantlingSettings
+    Montage: montage;                                 // MantlingSettings->Montage
+    MotionWarpingTimeRange: AlsFloatInterval;         // MantlingSettings->MotionWarpingTimeRange
+    TargetPrimitive: primitive;
+    Time: float;                                      // FRootMotionSource::GetTime()
+    Duration: float;                                  // FRootMotionSource::GetDuration()
+    MontageStartTime: float;
+    StartLocation: vec3;
+    StartRotation: rotator;
+    TargetLocation: vec3;
+    TargetRotation: rotator;
+    MeshRotationOffset: quat = quat(0.0, 0.0, 0.0, 1.0);   // Character.GetBaseRotationOffset()
+}
+
+// The members of a UAlsMantlingSettings the start of a mantle reads (all but the two custom blend curves, which are read where they are used).
+struct AlsMantlingSettingsValues {
+    Montage: montage;
+    bAutoCalculateStartTime: bool;
+    StartTimeReferenceHeight: vec2;
+    StartTime: vec2;
+    MotionWarpingTimeRange: AlsFloatInterval;
+}
+
+const MIN_FLOOR_DIST: float = 1.9;                    // UCharacterMovementComponent::MIN_FLOOR_DIST
+const MAX_FLOOR_DIST: float = 2.4;                    // UCharacterMovementComponent::MAX_FLOOR_DIST
 
 // ================================================================================================================================
 // helpers
@@ -111,6 +173,7 @@ on begin_play {                                                                 
     set_target_yaw_angle(ActorRotationNow.yaw);                                         // :110-112
     LocomotionState.InputYawAngle = ActorRotationNow.yaw;                               // :114
     LocomotionState.VelocityYawAngle = ActorRotationNow.yaw;                            // :115
+    MovementModeNow = CharacterMovementMode;                                            // the movement component's first mode is not a change
     // BeginPlay: update the states to use the initial desired values     C:168-178
     apply_desired_stance();                                                             // :170
     refresh_gait();                                                                     // :174 (the CMC copies of Stance / RotationMode :172, :178 are this logic's own)
@@ -126,13 +189,20 @@ on timer BrakingFrictionFactorResetTimer {                                      
 // the tick: AAlsCharacter::Tick, C:266-300
 // ================================================================================================================================
 
-// The block is empty on purpose.  AlsInput runs before this logic in the slot (`before Character`), and the commands that its calls into this
-// logic (Jump, SetDesiredStance ...) leave in this logic's queue are flushed at the end of this logic's next block: this one, in front of the
-// movement component.  (FAlsRootMotionSource_Mantling::PrepareRootMotion, RMS:37, will be prepared here.)
+// Before the movement component: the root motion source of the mantling is prepared where the movement component would call it (RMS:37).
+// AlsInput runs before this logic in the slot (`before Character`), so the commands of its calls (Jump, SetDesiredStance, StartMantling ...)
+// are handed to the host by this block, before the movement component runs.
 update(dt) in pre_movement {
+    prepare_mantling_root_motion(dt);                                            // FAlsRootMotionSource_Mantling::PrepareRootMotion, inside CharacterMovement->PerformMovement
 }
 
 update(dt) in after_movement {                                                   // C:266-300
+    if (!bActorRotationMirrored) {                                               // the physics_rotation hook has rotated the actor already: the host has not applied it yet
+        ActorRotationNow = normalize_rotator(to_rotator(ActorRotation));
+    }
+    bActorRotationMirrored = false;
+    MovementModeNow = CharacterMovementMode;                                     // what the movement component has now (the hooks of the tick have been handled)
+
     // RefreshMovementBase();                                                    // :277 (no moving bases)
     // RefreshMeshProperties();                                                  // :279 (mesh tick options)
     refresh_input();                                                             // :281
@@ -142,7 +212,10 @@ update(dt) in after_movement {                                                  
     refresh_gait();                                                              // :287
     refresh_rotation_mode();                                                     // :288
     refresh_rotation(dt);                                                        // :290
-    // AutoStartMantling(); RefreshMantling(); RefreshRagdolling(dt); RefreshRolling(dt);    :292-295 (actions: a later milestone)
+    auto_start_mantling();                                                       // :292
+    refresh_mantling();                                                          // :293
+    // RefreshRagdolling(dt);                                                    // :294 (ragdolling: the next port)
+    refresh_rolling(dt);                                                         // :295
     // Super::Tick(DeltaTime);                                                   // :297
     refresh_locomotion_late();                                                   // :299
     push_movement_settings();                                                    // CMC:335, see the header
@@ -150,7 +223,14 @@ update(dt) in after_movement {                                                  
 
 // The overrides of the engine's hooks.  The movement component raises them while it moves the character, before AAlsCharacter::Tick, so
 // `slot_events` handles them at the start of the after_movement slot of the same tick (the order of the C++).
-on movement_mode_changed(previous_movement_mode, movement_mode) {                // C:469-491 OnMovementModeChanged (GetCharacterMovement()->MovementMode is the new mode)
+on movement_mode_changed(previous_movement_mode, movement_mode) {                // C:469-491 OnMovementModeChanged
+    apply_movement_mode(movement_mode);
+}
+
+// OnMovementModeChanged: use the character movement mode to set the locomotion mode to the right value.  This allows you to have a custom
+// set of movement modes but still use the functionality of the default character movement component.
+method apply_movement_mode(movement_mode: MovementMode) {                        // C:469-491 (GetCharacterMovement()->MovementMode is the new mode)
+    MovementModeNow = movement_mode;
     if (movement_mode == MovementMode.Walking || movement_mode == MovementMode.NavWalking) {
         set_locomotion_mode(AlsLocomotionMode.Grounded);                         // :476-479
     } else if (movement_mode == MovementMode.Falling) {
@@ -158,6 +238,14 @@ on movement_mode_changed(previous_movement_mode, movement_mode) {               
     } else {
         set_locomotion_mode(AlsLocomotionMode.None);                             // :485-488
     }
+}
+
+// GetCharacterMovement()->SetMovementMode(Mode): the C++ runs OnMovementModeChanged inside the call, so the locomotion mode follows at once;
+// the host command runs after this block and its hook finds nothing left to do.  (A locked movement mode ignores the call: the callers
+// below set the mode before they lock it or after they unlock it.)
+method set_movement_mode_now(movement_mode: MovementMode) {                      // C:469 + the SetMovementMode calls of CA:496, :708, :838, :1147, :1151
+    host.set_movement_mode(movement_mode);
+    apply_movement_mode(movement_mode);
 }
 
 on jumped {                                                                      // C:1473-1502 OnJumped_Implementation -> OnJumpedNetworked
@@ -170,6 +258,12 @@ on crouch_started {                                                             
 
 on crouch_ended {                                                                // C:855-871 OnEndCrouch (the network smoothing patch :857-866 is dropped)
     set_stance(AlsStance.Standing);                                              // :870
+}
+
+on physics_rotation(dt) {                                                        // C:1509-1512 CharacterMovement_OnPhysicsRotation, after UCharacterMovementComponent::PhysicsRotation
+    ActorRotationNow = normalize_rotator(to_rotator(ActorRotation));
+    refresh_rolling_physics(dt);                                                 // :1511
+    bActorRotationMirrored = LocomotionAction == AlsLocomotionAction.Rolling;    // the tick that follows reads the rotation the hook has set (GetActorRotation() after PhysicsRotation)
 }
 
 // ================================================================================================================================
@@ -814,23 +908,534 @@ method push_grounded_movement_settings() {
 }
 
 // ================================================================================================================================
-// actions (AlsCharacter_Actions.cpp): a later milestone.  The signatures are ALS's; the bodies do what the C++ does when the action is not
-// allowed to start.
+// rolling (AlsCharacter_Actions.cpp:22-139)
 // ================================================================================================================================
 
-pub method StartRolling(TargetYawAngle: float, PlayRate: float) {                // CA:57-71 (IsRollingAllowedToStart is false: no montage playing is possible yet)
+method select_roll_montage() -> montage {                                        // CA:22-25 SelectRollMontage_Implementation (a Blueprint event; the default returns the montage of the settings)
+    return Settings.Rolling.Montage;                                             // :24
 }
 
-pub method StartRollingGrounded(PlayRate: float) {                               // CA:34-55
+method is_rolling_allowed_to_start(montage_to_play: montage) -> bool {           // CA:27-32
+    return !valid(LocomotionAction)
+        || (LocomotionAction == AlsLocomotionAction.Rolling && !host.montage_is_playing(montage_to_play));       // :29-31
 }
 
-pub method StartMantling() -> bool {                                             // CA:141-165 (no mantling yet: false)
-    return false;
+pub method StartRollingGrounded(PlayRate: float) {                               // CA:34-43
+    if (LocomotionMode == AlsLocomotionMode.Grounded) {                          // :36
+        StartRolling(Settings.Rolling.bRotateToInputOnStart && LocomotionState.bHasInput
+                     ? LocomotionState.InputYawAngle : unwind_degrees(ActorRotationNow.yaw), PlayRate);         // :38-41
+    }
 }
+
+pub method StartRolling(TargetYawAngle: float, PlayRate: float) {               // CA:45-72 (the role check :47-50 and the RPCs :61-71 are dropped)
+    let montage_to_play = select_roll_montage();                                 // :52
+    if (!valid(montage_to_play)) { return; }                                     // :54 ALS_ENSURE(IsValid(Montage))
+    let allowed = is_rolling_allowed_to_start(montage_to_play);                  // :54
+    if (!allowed) { return; }
+    start_rolling_implementation(montage_to_play, PlayRate, unwind_degrees(ActorRotationNow.yaw), TargetYawAngle);        // :59, :69
+}
+
+method start_rolling_implementation(montage_to_play: montage, play_rate: float, initial_yaw_angle: float, target_yaw_angle: float) {      // CA:90-101
+    let allowed = is_rolling_allowed_to_start(montage_to_play);                  // :93
+    if (!allowed) { return; }
+    host.montage_play(montage_to_play, play_rate);                               // :93 Montage_Play(Montage, PlayRate) > 0 (a valid montage plays)
+    RollingState.TargetYawAngle = target_yaw_angle;                              // :95
+    set_rotation_instant(initial_yaw_angle, false);                              // :97
+    SetLocomotionAction(AlsLocomotionAction.Rolling);                            // :99 (the SetLocomotionAction notify state of the montage ends it)
+}
+
+method refresh_rolling(dt: float) {                                              // CA:103-113 (the role check :105 is always false here)
+    if (RootMotionModeOfAnimation == RootMotionMode.NoRootMotionExtraction || RootMotionModeOfAnimation == RootMotionMode.IgnoreRootMotion) {      // :106
+        // Refresh rolling physics here because the physics rotation hook is not called with ignored root motion.
+        refresh_rolling_physics(dt);                                             // :111
+    }
+}
+
+method refresh_rolling_physics(dt: float) {                                      // CA:116-139
+    if (LocomotionAction != AlsLocomotionAction.Rolling) { return; }             // :118-121
+
+    var target_rotation = ActorRotationNow;                                      // :123 UpdatedComponent->GetComponentRotation()
+    if (Settings.Rolling.RotationInterpolationHalfLife <= 0.0) {                 // :125
+        target_rotation.yaw = RollingState.TargetYawAngle;                       // :127
+        set_actor_rotation_now(target_rotation, true);                           // :129 MoveUpdatedComponent(Zero, TargetRotation, false, nullptr, ETeleportType::TeleportPhysics)
+    } else {
+        target_rotation.yaw = damper_exact_angle(unwind_degrees(target_rotation.yaw), RollingState.TargetYawAngle, dt,
+                                                 Settings.Rolling.RotationInterpolationHalfLife);               // :133-135
+        set_actor_rotation_now(target_rotation, false);                          // :137 MoveUpdatedComponent(Zero, TargetRotation, false)
+    }
+}
+
+// ================================================================================================================================
+// mantling (AlsCharacter_Actions.cpp:141-713, RootMotionSources/AlsRootMotionSource_Mantling.cpp:37-128)
+// ================================================================================================================================
+
+pub method StartMantling() -> bool {                                             // CA:141-154
+    if (LocomotionMode == AlsLocomotionMode.Grounded) {                          // :143
+        return start_mantling_with(Settings.Mantling.GroundedTrace);             // :145
+    }
+    if (LocomotionMode == AlsLocomotionMode.InAir) {                             // :148
+        return start_mantling_with(Settings.Mantling.InAirTrace);                // :150
+    }
+    return false;                                                                // :153
+}
+
+method auto_start_mantling() -> bool {                                           // CA:156-160 AutoStartMantling (IsLocallyControlled() is always true)
+    if (!Settings.Mantling.bAutoStartMantlingInAir || LocomotionMode != AlsLocomotionMode.InAir) { return false; }        // :158-159
+    return start_mantling_with(Settings.Mantling.InAirTrace);                    // :159
+}
+
+view is_mantling_allowed_to_start() -> bool {                                    // CA:162-165 IsMantlingAllowedToStart_Implementation
+    return !valid(LocomotionAction);                                             // :164
+}
+
+// StartMantling(const FAlsMantlingTraceSettings& TraceSettings): finds a ledge the character cannot walk on but can step up to, a walkable
+// place on top of it, and enough room for the capsule at both ends.  Traces go to the host's world queries; nothing is cached.
+method start_mantling_with(trace: AlsMantlingTraceSettings) -> bool {            // CA:167-448
+    let allowed = is_mantling_allowed_to_start();
+    if (!Settings.Mantling.bAllowMantling || !allowed) { return false; }         // :169 (the role check is dropped)
+
+    let actor_yaw_angle = unwind_degrees(ActorRotationNow.yaw);                  // :175 (the actor location is read from the host: ActorLocation, :174)
+
+    var forward_trace_angle = actor_yaw_angle;                                   // :177-189
+    if (LocomotionState.bHasVelocity) {
+        forward_trace_angle = LocomotionState.bHasInput
+            ? LocomotionState.VelocityYawAngle + clamp_angle(LocomotionState.InputYawAngle - LocomotionState.VelocityYawAngle,
+                                                             -Settings.Mantling.MaxReachAngle, Settings.Mantling.MaxReachAngle)
+            : LocomotionState.VelocityYawAngle;                                  // :180-184
+    } else if (LocomotionState.bHasInput) {
+        forward_trace_angle = LocomotionState.InputYawAngle;                     // :188
+    }
+
+    let forward_trace_delta_angle = unwind_degrees(forward_trace_angle - actor_yaw_angle);       // :191
+    if (abs(forward_trace_delta_angle) > Settings.Mantling.TraceAngleThreshold) { return false; }    // :192-195
+
+    let forward_trace_direction = angle_to_direction_xy(
+        actor_yaw_angle + clamp_angle(forward_trace_delta_angle, -Settings.Mantling.MaxReachAngle, Settings.Mantling.MaxReachAngle));      // :197-200
+
+    let capsule_bottom_location = vec3(ActorLocation.x, ActorLocation.y, ActorLocation.z - CapsuleHalfHeight);    // :212
+    let trace_capsule_radius = CapsuleRadius - 1.0;                              // :214
+    let ledge_height_min = min(trace.LedgeHeight.x, trace.LedgeHeight.y);        // FVector2D::GetMin()
+    let ledge_height_delta = (max(trace.LedgeHeight.x, trace.LedgeHeight.y) - ledge_height_min) * CapsuleScale;      // :216
+
+    // Trace forward to find an object the character cannot walk on.            :218
+    var forward_trace_start = capsule_bottom_location - forward_trace_direction * CapsuleRadius;       // :222
+    forward_trace_start.z += (trace.LedgeHeight.x + trace.LedgeHeight.y) * 0.5 * CapsuleScale - MAX_FLOOR_DIST;      // :223-224
+    let forward_trace_end = forward_trace_start
+        + forward_trace_direction * (CapsuleRadius + (trace.ReachDistance + 1.0) * CapsuleScale);      // :226
+    let forward_trace_capsule_half_height = ledge_height_delta * 0.5;            // :228
+    let forward_trace_hit = host.sweep_capsule(forward_trace_start, forward_trace_end, trace_capsule_radius, forward_trace_capsule_half_height,
+                                               Settings.Mantling.MantlingTraceChannel, Settings.Mantling.MantlingTraceResponses);    // :231-234
+
+    let target_primitive = forward_trace_hit.primitive;                          // :236
+    if (!forward_trace_hit.blocking || forward_trace_hit.start_penetrating       // :238 IsValidBlockingHit()
+        || !host.primitive_valid(target_primitive)                               // :239
+        || host.primitive_speed(target_primitive) > Settings.Mantling.TargetPrimitiveSpeedThreshold    // :240
+        || !host.primitive_can_step_up(target_primitive)                         // :241
+        || host.is_walkable(forward_trace_hit)) {                                // :242
+        return false;                                                            // :253
+    }
+
+    let target_direction = vec3(0.0, 0.0, 0.0) - safe_normal_2d(forward_trace_hit.normal);       // :256 -ImpactNormal.GetSafeNormal2D()
+
+    // Trace downward from the first trace's impact point and determine if the hit location is walkable.      :258
+    let target_location_offset = target_direction * (trace.TargetLocationOffset * CapsuleScale);       // :262
+    let downward_trace_start = vec3(forward_trace_hit.point.x + target_location_offset.x,
+                                    forward_trace_hit.point.y + target_location_offset.y,
+                                    capsule_bottom_location.z + ledge_height_delta + 2.5 * trace_capsule_radius + MIN_FLOOR_DIST);    // :264-268
+    let downward_trace_end = vec3(downward_trace_start.x, downward_trace_start.y,
+                                  capsule_bottom_location.z + ledge_height_min * CapsuleScale + trace_capsule_radius - MAX_FLOOR_DIST);  // :270-275
+    let downward_trace_hit = host.sweep_sphere(downward_trace_start, downward_trace_end, trace_capsule_radius,
+                                               Settings.Mantling.MantlingTraceChannel, Settings.Mantling.MantlingTraceResponses);    // :278-280
+
+    let slope_angle_cos = downward_trace_hit.normal.z;                           // :282
+    // The approximate slope angle is used in situations where the normal slope angle cannot convey the true nature of the surface slope,
+    // for example, for a 45 degree staircase the slope angle will always be 90 degrees, while the approximate slope angle will be ~45 degrees.
+    let approximate_slope_normal = normalize(downward_trace_hit.location - downward_trace_hit.point);      // :288-289
+    let approximate_slope_angle_cos = approximate_slope_normal.z;                // :291
+    if (slope_angle_cos < Settings.Mantling.SlopeAngleThresholdCos
+        || approximate_slope_angle_cos < Settings.Mantling.SlopeAngleThresholdCos
+        || !host.is_walkable(downward_trace_hit)) {                              // :293-295
+        return false;                                                            // :310
+    }
+
+    // Check that there is enough free space for the capsule at the target location.   :313
+    let target_location = vec3(downward_trace_hit.location.x, downward_trace_hit.location.y,
+                               downward_trace_hit.point.z + MIN_FLOOR_DIST);     // :317-321
+    let target_capsule_location = vec3(target_location.x, target_location.y, target_location.z + CapsuleHalfHeight);       // :323
+    if (host.overlap_capsule(target_capsule_location, CapsuleRadius, CapsuleHalfHeight,
+                             Settings.Mantling.MantlingTraceChannel, Settings.Mantling.MantlingTraceResponses)) {          // :325-327
+        return false;                                                            // :345
+    }
+
+    // Perform additional overlap at the approximate start location to ensure there are no vertical obstacles on the path, such as a ceiling.   :348
+    let start_location_offset = target_direction * (trace.StartLocationOffset * CapsuleScale);       // :353
+    let start_location = vec3(forward_trace_hit.point.x - start_location_offset.x, forward_trace_hit.point.y - start_location_offset.y,
+                              (downward_trace_hit.location.z + downward_trace_end.z) * 0.5);         // :355-359
+    let start_location_trace_capsule_half_height = (downward_trace_hit.location.z - downward_trace_end.z) * 0.5 + trace_capsule_radius;    // :361-363
+    if (host.overlap_capsule(start_location, trace_capsule_radius, start_location_trace_capsule_half_height,
+                             Settings.Mantling.MantlingTraceChannel, Settings.Mantling.MantlingTraceResponses)) {          // :365-367
+        return false;                                                            // :386
+    }
+
+    var parameters = AlsMantlingParameters();                                    // :404
+    parameters.TargetPrimitive = target_primitive;                               // :406
+    parameters.MantlingHeight = (target_location.z - capsule_bottom_location.z) / CapsuleScale;          // :407
+
+    // Determine the mantling type by checking the movement mode and mantling height.   :409
+    parameters.MantlingType = LocomotionMode != AlsLocomotionMode.Grounded ? AlsMantlingType.InAir
+        : parameters.MantlingHeight > Settings.Mantling.MantlingHighHeightThreshold ? AlsMantlingType.High : AlsMantlingType.Low;      // :411-415
+
+    // The target primitive is always in world space here (no moving bases, :417-433).
+    parameters.TargetLocation = target_capsule_location;                         // :431
+    parameters.TargetRotation = to_rotator(to_orientation_quat(target_direction));     // :402, :432
+
+    start_mantling_implementation(parameters);                                   // :443 (the role branches and the RPCs :435-445 are dropped)
+    return true;                                                                 // :447
+}
+
+// SelectMantlingSettings: a Blueprint event in ALS (CA:577-580 returns nullptr), overridden in B_Als_Character.  The sample's choice among
+// the low mantles by overlay mode is not exported with the pack (only the Box case is certain), so Low is MS_Als_Low unless the overlay is
+// the box: a project that wants more kinds adds a kind, a param and a branch in the views below.
+view select_mantling_settings(mantling_type: AlsMantlingType) -> AlsMantlingSettingsKind {     // CA:577-580
+    if (mantling_type == AlsMantlingType.High) { return AlsMantlingSettingsKind.High; }
+    if (mantling_type == AlsMantlingType.InAir) { return AlsMantlingSettingsKind.HighInAir; }
+    return OverlayMode == AlsOverlayMode.Box ? AlsMantlingSettingsKind.LowBox : AlsMantlingSettingsKind.Low;
+}
+
+// The members of the selected data asset (AlsMantlingSettings.h:42-77).  The asset itself cannot be handed around in DAL, so each view
+// reads it out of the param of its kind.
+view mantling_settings_values(kind: AlsMantlingSettingsKind) -> AlsMantlingSettingsValues {      // CA:578-597 (the reads of MantlingSettings->...)
+    if (kind == AlsMantlingSettingsKind.High) {
+        return AlsMantlingSettingsValues(Montage: MantlingHigh.Montage, bAutoCalculateStartTime: MantlingHigh.bAutoCalculateStartTime,
+            StartTimeReferenceHeight: MantlingHigh.StartTimeReferenceHeight, StartTime: MantlingHigh.StartTime,
+            MotionWarpingTimeRange: MantlingHigh.MotionWarpingTimeRange);
+    }
+    if (kind == AlsMantlingSettingsKind.HighInAir) {
+        return AlsMantlingSettingsValues(Montage: MantlingHighInAir.Montage, bAutoCalculateStartTime: MantlingHighInAir.bAutoCalculateStartTime,
+            StartTimeReferenceHeight: MantlingHighInAir.StartTimeReferenceHeight, StartTime: MantlingHighInAir.StartTime,
+            MotionWarpingTimeRange: MantlingHighInAir.MotionWarpingTimeRange);
+    }
+    if (kind == AlsMantlingSettingsKind.LowBox) {
+        return AlsMantlingSettingsValues(Montage: MantlingLowBox.Montage, bAutoCalculateStartTime: MantlingLowBox.bAutoCalculateStartTime,
+            StartTimeReferenceHeight: MantlingLowBox.StartTimeReferenceHeight, StartTime: MantlingLowBox.StartTime,
+            MotionWarpingTimeRange: MantlingLowBox.MotionWarpingTimeRange);
+    }
+    return AlsMantlingSettingsValues(Montage: MantlingLow.Montage, bAutoCalculateStartTime: MantlingLow.bAutoCalculateStartTime,
+        StartTimeReferenceHeight: MantlingLow.StartTimeReferenceHeight, StartTime: MantlingLow.StartTime,
+        MotionWarpingTimeRange: MantlingLow.MotionWarpingTimeRange);
+}
+
+// FAlphaBlend::AlphaToBlendOption(WarpAmount, MantlingSettings->MotionWarpingLocationBlendOption, ...CustomBlendCurve)
+view mantling_location_warp(kind: AlsMantlingSettingsKind, warp_amount: float) -> float {       // RMS:68-72
+    if (kind == AlsMantlingSettingsKind.High) {
+        return blend_alpha(warp_amount, MantlingHigh.MotionWarpingLocationBlendOption, MantlingHigh.MotionWarpingLocationCustomBlendCurve);
+    }
+    if (kind == AlsMantlingSettingsKind.HighInAir) {
+        return blend_alpha(warp_amount, MantlingHighInAir.MotionWarpingLocationBlendOption, MantlingHighInAir.MotionWarpingLocationCustomBlendCurve);
+    }
+    if (kind == AlsMantlingSettingsKind.LowBox) {
+        return blend_alpha(warp_amount, MantlingLowBox.MotionWarpingLocationBlendOption, MantlingLowBox.MotionWarpingLocationCustomBlendCurve);
+    }
+    return blend_alpha(warp_amount, MantlingLow.MotionWarpingLocationBlendOption, MantlingLow.MotionWarpingLocationCustomBlendCurve);
+}
+
+view mantling_rotation_warp(kind: AlsMantlingSettingsKind, warp_amount: float) -> float {       // RMS:74-78
+    if (kind == AlsMantlingSettingsKind.High) {
+        return blend_alpha(warp_amount, MantlingHigh.MotionWarpingRotationBlendOption, MantlingHigh.MotionWarpingRotationCustomBlendCurve);
+    }
+    if (kind == AlsMantlingSettingsKind.HighInAir) {
+        return blend_alpha(warp_amount, MantlingHighInAir.MotionWarpingRotationBlendOption, MantlingHighInAir.MotionWarpingRotationCustomBlendCurve);
+    }
+    if (kind == AlsMantlingSettingsKind.LowBox) {
+        return blend_alpha(warp_amount, MantlingLowBox.MotionWarpingRotationBlendOption, MantlingLowBox.MotionWarpingRotationCustomBlendCurve);
+    }
+    return blend_alpha(warp_amount, MantlingLow.MotionWarpingRotationBlendOption, MantlingLow.MotionWarpingRotationCustomBlendCurve);
+}
+
+// Character.GetBaseRotationOffset(): the rotation of the mesh relative to the actor (ACharacter caches the mesh's relative rotation).
+view base_rotation_offset() -> quat {                                            // CA:517 (ACharacter::GetBaseRotationOffset)
+    return quat_inverse(ActorRotation) * MeshWorldTransform.rotation;
+}
+
+method start_mantling_implementation(parameters: AlsMantlingParameters) {        // CA:464-575
+    let allowed = is_mantling_allowed_to_start();
+    if (!allowed) { return; }                                                    // :466-469
+    if (!host.primitive_valid(parameters.TargetPrimitive)) { return; }           // :471-476
+
+    let kind = select_mantling_settings(parameters.MantlingType);                // :478
+    let ms = mantling_settings_values(kind);
+    if (!valid(ms.Montage)) { return; }                                      // :480-483 ALS_ENSURE(IsValid(MantlingSettings) && IsValid(Montage))
+
+    // Reset network smoothing and the mesh offset (:485-492): not in DAL.
+
+    // Clear the character movement mode and set the locomotion action to mantling.   :494
+    host.set_movement_mode(MovementMode.Custom, 0);                              // :496
+    apply_movement_mode(MovementMode.Custom);
+    host.set_movement_mode_locked(true);                                         // :497
+    // GetCharacterMovement()->SetBase(&MovementBaseData)                        // :499-500 (no moving bases)
+
+    // Create mantling root motion.   :502
+    var source = AlsMantlingRootMotionSource();                                  // :504
+    source.Kind = kind;                                                          // :506
+    source.Montage = ms.Montage;
+    source.MotionWarpingTimeRange = ms.MotionWarpingTimeRange;
+    source.TargetPrimitive = parameters.TargetPrimitive;                         // :507
+
+    let start_time = calculate_mantling_start_time(kind, parameters.MantlingHeight);     // :509
+    let duration = host.montage_length(ms.Montage) - start_time;             // :510
+    let play_rate = host.montage_rate_scale(ms.Montage);                     // :511
+    source.Duration = duration / play_rate;                                      // :513
+    source.MontageStartTime = start_time;                                        // :514
+
+    let mesh_rotation_offset = base_rotation_offset();                           // :517
+    let mesh_transform = transform(vec3(0.0, 0.0, 0.0), mesh_rotation_offset);   // FTransform MeshTransform{GetBaseRotationOffset()}
+    source.MeshRotationOffset = mesh_rotation_offset;
+
+    // Extract the initial root transform, invert it, convert it from component space to actor space, and apply it to the actor transform.   :519
+    let actor_transform = transform(ActorLocation, to_quat(ActorRotationNow));   // :521
+    let start_root_transform = with_scale(host.montage_root_transform(ms.Montage, start_time), vec3(1.0, 1.0, 1.0));      // :523-524
+    let start_root_transform_inverse = relative_transform_reverse(start_root_transform, mesh_transform);        // :526
+    let start_transform = compose(start_root_transform_inverse, actor_transform);        // :527
+    // (bUseTargetPrimitiveSpace is false: no relative space, :529-533)
+    source.StartRotation = to_rotator(start_transform.rotation);                 // :535
+    source.StartLocation = start_transform.location;                             // :536
+
+    // Extract the final root transform, invert it, convert it from component space to actor space, and apply it to the target transform.   :538
+    let target_transform = transform(parameters.TargetLocation, to_quat(normalize_rotator(parameters.TargetRotation)));       // :540
+    let end_root_transform = with_scale(host.montage_last_root_transform(ms.Montage), vec3(1.0, 1.0, 1.0));            // :549-550
+    let end_root_transform_inverse = relative_transform_reverse(end_root_transform, mesh_transform);            // :552
+    let new_target_transform = compose(end_root_transform_inverse, target_transform);   // :553
+    source.TargetRotation = to_rotator(new_target_transform.rotation);           // :561
+    source.TargetLocation = new_target_transform.location;                       // :562
+
+    // Apply root motion.   :564
+    source.bActive = true;
+    MantlingSource = source;
+    MantlingSourceCount += 1;
+    MantlingState.RootMotionSourceId = MantlingSourceCount;                      // :565 ApplyRootMotionSource
+
+    // Play the animation montage if valid.   :567
+    host.montage_play(ms.Montage, 1.0);                                      // :569
+    SetLocomotionAction(AlsLocomotionAction.Mantling);                           // :571
+    // OnMantlingStarted(Parameters)                                             // :574 (Blueprint event)
+}
+
+method calculate_mantling_start_time(kind: AlsMantlingSettingsKind, mantling_height: float) -> float {      // CA:583-642
+    let ms = mantling_settings_values(kind);
+    if (!ms.bAutoCalculateStartTime) {                                       // :585
+        return map_range_clamped(ms.StartTimeReferenceHeight.x, ms.StartTimeReferenceHeight.y, ms.StartTime.x, ms.StartTime.y, mantling_height);   // :587
+    }
+
+    // https://landelare.github.io/2022/05/15/climbing-with-root-motion.html
+
+    if (!valid(ms.Montage)) { return 0.0; }                                  // :592-596
+
+    let montage_frame_rate = 1.0 / host.montage_sampling_rate(ms.Montage);   // :598 (as written in ALS: the reciprocal of the sampling rate)
+
+    var search_start_time = 0.0;                                                 // :600
+    var search_end_time = host.montage_length(ms.Montage);                   // :601
+
+    let search_start_location_z = host.montage_root_transform(ms.Montage, search_start_time).location.z;       // :603
+    let search_end_location_z = host.montage_root_transform(ms.Montage, search_end_time).location.z;         // :604
+
+    // Find the vertical distance the character has already moved.   :606
+    let target_location_z = max(0.0, search_end_location_z - mantling_height);   // :608
+
+    // Perform a binary search to find the time when the character is at the target vertical distance.   :610
+    if (is_nearly_equal(search_start_location_z, target_location_z, 1.0)) {      // :612-617 MaxLocationSearchTolerance = 1
+        return search_start_time;
+    }
+
+    var time = 0.0;
+    for i in 0..32 {                                                             // :619 while (true): the interval halves every pass, 32 passes are far below any frame rate
+        time = (search_start_time + search_end_time) * 0.5;                      // :621
+        let location_z = host.montage_root_transform(ms.Montage, time).location.z;     // :622
+
+        // Stop the search if a close enough location has been found or if the search interval is less than the animation montage frame rate.
+        if (is_nearly_equal(location_z, target_location_z, 1.0) || search_end_time - search_start_time <= montage_frame_rate) {      // :627-628
+            return time;                                                         // :630
+        }
+
+        if (location_z < target_location_z) {                                    // :633
+            search_start_time = time;                                            // :635
+        } else {
+            search_end_time = time;                                              // :639
+        }
+    }
+    return time;
+}
+
+method refresh_mantling() {                                                      // CA:646-679
+    if (MantlingState.RootMotionSourceId <= 0) { return; }                       // :648-651
+
+    if (LocomotionAction != AlsLocomotionAction.Mantling) {                      // :653
+        stop_mantling(false);                                                    // :655
+        return;
+    }
+
+    if (MovementModeNow != MovementMode.Custom) {                                // :659
+        stop_mantling(true);                                                     // :661
+        return;
+    }
+
+    if (MantlingSource.bActive && !host.primitive_valid(MantlingSource.TargetPrimitive)) {   // :665-670 (the source is gone once it finished)
+        stop_mantling(true);                                                     // :672
+
+        if (Settings.Mantling.bStartRagdollingOnTargetPrimitiveDestruction) {    // :674
+            StartRagdolling();                                                   // :676
+        }
+    }
+}
+
+method stop_mantling(bStopMontage: bool) {                                       // CA:681-713
+    if (MantlingState.RootMotionSourceId <= 0) { return; }                       // :683-686
+
+    let source_exists = MantlingSource.bActive;                                  // :688-691 GetRootMotionSourceByID != nullptr
+    host.root_motion_clear();                                                    // :695 Status.SetFlag(MarkedForRemoval)
+    MantlingSource.bActive = false;
+    MantlingSource.bClearPending = false;
+
+    MantlingState.RootMotionSourceId = 0;                                        // :698
+
+    if (bStopMontage && source_exists) {                                         // :700
+        host.montage_stop(MantlingSource.Montage, Settings.Mantling.BlendOutDuration);       // :702
+    }
+
+    // NetworkSmoothingMode = Exponential                                        // :705
+    host.set_movement_mode_locked(false);                                        // :707
+    set_movement_mode_now(MovementMode.Walking);                                 // :708
+    // OnMantlingEnded()                                                         // :710 (Blueprint event)
+}
+
+// FAlsRootMotionSource_Mantling::PrepareRootMotion.  The movement component calls it while it moves the character, with the time of its
+// tick, so this runs in the pre_movement block (the commands it issues are executed before the movement component runs) and reads the
+// actor as the movement component finds it: where the last tick left it.  The root motion override of the host stands in for the
+// FRootMotionSource (Override accumulate mode: the translation is a velocity); it holds until root_motion_clear().
+method prepare_mantling_root_motion(dt: float) {                                 // RMS:37-128
+    if (MantlingSource.bClearPending) {                                          // the source finished in the last tick: the movement component removed it
+        host.root_motion_clear();
+        MantlingSource.bClearPending = false;
+    }
+    if (!MantlingSource.bActive) { return; }
+
+    MantlingSource.Time = min(MantlingSource.Time + dt, MantlingSource.Duration);     // :40 SetTime(GetTime() + SimulationDeltaTime): the source ends at its duration
+    if (MantlingSource.Time >= MantlingSource.Duration) {
+        MantlingSource.bActive = false;                                          // the last tick of the source: the movement component drops it afterwards
+        MantlingSource.bClearPending = true;
+    }
+
+    if (!(MantlingSource.Duration > SMALL_NUMBER) || dt <= SMALL_NUMBER || !host.primitive_valid(MantlingSource.TargetPrimitive)) {    // :42
+        host.root_motion_clear();                                                // :44 RootMotionParams.Clear()
+        return;
+    }
+
+    let source_montage = MantlingSource.Montage;                                 // :48
+    let montage_time = MantlingSource.MontageStartTime + MantlingSource.Time * host.montage_rate_scale(source_montage);       // :49
+
+    // Synchronize the mantling animation montage's time with the mantling root motion source's time.
+    // Delta time subtraction is necessary here, otherwise there will be a one frame lag between them.   :51-52
+    host.montage_set_position(source_montage, max(0.0, montage_time - dt));      // :54
+
+    var blend_in_amount = 1.0;                                                   // :56
+    let montage_blend_in_time = host.montage_blend_in_time(source_montage);      // :57-59
+    if (montage_blend_in_time > SMALL_NUMBER) {
+        blend_in_amount = blend_alpha(MantlingSource.Time / montage_blend_in_time, host.montage_blend_in_option(source_montage),
+                                      MantlingHigh.MotionWarpingLocationCustomBlendCurve);     // :61-63 (a custom blend-in curve of the montage is not readable: linear)
+    }
+
+    let warp_amount = clamp01(range_pct(MantlingSource.MotionWarpingTimeRange.Min, MantlingSource.MotionWarpingTimeRange.Max, montage_time));    // :66
+    let location_warp_amount = blend_in_amount * mantling_location_warp(MantlingSource.Kind, warp_amount);     // :68-72
+    let rotation_warp_amount = blend_in_amount * mantling_rotation_warp(MantlingSource.Kind, warp_amount);     // :74-78
+
+    let start_transform = transform(MantlingSource.StartLocation, to_quat(MantlingSource.StartRotation));      // :80
+    let target_transform = transform(MantlingSource.TargetLocation, to_quat(MantlingSource.TargetRotation));   // :81
+    // (the start and target transforms are in world space: no moving bases, :83-93)
+
+    // Interpolate the start and target transforms to obtain the warped transform.   :95
+    let warp_location = lerp(start_transform.location, target_transform.location, location_warp_amount);       // :97
+    let warp_rotation_lerp = normalize(fast_lerp(start_transform.rotation, target_transform.rotation, rotation_warp_amount));     // :99-100
+
+    // Remove the pitch and roll components of the rotation so that the actor's Z axis is always aligned with the gravity direction.   :102
+    let warp_rotation = get_twist(warp_rotation_lerp, vec3(0.0, 0.0, 1.0));      // :104 UAlsRotation::GetTwist(WarpRotation, -GetGravityDirection())
+    let warp_transform = transform(warp_location, warp_rotation);                // :106
+
+    // Extract the current root transform and convert it from component space to actor space.   :108
+    let root_transform_component = with_scale(host.montage_root_transform(source_montage, montage_time), vec3(1.0, 1.0, 1.0));      // :110-111
+    let mesh_transform = transform(vec3(0.0, 0.0, 0.0), MantlingSource.MeshRotationOffset);      // :113
+    let root_transform = relative_transform_reverse(mesh_transform, root_transform_component);   // :114 MeshTransform.GetRelativeTransformReverse(RootTransform)
+
+    // Apply the current root transform to the warped transform to get the target actor transform.   :116
+    let target_actor_transform = compose(root_transform, warp_transform);        // :118
+
+    // Calculate the final root motion by taking the delta between the current actor transform and the target actor transform.   :120
+    host.root_motion_override((target_actor_transform.location - ActorLocation) / dt,
+                              target_actor_transform.rotation * quat_inverse(ActorRotation));       // :122-127
+}
+
+// ================================================================================================================================
+// ragdolling (AlsCharacter_Actions.cpp:717-1170): the next port.  The signatures are ALS's; the bodies do what the C++ does when the action is not
+// allowed to start.
+// ================================================================================================================================
 
 pub method StartRagdolling() {                                                   // CA:717-844 (IsRagdollingAllowedToStart is false while the host cannot ragdoll)
 }
 
 pub method StopRagdolling() -> bool {                                            // CA:1026-1165 (IsRagdollingAllowedToStop is false when not ragdolling)
     return false;
+}
+
+// ================================================================================================================================
+// the notify states the actions end on (Notifies/*.cpp).  The declared names are the C++ class names without the U, so the host finds
+// the notify of a montage by its class; `branching` is bIsNativeBranchingPoint.
+// ================================================================================================================================
+
+notify_state AlsAnimNotifyState_SetLocomotionAction cpp "AlsAnimNotifyState_SetLocomotionAction" branching {     // Notifies/AlsAnimNotifyState_SetLocomotionAction.h:8-16
+    LocomotionAction: AlsLocomotionAction;
+}
+
+on notify_begin AlsAnimNotifyState_SetLocomotionAction {                         // Notifies/AlsAnimNotifyState_SetLocomotionAction.cpp:25-33 NotifyBegin
+    SetLocomotionAction(payload.LocomotionAction);                               // :31
+}
+
+on notify_end AlsAnimNotifyState_SetLocomotionAction {                           // Notifies/AlsAnimNotifyState_SetLocomotionAction.cpp:36-48 NotifyEnd
+    if (LocomotionAction == payload.LocomotionAction) {                          // :44
+        SetLocomotionAction(AlsLocomotionAction.None);                           // :46 FGameplayTag::EmptyTag
+    }
+}
+
+notify_state AlsAnimNotifyState_SetRootMotionScale cpp "AlsAnimNotifyState_SetRootMotionScale" {                 // Notifies/AlsAnimNotifyState_SetRootMotionScale.h:7-15
+    TranslationScale: float = 1.0;
+}
+
+on notify_begin AlsAnimNotifyState_SetRootMotionScale {                          // Notifies/AlsAnimNotifyState_SetRootMotionScale.cpp:30-40 NotifyBegin
+    AnimRootMotionTranslationScale = payload.TranslationScale;
+    host.set_anim_root_motion_translation_scale(payload.TranslationScale);       // :38 (the role check :36 is always true)
+}
+
+on notify_end AlsAnimNotifyState_SetRootMotionScale {                            // Notifies/AlsAnimNotifyState_SetRootMotionScale.cpp:43-62 NotifyEnd
+    if (is_nearly_equal(AnimRootMotionTranslationScale, payload.TranslationScale)) {         // :52
+        AnimRootMotionTranslationScale = 1.0;
+        host.set_anim_root_motion_translation_scale(1.0);                        // :54
+    }                                                                            // else: something changed the scale before the notify ended (:58, a warning in ALS)
+}
+
+notify_state AlsAnimNotifyState_EarlyBlendOut cpp "AlsAnimNotifyState_EarlyBlendOut" branching {                 // Notifies/AlsAnimNotifyState_EarlyBlendOut.h:8-40
+    BlendOutDuration: float = 0.25;
+    bCheckInput: bool = true;
+    bCheckLocomotionMode: bool = true;
+    bCheckRotationMode: bool = true;
+    bCheckStance: bool = true;
+    LocomotionModeEquals: AlsLocomotionMode = AlsLocomotionMode.InAir;
+    RotationModeEquals: AlsRotationMode = AlsRotationMode.Aiming;
+    StanceEquals: AlsStance = AlsStance.Crouching;
+}
+
+on notify_tick AlsAnimNotifyState_EarlyBlendOut {                                // Notifies/AlsAnimNotifyState_EarlyBlendOut.cpp:35-63 BranchingPointNotifyTick
+    if ((payload.bCheckInput && LocomotionState.bHasInput)
+        || (payload.bCheckLocomotionMode && LocomotionMode == payload.LocomotionModeEquals)
+        || (payload.bCheckRotationMode && RotationMode == payload.RotationModeEquals)
+        || (payload.bCheckStance && Stance == payload.StanceEquals)) {           // :43-47
+        // Montage_Stop with the blend out settings of the montage and BlendOutDuration for the montage instance of the notify.   :49-61
+        host.montage_stop_source(payload.BlendOutDuration);                      // :61 MontageInstance->Stop(BlendOutSettings)
+    }
 }

@@ -1,0 +1,21 @@
+{
+  "schema": "dreamved.alspack.bindings/1",
+  "source": "als/AlsCharacter.dal",
+  "notes": [
+    "Which data asset of the ALS pack (G:/DCC/AlsPack/data) each root settings param of the DAL logics takes, where the Blueprint defaults of the pack do not say.",
+    "AlsCharacter.dal replaces the Blueprint event SelectMantlingSettings (AlsCharacter_Actions.cpp:577, overridden in B_Als_Character) by one param per data asset and the view select_mantling_settings: High -> MantlingHigh, InAir -> MantlingHighInAir, Low -> MantlingLow, Low with the Box overlay -> MantlingLowBox.",
+    "MS_Als_Low_BothHands, MS_Als_Low_Left and MS_Als_Low_Right are chosen by overlay mode in the sample Blueprint; that table is not part of the pack, so the logic does not use them (add a kind, a param and a branch to select_mantling_settings for a project that does).",
+    "The Settings / MovementSettings params of AlsCharacter and the Settings param of AlsAnimationInstance are bound from the Blueprint defaults (CS_Als_Default, MS_Als_Normal, AIS_Als_Default): anim_pack.als_bindings."
+  ],
+  "character": {
+    "MantlingHigh": "MS_Als_High",
+    "MantlingHighInAir": "MS_Als_High_InAir",
+    "MantlingLow": "MS_Als_Low",
+    "MantlingLowBox": "MS_Als_Low_Box"
+  },
+  "notify_classes": {
+    "AlsAnimNotifyState_SetLocomotionAction": "/Script/ALS.AlsAnimNotifyState_SetLocomotionAction",
+    "AlsAnimNotifyState_SetRootMotionScale": "/Script/ALS.AlsAnimNotifyState_SetRootMotionScale",
+    "AlsAnimNotifyState_EarlyBlendOut": "/Script/ALS.AlsAnimNotifyState_EarlyBlendOut"
+  }
+}
