@@ -17,6 +17,21 @@ from dal import harness, ir
 from dal.cppbackend import CppGen, CppOptions, generate_cpp
 
 
+IDENTITY = ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0))
+
+
+def skeleton_lines(skeleton: dict) -> list[str]:
+    """The reference skeleton of the mesh asset: ``{bone: {"parent": bone or None, "translation": (x, y, z)}}`` in order (parents first)."""
+    names = list(skeleton)
+    L = ["\tMeshAsset.StubRef = FReferenceSkeleton();"]
+    for bname, info in skeleton.items():
+        parent = names.index(info["parent"]) if info.get("parent") in skeleton else -1
+        tr = info["translation"]
+        L.append(f'\tMeshAsset.StubRef.StubNames.push_back("{bname}"); MeshAsset.StubRef.StubParents.push_back({parent}); '
+                 f"MeshAsset.StubRef.StubPose.Add(FTransform(FQuat(), FVector({cd._num(tr[0])}, {cd._num(tr[1])}, {cd._num(tr[2])}), FVector(1.0, 1.0, 1.0)));")
+    return L
+
+
 def make_system_driver(modules: dict[str, ir.Module], frames: list[dict], schedule: list[tuple[str, str | None]],
                        params: dict[str, dict] | None = None) -> str:
     """``params`` is ``{logic: {param name: settings data}}``: the data of the settings params (as for ``cpp_driver.settings_setup``)."""
@@ -67,7 +82,9 @@ def make_system_driver(modules: dict[str, ir.Module], frames: list[dict], schedu
         "\tUCapsuleComponent Capsule;",
         "\tAPlayerController Controller;",
         "\tUSkeletalMeshComponent Mesh;",
+        "\tUSkeletalMesh MeshAsset;",
         "\tUDalRagdollService Ragdoll;",
+        "\tMesh.StubAsset = &MeshAsset; Mesh.StubOwner = &Pawn;",
         "\tPawn.StubMovement = &Move;",
         "\tPawn.StubCapsule = &Capsule;",
         "\tPawn.StubController = &Controller;",
@@ -83,12 +100,20 @@ def make_system_driver(modules: dict[str, ir.Module], frames: list[dict], schedu
         L += [f"\tL_{n}.StubOwner = &Pawn;", f"\tL_{n}.StubWorld = &World;"]
     for n in anims:
         L += [f"\tL_{n}.StubPawn = &Pawn;", f"\tL_{n}.StubWorld = &World;", f"\tL_{n}.StubSkelMesh = &Mesh;"]
+    scene_done = False
+    for n in anims:
+        if not scene_done and (gens[n].snapshots or any(isinstance(st, ir.Command) and st.name in ("montage_stop_source", "stop_montages_with_slot")
+                                                        for _label, body in modules[n].bodies() for st in ir.walk_stmts(body))):
+            L += cd.scene_for_commands(modules[n], gens[n], f"L_{n}")                  # (the objects have fixed names: one instance with such commands)
+            scene_done = True
     for n, m in modules.items():                                            # settings params: data assets built from the given data
         for line in cd.settings_setup(m, (params or {}).get(n, {})):
             L.append(line.replace("Dal_P_", f"Dal_P_{n}_").replace("Obj.", f"L_{n}."))
     for n in actors:
         if gens[n].phased:
             L.append(f"\tL_{n}.RegisterComponentTickFunctions(true);")
+    if frames and "skeleton" in frames[0]:                                       # the reference skeleton of the mesh: read once, when the instance starts
+        L += skeleton_lines(frames[0]["skeleton"])
     for n in actors:
         L.append(f"\tL_{n}.BeginPlay();")
     for n in anims:
@@ -106,11 +131,27 @@ def make_system_driver(modules: dict[str, ir.Module], frames: list[dict], schedu
         for cname, cv in f.get("curves", {}).items():                          # the animation curves of the previous evaluation
             for n in anims:
                 L.append(f'\t\tL_{n}.StubCurves["{cname}"] = {cd._num(cv)}f;')
+        if "mesh_world_transform" in f:                                        # the mesh component and the pose evaluated last
+            L.append(f"\t\tMesh.StubTransform = {cd._dtransform(f['mesh_world_transform'])};")
+        if "bones" in f:
+            L.append("\t\tMesh.StubBones.clear();")
+            for bname, bt in f["bones"].items():
+                L.append(f'\t\tMesh.StubBones["{bname}"] = {{{cd._dtransform(bt.get("component", IDENTITY))}, {cd._dtransform(bt.get("world", IDENTITY))}}};')
+        ground = f.get("world", {}).get("ground_z", "unset")                   # the ground the sweeps of an animation instance meet
+        if ground is None:
+            L.append("\t\tWorld.HasGround = false;")
+        elif ground != "unset":
+            L.append(f"\t\tWorld.HasGround = true; World.GroundZ = {cd._num(ground)};")
         for n, m in modules.items():
             for name, v in f.get("free", {}).get(n, {}).items():
                 inp = m.find_input(name)
                 L.append(f"\t\tL_{n}.{name} = {cd._lit(inp.ty, v)};")
         L.append("\t\tStubLog::Lines().clear();")
+        for k, ev in enumerate(f.get("events", [])):                           # notifies of the classes a program declares: the engine calls them on the mesh
+            for n in anims:
+                if ev[0] in ("notify", "notify_begin", "notify_end", "notify_tick") and modules[n].find_notify(ev[1]) is not None:
+                    decl, call = cd.notify_event(modules[n], ev, k)
+                    L += ["\t\t" + decl, "\t\t" + call]
         dt = cd._num(f["dt"]) + "f"
         for si, (n, slot) in enumerate(schedule):
             for ev in f.get("step_events", {}).get(si, []):                # hook events that arrive between two steps (the movement component raised them)
