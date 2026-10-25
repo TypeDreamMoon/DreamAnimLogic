@@ -59,6 +59,7 @@ param MantlingLow: AlsMantlingSettings;                // MS_Als_Low
 param MantlingLowBox: AlsMantlingSettings;             // MS_Als_Low_Box
 
 // ---- what the host tells us, sampled at the start of every update block ---------------------------------------------------------
+input WorldTime: float <- host.time;                                              // GetWorld()->GetTimeSeconds(): the time of a teleport goes to the animation instance   C:158
 input Velocity: vec3 <- host.velocity;                                           // GetVelocity()                            C:1376
 input Acceleration: vec3 <- host.acceleration;                                   // CMC->GetCurrentAcceleration()            C:1119
 input MaxAcceleration: float <- host.max_acceleration;                           // CMC->GetMaxAcceleration()                C:1119 (the ground value on the ground, CMC:292)
@@ -282,6 +283,11 @@ on crouch_started {                                                             
 
 on crouch_ended {                                                                // C:855-871 OnEndCrouch (the network smoothing patch :857-866 is dropped)
     set_stance(AlsStance.Standing);                                              // :870
+}
+
+on teleported {                                                                  // C:153-160 the capsule's TransformUpdated with a TeleportType other than None
+    Anim.MarkTeleportedAt(WorldTime);                                            // :158 (a call to the animation instance is queued and runs at the start of its next update, a frame later than the teleport
+                                                                                 // when the movement component raises it after that update: the time of the teleport goes with it)
 }
 
 on physics_rotation(dt) {                                                        // C:1509-1512 CharacterMovement_OnPhysicsRotation, after UCharacterMovementComponent::PhysicsRotation

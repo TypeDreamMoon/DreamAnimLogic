@@ -54,11 +54,14 @@ HAVE_SOURCE = os.path.isdir(os.path.join(ALS_SOURCE, "Public", "State"))
 DT = 1.0 / 60.0
 
 ANIM_STUB = """
-// stand-in for als/AlsAnimationInstance.dal: the character only calls Jump() and SnapshotFinalRagdollPose() on it
+// stand-in for als/AlsAnimationInstance.dal: the character only calls Jump(), MarkTeleported() and SnapshotFinalRagdollPose() on it
 logic AlsAnimationInstance;
 state Jumps: int;
+state Teleports: int;
+state TeleportTime: float;
 state Snapshots: int;
 pub method Jump() { Jumps += 1; }
+pub method MarkTeleportedAt(Time: float) { Teleports += 1; TeleportTime = Time; }
 pub method SnapshotFinalRagdollPose() { Snapshots += 1; }
 update(dt) { Jumps += 0; }
 """
@@ -1096,6 +1099,19 @@ class LandingAndJumpTests(Case):
             rig.step(movement_mode=WALKING_MODE, is_grounded=True, velocity=(0.0, 0.0, 0.0))
             rig.step(movement_mode=FALLING_MODE, is_grounded=False, velocity=(0.0, 0.0, -10.0))               # walking off a ledge is not a jump: no `jumped` event
             self.assertEqual(rig.anim.snapshot()["Jumps"], 1)
+
+    def test_a_teleport_of_the_capsule_is_marked_on_the_animation_instance(self):
+        # C:153-160: the capsule's TransformUpdated with a teleport type tells the animation instance (the foot lock follows the character for 0.2 s)
+        for rig in rigs():
+            rig.step()
+            self.assertEqual(rig.anim.snapshot()["Teleports"], 0)
+            rig.step(hooks=[("teleported",)], time=7.25)
+            self.assertEqual(rig.anim.snapshot()["Teleports"], 1)
+            self.assertEqual(rig.anim.snapshot()["TeleportTime"], 7.25)                                       # the time of the teleport, not of the update that hears of it
+            rig.step(hooks=[("teleported",), ("teleported",)])
+            self.assertEqual(rig.anim.snapshot()["Teleports"], 3)
+            rig.step()
+            self.assertEqual(rig.anim.snapshot()["Teleports"], 3)
 
     def test_a_jump_key_without_a_jump_of_the_movement_component_tells_the_animation_nothing(self):
         # the old workaround counted two frames after the key; the hook says what really happened

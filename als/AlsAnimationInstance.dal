@@ -221,8 +221,14 @@ pub method Jump() {                                                        // AI
     InAirState.bJumpRequested = true;
 }
 
-pub method MarkTeleported() {                                              // AI.h:377 (called from AAlsCharacter::TransformUpdated, C:153)
+pub method MarkTeleported() {                                              // AI.h:377
     mark_teleported();
+}
+
+// MarkTeleported() as the character calls it (C:153-160, from the capsule's TransformUpdated): ALS stores the world time of the call.  A call from
+// a logic to this one is queued and runs at the start of the next update, which can be a frame after the teleport, so the time goes with the call.
+pub method MarkTeleportedAt(Time: float) {
+    TeleportedTime = Time;
 }
 
 method mark_teleported() {

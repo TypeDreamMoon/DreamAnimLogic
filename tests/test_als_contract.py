@@ -459,7 +459,8 @@ class ContractTests(unittest.TestCase):
 
     def test_pub_methods_the_character_and_the_notifies_call(self):
         pub = {m.name: m for m in self.inst.methods if m.pub and not m.is_view}
-        self.assertEqual(sorted(pub), ["Jump", "MarkTeleported", "SetGroundedEntryMode", "SnapshotFinalRagdollPose"])
+        self.assertEqual(sorted(pub), ["Jump", "MarkTeleported", "MarkTeleportedAt", "SetGroundedEntryMode", "SnapshotFinalRagdollPose"])
+        self.assertEqual([(n, t.name) for n, t in pub["MarkTeleportedAt"].params], [("Time", "float")])             # the character calls it with the time of the teleport (MarkTeleported() reads the world time)
         self.assertEqual([(n, t.name) for n, t in pub["SetGroundedEntryMode"].params], [("NewGroundedEntryMode", "AlsGroundedEntryMode")])
 
 
