@@ -98,6 +98,9 @@ void UDalRagdollService::End()
 	SpeedLimitFramesRemaining = 0;
 	SetComponentTickEnabled(false);
 
+	// Where the detached mesh is while it still simulates: the pose the ragdoll ends in is in the component space of this transform.
+	const FTransform DetachedMeshTransform = Mesh->GetComponentTransform();
+
 	// Disable the mesh's physics simulation and enable the capsule's collision.
 	Mesh->bUpdateJointsFromAnimation = false;
 
@@ -107,9 +110,24 @@ void UDalRagdollService::End()
 
 	Character->GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 
-	// Attach the mesh back to the capsule at its default relative transform (what the character class remembered at BeginPlay).
+	// Attach the mesh back to the capsule at its default relative transform (what the character class remembered at BeginPlay).  The logic has moved
+	// the actor before this command, as AAlsCharacter does (AlsCharacter_Actions.cpp:1100-1126): the mesh goes where the capsule is now.
+	const FTransform ActorTransform = Character->GetActorTransform();
+	Mesh->SetWorldLocationAndRotationNoPhysics(ActorTransform.TransformPositionNoScale(Character->GetBaseTranslationOffset()),
+	                                           ActorTransform.TransformRotation(Character->GetBaseRotationOffset()).Rotator());
 	Mesh->AttachToComponent(Character->GetCapsuleComponent(), FAttachmentTransformRules::KeepWorldTransform);
-	Mesh->SetRelativeLocationAndRotation(Character->GetBaseTranslationOffset(), Character->GetBaseRotationOffset());
+
+	// The pose of the ragdoll is the one the get up blends from (the logic takes a snapshot of it in the next animation update).  It is in the component
+	// space of the detached mesh, which was wherever the ragdoll ended up; the mesh has moved to the capsule since.  ALS puts the pelvis of the final
+	// pose back where it was in the world, relative to the mesh now (AlsCharacter_Actions.cpp:1128-1138: PelvisTransform.GetRelativeTransform(mesh)).
+	// The snapshot keeps every other bone relative to its parent, so moving all the bones but the root from the old component space to the new one
+	// gives the same pose: the pelvis is where ALS puts it and nothing else changes.
+	const FTransform Shift = DetachedMeshTransform * Mesh->GetComponentTransform().Inverse();
+	TArray<FTransform>& ComponentSpace = const_cast<TArray<FTransform>&>(Mesh->GetComponentSpaceTransforms());
+	for (int32 BoneIndex = 1; BoneIndex < ComponentSpace.Num(); ++BoneIndex)
+	{
+		ComponentSpace[BoneIndex] = ComponentSpace[BoneIndex] * Shift;
+	}
 
 	if (Mesh->ShouldUseUpdateRateOptimizations())
 	{
