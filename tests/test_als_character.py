@@ -377,11 +377,12 @@ class FilesTests(Case):
         m = modules()
         char, inp = m["AlsCharacter"], m["AlsInput"]
         self.assertEqual((char.kind, inp.kind), ("actor", "actor"))
-        self.assertEqual([u.phase for u in char.updates], ["pre_movement", "after_movement"])
+        self.assertEqual([u.phase for u in char.updates], ["pre_movement", "after_movement", "physics_walking"])      # the last one is a hook slot: the movement component runs it
         self.assertEqual(harness.phases_of(inp), ["pre_movement"])
         self.assertEqual([(p.name, p.logic) for p in char.peers], [("Anim", "AlsAnimationInstance")])
         self.assertEqual([(p.name, p.logic) for p in inp.peers], [("Character", "AlsCharacter")])
-        self.assertTrue(char.slot_events)                                                           # the hooks of the movement component reach the Tick of the same tick
+        self.assertTrue(char.slot_events)                                                           # a host that polls: the hooks of the movement component reach the Tick of the same tick
+        self.assertTrue(char.sync_events)                                                           # a host that pushes (UE): the hook is handled when the movement component raises it
         self.assertEqual([(o.relation, o.peer, o.slots) for o in inp.order], [("before", "Character", ("pre_movement",))])
         self.assertTrue(inp.flush_peers)                                                            # its calls are flushed by its own block
         self.assertEqual(sorted(h.event for h in char.handlers if h.event in ("movement_mode_changed", "jumped", "crouch_started", "crouch_ended", "physics_rotation")),
@@ -1444,7 +1445,10 @@ class GeneratedCppShapeTests(Case):
         self.has(h, "TObjectPtr<UAlsCharacterSettings> Settings;")
         self.has(h, "TObjectPtr<UAlsMovementSettings> MovementSettings;")
         self.has(h, "void Jump();")
-        self.has(h, "FAlsCharacterPhaseTick DalPhaseTicks[2];")                             # pre_movement and after_movement
+        self.has(h, "FAlsCharacterPhaseTick DalPhaseTicks[3];")                             # pre_movement, after_movement and the hook slot physics_walking
+        self.has(h, "virtual void DalRunHook(FName DalHook, float DeltaSeconds) override;")      # the movement component runs the hook slot (DalHost::FEventRouter::RunHook)
+        self.has(c, "DalPhaseTicks[2].bCanEverTick = false;")                                 # no tick function for it
+        self.has(c, "void UAlsCharacter::DalHandleEventNow(const DalHost::FEvent& DalEvent)")   # sync_events
         self.has(c, "DalPhaseTicks[0].TickGroup = TG_PrePhysics;")
         self.has(c, "DalPhaseTicks[1].AddPrerequisite(DalMovement, DalMovement->PrimaryComponentTick);")    # after the movement component
         self.has(c, "Anim->DalQueue_Jump();")                                               # the animation instance is called through its queue

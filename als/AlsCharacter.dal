@@ -24,16 +24,20 @@
 // RefreshCustom*Rotation.
 //
 // Differences that follow from DAL (each one is listed in als-dal-rewrite.md section 7):
-//   * the hooks of the engine (OnMovementModeChanged, OnStartCrouch / OnEndCrouch, OnJumped, PhysicsRotation) are `on` handlers, and the
-//     logic is `slot_events`: an event the movement component raises inside its tick is handled at the start of the next tick slot of
-//     the same tick, which is the order of the C++ (the hook ran inside the movement component, before AAlsCharacter::Tick);
+//   * the hooks of the engine (OnMovementModeChanged, OnStartCrouch / OnEndCrouch, OnJumped, PhysicsRotation) and the notify states of the
+//     montages are `on` handlers, and the logic is `sync_events`: the event is handled when the movement component / the animation raises it, in
+//     the middle of its tick, which is the order of the C++ (the hook ran inside the movement component, before AAlsCharacter::Tick, and the
+//     animation instance of the same step already sees the stance OnStartCrouch has set or the action a branching point notify has ended).
+//     A host that cannot push events (the Blender one) lets the logic poll them: `slot_events` handles them at the start of the next tick slot;
 //   * the host commands run after the update block, so what the C++ does to the actor and reads back at once is mirrored in this logic's
 //     state: SetActorRotation in ActorRotationNow, SetMovementMode and the OnMovementModeChanged call inside it (the locomotion mode) in
 //     MovementModeNow / LocomotionMode; both mirrors are taken from the host again at the start of the next after_movement block;
 //   * the movement component keeps a copy of the rotation mode, the stance and the gait settings: here they are this logic's own
 //     RotationMode / Stance and the settings are looked up where they are used;
-//   * RefreshGroundedMovementSettings runs inside PhysWalking in UE (with the velocity at the start of the movement): push_movement_settings()
-//     runs at the end of the after_movement block with the velocity at the end of the movement, which is the same value one frame later;
+//   * RefreshGroundedMovementSettings runs inside PhysWalking in UE (with the velocity at the start of the movement, after OnStartCrouch / a
+//     landing of the same step): the `physics_walking` block is that, run by the movement component of a host that has a walking physics of its
+//     own (a hook slot).  A host without it never runs the block and push_movement_settings() at the end of the after_movement block pushes the
+//     same settings with the velocity at the end of the movement, which is the same value one frame later;
 //   * a data asset cannot be handed around in DAL, so SelectMantlingSettings (a Blueprint event in ALS) is the enum AlsMantlingSettingsKind
 //     and views that read the selected asset's members out of the `param`s MantlingHigh ... (see als/bindings.json for the data assets);
 //   * the physics of a ragdoll (bodies, joints, motors, the pelvis body) belong to the host's ragdoll service: ragdoll_begin / _end /
@@ -43,7 +47,7 @@
 use "als_lib.dal";
 
 peer Anim: AlsAnimationInstance;                       // AlsCharacter.h:57 AnimationInstance: Jump() and SnapshotFinalRagdollPose() are called on it (queued)
-logic AlsCharacter : actor slot_events in after_movement;   // the ALS Tick runs after the movement component (als-dal-rewrite.md 1.9)
+logic AlsCharacter : actor slot_events sync_events in after_movement;   // the ALS Tick runs after the movement component (als-dal-rewrite.md 1.9)
 
 param Settings: AlsCharacterSettings;                  // AlsCharacter.h:31
 param MovementSettings: AlsMovementSettings;           // AlsCharacter.h:34
@@ -106,6 +110,7 @@ state GaitAmount: float;                                                        
 
 // ---- bookkeeping of this rewrite -----------------------------------------------------------------------------------------------
 state ActorRotationNow: rotator;                                                 // GetActorRotation() as this update has changed it (host commands run after the block)
+state bPhysicsWalkingRan: bool;                                                 // the host ran the physics_walking block since the last after_movement block (the settings are pushed already)
 state bActorRotationMirrored: bool;                                              // ActorRotationNow was set by a hook handler: the block that follows keeps it
 state NewActorRotation: rotator;                                                 // the `FRotator& ActorRotation` that ConstrainAimingRotation edits (C:1680, C:1718)
 state MovementModeNow: MovementMode;                                             // GetCharacterMovement()->MovementMode, including the set_movement_mode calls of this block (host commands run after it)
@@ -226,7 +231,18 @@ update(dt) in after_movement {                                                  
     refresh_rolling(dt);                                                         // :295
     // Super::Tick(DeltaTime);                                                   // :297
     refresh_locomotion_late();                                                   // :299
-    push_movement_settings();                                                    // CMC:335, see the header
+    if (!bPhysicsWalkingRan) {
+        push_movement_settings();                                                // CMC:335, see the header (a host without the physics_walking block)
+    }
+    bPhysicsWalkingRan = false;
+}
+
+// RefreshGroundedMovementSettings, the first thing PhysWalking does (CMC:333-335).  The movement component runs this block at that point (a hook
+// slot), after it has handed the events of the step so far to the logic: the stance OnStartCrouch has just changed, the locomotion mode a landing
+// has just set, with the velocity the walking move starts with.
+update(dt) in physics_walking {
+    push_grounded_movement_settings();
+    bPhysicsWalkingRan = true;
 }
 
 // The overrides of the engine's hooks.  The movement component raises them while it moves the character, before AAlsCharacter::Tick, so

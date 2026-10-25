@@ -14,7 +14,7 @@
 // update(dt); the entries run after it, when the animation graph calls Call(Self.X); NativePostUpdateAnimation (AI:194), which the
 // proxy of ALS runs on the game thread after the graph update, is the post_update block (and `post_flush`: its commands run the same
 // frame, as the transition montages that AI:208-210 play right there).
-logic AlsAnimationInstance : anim post_flush;
+logic AlsAnimationInstance : anim post_flush sync_events;      // the notifies of the montages set the state when they are triggered (AlsAnimNotify_SetGroundedEntryMode)
 use "als_lib.dal";
 
 param Settings: AlsAnimationInstanceSettings;                             // AI.h:40  (.dab: Defaults = { Settings = AIS_Als_Default; })
