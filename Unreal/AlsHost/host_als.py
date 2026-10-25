@@ -177,7 +177,16 @@ def apply(host: Path, gen: Path, overlay: bool):
                 create(man, host, "host", rel, f.read_bytes())
     man.data["host"] = str(host)
     man.save()
+    forget_build_cache(host)
     print("applied: %d moved, %d created, %d patched" % (len(man.data["moved"]), len(man.data["created"]), len(man.data["patched"])))
+
+
+def forget_build_cache(host: Path):
+    """UBT keeps the list of the source files of the project (SourceFileCache.bin, the makefile): after files moved out and back it can still miss
+    some, and UHT then reports types it cannot find (the original ALS did not build after a restore until these were deleted)."""
+    (host / "Intermediate" / "Build" / "SourceFileCache.bin").unlink(missing_ok=True)
+    for makefile in (host / "Intermediate" / "Build" / "Win64" / "x64").glob("*/Development/Makefile.bin"):
+        makefile.unlink(missing_ok=True)
 
 
 def restore(host: Path):
@@ -201,6 +210,7 @@ def restore(host: Path):
         shutil.rmtree(plugin / "Source" / "ALS" / d, ignore_errors=True)
     shutil.rmtree(plugin / "OriginalLogic", ignore_errors=True)
     (plugin / ".dal_host_manifest.json").unlink(missing_ok=True)
+    forget_build_cache(host)
     print("restored")
 
 

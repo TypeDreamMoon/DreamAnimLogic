@@ -53,6 +53,11 @@ ADalAlsHostCharacter::ADalAlsHostCharacter(const FObjectInitializer& ObjectIniti
 	AlsLogic = CreateDefaultSubobject<UAlsCharacter>(TEXT("AlsLogic"));
 	AlsLogic->Settings = FindAsset<UAlsCharacterSettings>(TEXT("/ALS/ALS/Data/Character/CS_Als_Default.CS_Als_Default"));
 	AlsLogic->MovementSettings = FindAsset<UAlsMovementSettings>(TEXT("/ALS/ALS/Data/Character/Movement/MS_Als_Normal.MS_Als_Normal"));
+	// SelectMantlingSettings is a Blueprint event in ALS (B_Als_Character overrides it): the logic has one param per data asset (als/bindings.json)
+	AlsLogic->MantlingHigh = FindAsset<UAlsMantlingSettings>(TEXT("/ALS/ALS/Data/Character/Mantle/MS_Als_High.MS_Als_High"));
+	AlsLogic->MantlingHighInAir = FindAsset<UAlsMantlingSettings>(TEXT("/ALS/ALS/Data/Character/Mantle/MS_Als_High_InAir.MS_Als_High_InAir"));
+	AlsLogic->MantlingLow = FindAsset<UAlsMantlingSettings>(TEXT("/ALS/ALS/Data/Character/Mantle/MS_Als_Low.MS_Als_Low"));
+	AlsLogic->MantlingLowBox = FindAsset<UAlsMantlingSettings>(TEXT("/ALS/ALS/Data/Character/Mantle/MS_Als_Low_Box.MS_Als_Low_Box"));
 
 	AlsInputLogic = CreateDefaultSubobject<UAlsInput>(TEXT("AlsInputLogic"));
 	AlsInputLogic->DalAction_LookMouse = FindAsset<UInputAction>(TEXT("/ALS/ALS/Data/Input/IA_Als_LookMouse.IA_Als_LookMouse"));
