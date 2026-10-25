@@ -2948,6 +2948,12 @@ class CppGen:
                 # its proxy, which runs this one.  At NativeInitializeAnimation the mesh does not always know the main instance yet (a graph that links
                 # instances while it is being initialised), so the parent is looked up again here until it is found.
                 tsu += [f"{T}if (!Parent.IsValid())", f"{T}{{", f"{T}{T}DalResolveParent();", f"{T}}}", ""]
+            if self.queue_target:
+                # What an actor logic asked of this instance after NativeUpdateAnimation (its movement component tick, its second tick slot) and before the graph updates runs now,
+                # in the update of the same frame, as a direct call of the original does (ALS: the capsule's TransformUpdated calls MarkTeleported(), and the foot lock of the
+                # graph update that follows has to see it); the drain in NativeUpdateAnimation takes what was asked earlier.  The calls are the logic's own methods, which
+                # a worker thread may run: this function runs them before the update, on the thread of the update.
+                tsu += [f"{T}DalDrainPeerCalls();", ""]
             tsu += [f"{T}Dal_DeltaSeconds = DeltaSeconds;", f"{T}DalUpdate(DeltaSeconds);"]
             if self.game_thread_flush:
                 tsu += self.game_thread_flush_lines()

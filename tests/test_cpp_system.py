@@ -83,6 +83,10 @@ class SystemCppTests(unittest.TestCase):
         self.assertIn("void DalQueue_Notify(int32 n);", anim["AlsAnim.h"])
         a = anim["AlsAnim.cpp"]
         self.assertLess(a.index("DalSampleInputs();\n\tDalDrainPeerCalls();"), a.index("NativeThreadSafeUpdateAnimation"))
+        # ... and again at the start of the graph's update: a call the movement component's tick or the actor logic's second slot made after NativeUpdateAnimation
+        # is in effect in the update of the same frame (the original's direct call), not of the next one
+        tsu = a[a.index("::NativeThreadSafeUpdateAnimation"):]
+        self.assertLess(tsu.index("DalDrainPeerCalls();"), tsu.index("DalUpdate(DeltaSeconds);"))
         self.assertIn("CharLocomotion = Character != nullptr ? Character->Locomotion : FLocomotionState();", a)
         self.assertIn("CharSpeed = Character != nullptr ? Character->Locomotion.Speed : 0.0f;", a)
 
