@@ -232,18 +232,8 @@ def graph_calls(rng, modes):
 
 
 def random_notify(rng):
-    """A notify event of the instance: the grounded entry mode notify, or a tick of the early blend out notify state with some of its properties set."""
-    if rng.random() < 0.4:
-        return ("notify", "AlsAnimNotify_SetGroundedEntryMode", rng.choice([{}, {"GroundedEntryMode": "Als.GroundedEntryMode.FromRoll"}]))
-    payload = {}
-    for name, values in (("BlendOutDuration", [0.1, 0.4]), ("bCheckInput", [False, True]), ("bCheckLocomotionMode", [False, True]),
-                         ("bCheckRotationMode", [False, True]), ("bCheckStance", [False, True]),
-                         ("LocomotionModeEquals", [tag("LocomotionMode", "Grounded"), tag("LocomotionMode", "InAir")]),
-                         ("RotationModeEquals", [tag("RotationMode", "ViewDirection"), tag("RotationMode", "Aiming")]),
-                         ("StanceEquals", [tag("Stance", "Standing"), tag("Stance", "Crouching")])):
-        if rng.random() < 0.4:
-            payload[name] = rng.choice(values)
-    return ("notify_tick", "AlsAnimNotifyState_EarlyBlendOut", payload, rng.randint(1, 5))
+    """A notify event of the instance: the grounded entry mode notify, with the tag or without it."""
+    return ("notify", "AlsAnimNotify_SetGroundedEntryMode", rng.choice([{}, {"GroundedEntryMode": "Als.GroundedEntryMode.FromRoll"}]))
 
 
 def make_sequence(seed, count, calls_per_frame=3, graph=None):
@@ -315,8 +305,10 @@ def make_sequence(seed, count, calls_per_frame=3, graph=None):
         if hold == 0:
             view_yaw += rng.choice([0.0, 0.0, 1.0, 5.0, -3.0, 40.0]) * rng.uniform(-1, 1) * (1.0 if rng.random() > 0.01 else 8.0)
         if hold == 0 and rng.random() < 0.03:
-            view_yaw += rng.choice([-1.0, 1.0]) * rng.uniform(60.0, 175.0)
+            view_yaw += rng.choice([-1.0, 1.0]) * rng.uniform(60.0, 178.0)
             hold = rng.randint(15, 60)
+            modes["rotation"], modes["view"], allow_transitions = "ViewDirection", "ThirdPerson", 1.0       # what a turn in place needs; the stance is the sequence's
+            modes["stance"] = rng.choice(["Standing", "Crouching"])
         view_yaw = ((view_yaw + 180.0) % 360.0) - 180.0
         view_pitch = max(-80.0, min(80.0, view_pitch + rng.uniform(-3, 3)))
         view_speed = abs(((view_yaw - last_view_yaw + 180.0) % 360.0) - 180.0) / dt if dt > 1e-6 else 0.0
@@ -331,6 +323,7 @@ def make_sequence(seed, count, calls_per_frame=3, graph=None):
             yaw += max(-500.0 * dt, min(500.0 * dt, ((velocity_yaw - yaw + 180.0) % 360.0) - 180.0))
         if rng.random() < 0.01:
             yaw = rng.uniform(-180, 180)
+        yaw += rng.uniform(-0.01, 0.01)                                   # the actor never lands exactly on the yaw it turns to: an exact tie (a remaining yaw of 0 against 3e-15) is a coin flip of the rounding
         yaw = ((yaw + 180.0) % 360.0) - 180.0
         if rng.random() < 0.03:
             max_acc = rng.choice([0.0, 1000.0, 2000.0, 2500.0])
@@ -597,7 +590,7 @@ class OracleTests(unittest.TestCase):
         for branch in ("foot_lock_teleport", "foot_lock_became_valid", "foot_lock_decrease_moving", "foot_lock_decrease_in_air", "foot_lock_released",
                        "foot_lock_new_lock", "foot_lock_new_location", "foot_lock_blend_out", "thigh_angle_clamped", "foot_angle_clamped",
                        "ground_prediction_hit", "ground_prediction_miss", "dynamic_transition_left", "dynamic_transition_right",
-                       "dynamic_transition_both", "turn_played", "early_blend_out", "grounded_entry_mode_notify", "snapshot",
+                       "dynamic_transition_both", "turn_played", "grounded_entry_mode_notify", "snapshot",
                        *[f"turn_{side}_{angle}_{stance}" for side in ("left", "right") for angle in (90, 180) for stance in ("standing", "crouching")]):
             self.assertGreater(hits.get(branch, 0), 0, f"no sequence got into {branch}: {sorted(hits)}")
 
@@ -743,9 +736,7 @@ class ThreeBackendTests(unittest.TestCase):
         files = generate_cpp(self.mods[INSTANCE], CppOptions(module_api="ALS_API"))
         text = "\n".join(files.values())
         self.assertIn("class ALS_API UAlsAnimNotify_SetGroundedEntryMode : public UAnimNotify", text)
-        self.assertIn("class ALS_API UAlsAnimNotifyState_EarlyBlendOut : public UAnimNotifyState", text)
-        self.assertRegex(text, r"UAlsAnimNotifyState_EarlyBlendOut::UAlsAnimNotifyState_EarlyBlendOut\(\)\s*\{[^}]*bIsNativeBranchingPoint = true")
-        self.assertIn("BranchingPointNotifyTick", text)
+        self.assertNotIn("UAlsAnimNotifyState_EarlyBlendOut", text)            # the early blend out reads the character's state: AlsCharacter.dal declares it, once
 
 
 class MutationTests(unittest.TestCase):
@@ -769,7 +760,7 @@ class MutationTests(unittest.TestCase):
         ("let turn_180 = abs(ViewState.YawAngle) >= Settings.TurnInPlace.Turn180AngleThreshold;", "let turn_180 = abs(ViewState.YawAngle) >= Settings.TurnInPlace.Turn180AngleThreshold - 50.0;"),
         ("TurnInPlaceState.PlayRate = turn_in_place_settings.PlayRate;", "TurnInPlaceState.PlayRate = Settings.TurnInPlace.BlendDuration;"),
         ("DynamicTransitionsState.FrameDelay = 2;", "DynamicTransitionsState.FrameDelay = 3;"),
-        ("(payload.bCheckStance && CharacterStance == payload.StanceEquals)", "(payload.bCheckStance && Stance == payload.StanceEquals)"),
+        ("SetGroundedEntryMode(payload.GroundedEntryMode);", "SetGroundedEntryMode(AlsGroundedEntryMode.FromRoll);"),
         ("DeltaTimeWithoutTimeDilation = time_dilation > SMALL_NUMBER ? dt / time_dilation : RealDeltaTime;",
          "DeltaTimeWithoutTimeDilation = time_dilation > SMALL_NUMBER ? dt / time_dilation : dt;"),
     ]

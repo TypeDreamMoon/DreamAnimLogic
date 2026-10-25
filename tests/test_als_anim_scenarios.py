@@ -1363,9 +1363,6 @@ class TurnInPlaceTests(ScenarioBase):
 
 
 class NotifyTests(ScenarioBase):
-    def stops(self, sim):
-        return [c for c in sim.hosts[INSTANCE].calls if c[0] == "montage_stop_source"]
-
     def test_the_grounded_entry_mode_notify_sets_the_tag(self):
         sim = self.sim()
         sim.step()
@@ -1374,34 +1371,19 @@ class NotifyTests(ScenarioBase):
         s = sim.step(events=[("notify", "AlsAnimNotify_SetGroundedEntryMode", {})])                    # a notify without the property: the empty tag
         self.assertEqual(s["GroundedEntryMode"], "")
 
-    def test_early_blend_out_stops_the_montage_it_belongs_to(self):
-        def early(payload=None, **frame):
-            sim = self.sim()
-            sim.step()
-            sim.hosts[INSTANCE].calls.clear()
-            sim.step(events=[("notify_tick", "AlsAnimNotifyState_EarlyBlendOut", payload or {}, 3)], **frame)
-            return self.stops(sim)
+    def test_the_notify_survives_until_the_graph_resets_it(self):
+        sim = self.sim()
+        sim.step()
+        sim.step(events=[("notify", "AlsAnimNotify_SetGroundedEntryMode", {"GroundedEntryMode": "Als.GroundedEntryMode.FromRoll"})])
+        self.assertEqual(sim.step()["GroundedEntryMode"], "Als.GroundedEntryMode.FromRoll")
+        self.assertEqual(sim.step(calls=["ResetGroundedEntryMode"])["GroundedEntryMode"], "")
 
-        self.assertEqual(early(), [])                                                                    # standing, on the ground, view direction, no input: nothing to blend out for
-        self.assertEqual(early(loc={"bHasInput": True}), [("montage_stop_source", (3, 0.25))])           # input: the instance id of the notify and the default blend out time
-        self.assertEqual(early({"bCheckInput": False}, loc={"bHasInput": True}), [])
-        self.assertEqual(early({"BlendOutDuration": 0.1}, loc={"bHasInput": True}), [("montage_stop_source", (3, 0.1))])
-        self.assertEqual(len(early(tags={"LocomotionMode": tag("LocomotionMode", "InAir")})), 1)         # InAir is the default of LocomotionModeEquals
-        self.assertEqual(early({"bCheckLocomotionMode": False}, tags={"LocomotionMode": tag("LocomotionMode", "InAir")}), [])
-        self.assertEqual(len(early(tags={"RotationMode": ROT["Aiming"]})), 1)
-        self.assertEqual(len(early(tags={"Stance": tag("Stance", "Crouching")})), 1)
-        self.assertEqual(early({"StanceEquals": tag("Stance", "Standing")}, tags={"Stance": tag("Stance", "Crouching")}), [])
-        self.assertEqual(len(early({"StanceEquals": tag("Stance", "Standing")})), 1)
-        self.assertEqual(early({"RotationModeEquals": tag("RotationMode", "VelocityDirection")}, tags={"RotationMode": ROT["Aiming"]}), [])
-
-    def test_the_notifies_are_declared_with_the_properties_of_the_ALS_classes(self):
+    def test_only_the_notify_of_the_instance_is_declared_here(self):
+        # SetLocomotionAction, SetRootMotionScale and EarlyBlendOut act on the character: AlsCharacter.dal declares them (a class once per module)
         notifies = {n.name: n for n in self.mods[INSTANCE].notifies}
-        self.assertEqual(sorted(notifies), ["AlsAnimNotifyState_EarlyBlendOut", "AlsAnimNotify_SetGroundedEntryMode"])
-        self.assertEqual([f.name for f in notifies["AlsAnimNotifyState_EarlyBlendOut"].struct.fields],
-                         ["BlendOutDuration", "bCheckInput", "bCheckLocomotionMode", "bCheckRotationMode", "bCheckStance", "LocomotionModeEquals",
-                          "RotationModeEquals", "StanceEquals"])
-        self.assertTrue(notifies["AlsAnimNotifyState_EarlyBlendOut"].branching)
+        self.assertEqual(sorted(notifies), ["AlsAnimNotify_SetGroundedEntryMode"])
         self.assertEqual([f.name for f in notifies["AlsAnimNotify_SetGroundedEntryMode"].struct.fields], ["GroundedEntryMode"])
+        self.assertFalse(notifies["AlsAnimNotify_SetGroundedEntryMode"].branching)
 
 
 class TimeDilationAndSnapshotTests(ScenarioBase):

@@ -32,9 +32,6 @@ TAGS = {
 SLOT_NONE, SLOT_STANDING, SLOT_CROUCHING = 0, 1, 2                      # the FName slots of the turn in place state (the .dal's enum AlsTurnInPlaceSlot)
 MONTAGE_BLEND_INERTIALIZATION = 1                                       # EMontageBlendMode::Inertialization
 
-EARLY_BLEND_OUT_DEFAULTS = dict(BlendOutDuration=0.25, bCheckInput=True, bCheckLocomotionMode=True, bCheckRotationMode=True, bCheckStance=True,
-                                LocomotionModeEquals="Als.LocomotionMode.InAir", RotationModeEquals="Als.RotationMode.Aiming",
-                                StanceEquals="Als.Stance.Crouching")        # AlsAnimNotifyState_EarlyBlendOut.h:13-37
 
 
 def tag(kind, member):
@@ -438,20 +435,11 @@ class AlsAnimOracle:
         self.s["tags"]["GroundedEntryMode"] = new_mode
 
     def notify_event(self, kind, name, payload=None, instance=None):
-        """The events the notifies raise (AlsAnimNotify_SetGroundedEntryMode.cpp:30, AlsAnimNotifyState_EarlyBlendOut.cpp:44)."""
+        """The events the notifies of the instance raise (AlsAnimNotify_SetGroundedEntryMode.cpp:30)."""
         payload = payload or {}
         if kind == "notify" and name == "AlsAnimNotify_SetGroundedEntryMode":
             self.hits["grounded_entry_mode_notify"] += 1
             self.set_grounded_entry_mode(payload.get("GroundedEntryMode", ""))
-        elif kind == "notify_tick" and name == "AlsAnimNotifyState_EarlyBlendOut":
-            p = {**EARLY_BLEND_OUT_DEFAULTS, **payload}
-            c = self.f["char"]
-            if ((p["bCheckInput"] and c["loc"]["bHasInput"]) or
-                    (p["bCheckLocomotionMode"] and c["locomotion_mode"] == p["LocomotionModeEquals"]) or
-                    (p["bCheckRotationMode"] and c["rotation_mode"] == p["RotationModeEquals"]) or
-                    (p["bCheckStance"] and c["stance"] == p["StanceEquals"])):
-                self.hits["early_blend_out"] += 1
-                self.commands.append(("montage_stop_source", (instance, p["BlendOutDuration"])))
 
     # ---- helpers ------------------------------------------------------------------------------------------------------------
     def curve(self, name):

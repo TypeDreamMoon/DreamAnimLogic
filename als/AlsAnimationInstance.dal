@@ -139,25 +139,12 @@ input ThighRightTranslation: vec3 <- host.ref_path_child_translation("foot_r", "
 
 // ---- notifies (Source/ALS/Public/Notifies/*.h, Private/Notifies/*.cpp) ----------------------------------------------------------------
 // The classes keep the names of ALS's (without the U); the animation assets reference them by class and carry the properties as payload
-// (als-dal-rewrite.md 6.6).  The two other logic notifies are the character's: UAlsAnimNotifyState_SetLocomotionAction calls
-// Character->SetLocomotionAction and UAlsAnimNotifyState_SetRootMotionScale sets the root motion translation scale (AlsCharacter.dal).
+// (als-dal-rewrite.md 6.6).  The other logic notifies act on the character and are declared by AlsCharacter.dal (SetLocomotionAction,
+// SetRootMotionScale, EarlyBlendOut: it reads the character's state and stops the montage it belongs to); a class is declared once.
 // The footstep effects (AlsAnimNotify_FootstepEffects) and the camera shake stay native project code.
 
 // UAlsAnimNotify_SetGroundedEntryMode: Notify() hands the tag to the animation instance (SetGroundedEntryMode, AI.h:382).
 notify AlsAnimNotify_SetGroundedEntryMode cpp "AlsAnimNotify_SetGroundedEntryMode" { GroundedEntryMode: AlsGroundedEntryMode; }
-
-// UAlsAnimNotifyState_EarlyBlendOut: a branching point notify state; every tick, if the character is in one of the checked states, the montage
-// the notify belongs to starts to blend out (AlsAnimNotifyState_EarlyBlendOut.h:10-37).
-notify_state AlsAnimNotifyState_EarlyBlendOut cpp "AlsAnimNotifyState_EarlyBlendOut" branching {
-    BlendOutDuration: float = 0.25;
-    bCheckInput: bool = true;
-    bCheckLocomotionMode: bool = true;
-    bCheckRotationMode: bool = true;
-    bCheckStance: bool = true;
-    LocomotionModeEquals: AlsLocomotionMode = AlsLocomotionMode.InAir;
-    RotationModeEquals: AlsRotationMode = AlsRotationMode.Aiming;
-    StanceEquals: AlsStance = AlsStance.Crouching;
-}
 
 // ---- the entry points the graph calls --------------------------------------------------------------------------------------------------
 // (the 17 `linked` entries are the forwarders of UAlsLinkedAnimationInstance, LI:58-192; the rest are called as Main.X(...) on this instance)
@@ -250,17 +237,6 @@ pub method SetGroundedEntryMode(NewGroundedEntryMode: AlsGroundedEntryMode) {   
 
 on notify AlsAnimNotify_SetGroundedEntryMode {                             // AlsAnimNotify_SetGroundedEntryMode.cpp:30
     SetGroundedEntryMode(payload.GroundedEntryMode);
-}
-
-// AlsAnimNotifyState_EarlyBlendOut.cpp:44-69 (BranchingPointNotifyTick).  The character is read through the peer inputs, which are sampled
-// at the start of the update that handles the event.
-on notify_tick AlsAnimNotifyState_EarlyBlendOut {
-    if ((payload.bCheckInput && CharacterLocomotion.bHasInput) ||
-        (payload.bCheckLocomotionMode && CharacterLocomotionMode == payload.LocomotionModeEquals) ||
-        (payload.bCheckRotationMode && CharacterRotationMode == payload.RotationModeEquals) ||
-        (payload.bCheckStance && CharacterStance == payload.StanceEquals)) {
-        host.montage_stop_source(payload.BlendOutDuration);                // MontageInstance->Stop(the montage's own blend out with BlendTime = BlendOutDuration)
-    }
 }
 
 // ---- movement base (AI:259-286) -------------------------------------------------------------------------------------------------
