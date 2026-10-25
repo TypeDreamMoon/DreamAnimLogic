@@ -88,7 +88,8 @@ class ReadCheckTests(unittest.TestCase):
         self.assertEqual(codes('logic T;\ninput C: float <- host.anim_curve("LayerHead");\nupdate(dt) { }'), [])
         self.assertEqual(codes("logic T;\ninput C: float <- host.anim_curve;\nupdate(dt) { }"), ["DAL3021"])
         self.assertEqual(codes("logic T;\ninput C: float <- host.anim_curve(LayerHead);\nupdate(dt) { }"), ["DAL3023"])
-        self.assertEqual(codes('logic T;\ninput C: float <- host.anim_curve("Layer Head");\nupdate(dt) { }'), ["DAL3022"])
+        self.assertEqual(codes('logic T;\ninput C: float <- host.anim_curve("Layer Head");\nupdate(dt) { }'), [])        # curve names may have single spaces
+        self.assertEqual(codes('logic T;\ninput C: float <- host.anim_curve("Layer  Head");\nupdate(dt) { }'), ["DAL3022"])
         self.assertEqual(codes('logic T;\ninput C: int <- host.anim_curve("A");\nupdate(dt) { }'), ["DAL4020"])
         self.assertEqual(codes('logic T;\ninput C: float <- host.actor_ready;\nupdate(dt) { }'), ["DAL4020"])
         self.assertEqual(codes('logic T;\ninput C: bool <- host.capsule_radius("a");\nupdate(dt) { }'), ["DAL3021", "DAL4020"][:1])

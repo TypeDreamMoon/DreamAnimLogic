@@ -69,6 +69,28 @@ from .types import (
 )
 
 
+def host_name_problem(name: str | None, free: bool) -> str | None:
+    """Why ``name`` cannot be the string argument of a host read (None when it can).
+
+    The name becomes a C++ identifier part (``notify``) or an ``FName`` (bones, curves), so the characters are limited: letters, digits and ``_``,
+    not starting with a digit.  A ``free`` name (bones and curves; the engine looks them up as ``FName``s and a virtual bone is called ``VB foot_l``)
+    may also be several such words separated by single spaces: no leading, trailing or doubled space, no quote, backslash or other punctuation.
+    """
+    if not name:
+        return "it is empty"
+    words = name.split(" ")
+    if not free and len(words) > 1:
+        return "it must be a single identifier (letters, digits, '_'); only bone and curve names may contain spaces"
+    if any(not w for w in words):
+        return "a name may not start or end with a space or contain two spaces in a row"
+    for k, w in enumerate(words):
+        if not w.replace("_", "a").isalnum():
+            return "it may only contain letters, digits, '_'" + (" and single spaces between words" if free else "")
+        if k == 0 and w[0].isdigit():
+            return "it may not start with a digit"
+    return None
+
+
 @dataclass
 class Sym:
     kind: str       # enum const param input state fn extern entry logic
@@ -1125,8 +1147,9 @@ class Checker:
             return None
         if item.arg and item.nargs == 2:
             for nm in (b.arg, b.arg2):
-                if not nm or not nm.replace("_", "a").isalnum() or nm[0].isdigit():
-                    self.err("DAL3022", f"host argument {nm!r} must be an identifier (letters, digits, '_')", b.arg_pos or b.pos)
+                why = host_name_problem(nm, item.free_name)
+                if why is not None:
+                    self.err("DAL3022", f"host argument {nm!r} is not a valid name: {why}", b.arg_pos or b.pos)
                     return None
         if item.arg:
             apos = b.arg_pos or b.pos
@@ -1143,8 +1166,8 @@ class Checker:
             elif b.arg_is_ident:
                 self.err("DAL3023", f"host.{item.name} takes a quoted name, e.g. host.{item.name}(\"{b.arg}\")", apos)
                 return None
-            elif not b.arg or not b.arg.replace("_", "a").isalnum() or b.arg[0].isdigit():
-                self.err("DAL3022", f"host argument {b.arg!r} must be an identifier (letters, digits, '_')", apos)
+            elif host_name_problem(b.arg, item.free_name) is not None:
+                self.err("DAL3022", f"host argument {b.arg!r} is not a valid name: {host_name_problem(b.arg, item.free_name)}", apos)
                 return None
         if ty is ERROR:
             return None

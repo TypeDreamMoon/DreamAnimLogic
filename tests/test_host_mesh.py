@@ -68,7 +68,8 @@ class MeshReadTests(unittest.TestCase):
         self.assertEqual(codes(binding('bone_world_transform("a", "b")', "transform")), ["DAL3021"])
         self.assertEqual(codes(binding('bone_world_transform("a")', "vec3")), ["DAL4020"])                  # a bone gives a transform
         self.assertEqual(codes(binding("bone_world_transform", "transform")), ["DAL3021"])
-        self.assertEqual(codes(binding('ref_path_child_translation("a b", "c")')), ["DAL3022"])
+        self.assertEqual(codes(binding('ref_path_child_translation("a b", "c")')), [])                    # bone names may have single spaces ("VB foot_l")
+        self.assertEqual(codes(binding('ref_path_child_translation("a  b", "c")')), ["DAL3022"])          # ... but no doubled, leading or trailing ones
         self.assertEqual(codes(binding("root_motion_mode", "MovementMode")), ["DAL4020"])
         self.assertEqual(codes(binding("root_motion_mode", "RootMotionMode")), [])
 
