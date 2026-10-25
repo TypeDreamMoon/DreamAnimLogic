@@ -807,7 +807,7 @@ class AlsAnimOracle:
 
     def process_foot_lock_teleport(self, c):                # AI:1332
         foot = c["foot"]
-        if self.s["Feet"]["bBecameValid"] or self.f["time"] - self.TeleportedTime > 0.2 or not is_relevant(c["IkAmount"] * foot["LockAmount"]):
+        if self.s["Feet"]["bBecameValid"] or self.f["time"] - self.TeleportedTime > 0.20000000298023224 or not is_relevant(c["IkAmount"] * foot["LockAmount"]):
             return
         self.hits["foot_lock_teleport"] += 1
         foot["LockLocationWorldSpace"] = t_position(c["ComponentTransform"], foot["LockLocation"])

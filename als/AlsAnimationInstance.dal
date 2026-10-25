@@ -43,7 +43,7 @@ input MovementMaxAcceleration: float <- host.max_acceleration;            // AI:
 input MovementMaxBrakingDeceleration: float <- host.max_braking_deceleration;   // AI:710
 input MovementWalkableFloorZ: float <- host.walkable_floor_z;             // AI:711
 input ActorReady: bool <- host.actor_ready;                               // AI:227   Character->HasActorRegisteredAllComponents()
-input WorldTime: float <- host.time;                                      // AI:379   GetWorld()->GetTimeSeconds()
+input WorldTime: double <- host.time;                                     // AI:379   GetWorld()->GetTimeSeconds() (a double: TimeSince(TeleportedTime) > 0.2f below is a double comparison)
 input GlobalTimeDilation: float <- host.time_dilation;                    // AI:116   GetWorld()->GetWorldSettings()->GetEffectiveTimeDilation()
 input CustomTimeDilation: float <- host.actor_time_dilation;              // AI:114   Character->CustomTimeDilation
 input RealDeltaTime: float <- host.real_delta_time;                       // AI:115   GetWorld()->DeltaRealTimeSeconds
@@ -128,7 +128,7 @@ state RagdollingState: AlsRagdollingAnimationState;
 state bPendingUpdate: bool = true;
 state DeltaTimeWithoutTimeDilation: float = 1.0;                          // AI.h:51
 state PreviousGlobalTimeDilation: float = 1.0;                            // AI.h:54
-state TeleportedTime: float;                                              // AI.h:58   (read by the foot lock)
+state TeleportedTime: double;                                             // AI.h:58   (read by the foot lock)
 
 // The reference skeleton, read once (AI:50-86): from foot_l / foot_r up the parents to the bone whose parent is the pelvis, its translation in
 // the reference pose (the direction of the thigh in pelvis space).  The host gives zero when there is no such path (ALS leaves the default).
@@ -227,7 +227,7 @@ pub method MarkTeleported() {                                              // AI
 
 // MarkTeleported() as the character calls it (C:153-160, from the capsule's TransformUpdated): ALS stores the world time of the call.  A call from
 // a logic to this one is queued and runs at the start of the next update, which can be a frame after the teleport, so the time goes with the call.
-pub method MarkTeleportedAt(Time: float) {
+pub method MarkTeleportedAt(Time: double) {
     TeleportedTime = Time;
 }
 

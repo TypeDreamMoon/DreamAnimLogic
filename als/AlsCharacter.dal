@@ -59,26 +59,27 @@ param MantlingLow: AlsMantlingSettings;                // MS_Als_Low
 param MantlingLowBox: AlsMantlingSettings;             // MS_Als_Low_Box
 
 // ---- what the host tells us, sampled at the start of every update block ---------------------------------------------------------
-input WorldTime: float <- host.time;                                              // GetWorld()->GetTimeSeconds(): the time of a teleport goes to the animation instance   C:158
+input WorldTime: double <- host.time;                                             // GetWorld()->GetTimeSeconds() (double): the time of a teleport goes to the animation instance   C:158
 input Velocity: vec3 <- host.velocity;                                           // GetVelocity()                            C:1376
 input Acceleration: vec3 <- host.acceleration;                                   // CMC->GetCurrentAcceleration()            C:1119
 input MaxAcceleration: float <- host.max_acceleration;                           // CMC->GetMaxAcceleration()                C:1119 (the ground value on the ground, CMC:292)
 input PrePenetrationVelocity: vec3 <- host.pre_penetration_velocity;             // TryConsumePrePenetrationAdjustmentVelocity, consumed by the read   C:1402
 input PrePenetrationVelocityValid: bool <- host.pre_penetration_velocity_valid;
 input ControlRotation: rotator <- host.control_rotation;                         // Super::GetViewRotation()                 C:101, C:1252
-input ActorLocation: vec3 <- host.actor_location;                                // GetActorLocation()                       CA:174
+input ActorLocation: vec3d <- host.actor_location;                               // GetActorLocation() (FVector, double)     CA:174
 input ActorRotation: quat <- host.actor_rotation;                                // GetActorRotation()                       C:110
+input ActorQuat: quatd <- host.actor_rotation;                                   // GetActorQuat() (FQuat, double): the mantling reads it at double precision   CA:517, RMS:123
 input IsGrounded: bool <- host.is_grounded;                                      // IsMovingOnGround()                       CMC:333 (PhysWalking only runs on the ground)
 input CharacterMovementMode: MovementMode <- host.movement_mode;                 // GetCharacterMovement()->MovementMode     (MovementModeNow is taken from it at the start of the Tick)
 input HasAnyRootMotion: bool <- host.has_root_motion;                            // HasAnyRootMotion()                       C:1521
 input RootMotionModeOfAnimation: RootMotionMode <- host.root_motion_mode;        // GetAnimInstance()->RootMotionMode        CA:106
 input CapsuleRadius: float <- host.capsule_radius;                               // GetCapsuleComponent()->GetScaledCapsuleRadius()      CA:209
 input CapsuleHalfHeight: float <- host.capsule_half_height;                      // GetCapsuleComponent()->GetScaledCapsuleHalfHeight()  CA:210
-input CapsuleScale: float <- host.actor_scale;                                   // GetCapsuleComponent()->GetComponentScale().Z         CA:208
-input MeshWorldTransform: transform <- host.mesh_world_transform;                // GetMesh()->GetComponentTransform(): GetBaseRotationOffset() is the actor's rotation to it   CA:517
+input CapsuleScale: double <- host.actor_scale;                                  // GetCapsuleComponent()->GetComponentScale().Z (double)  CA:208
+input MeshWorldTransform: transformd <- host.mesh_world_transform;                // GetMesh()->GetComponentTransform(): GetBaseRotationOffset() is the actor's rotation to it   CA:517
 input RagdollSupported: bool <- host.ragdoll_supported;                          // the mesh has the pelvis and spine_03 bodies  CA:720-722
 input PelvisTransform: transform <- host.bone_world_transform("pelvis");         // GetMesh()->GetSocketTransform(PelvisBoneName)  CA:1078 (AlsConstants.h: "pelvis"): where the ragdoll starts, and its yaw when it stops
-input RagdollPelvisLocation: vec3 <- host.ragdoll_pelvis_location;               // the pelvis body of the ragdoll: FPhysicsInterface::GetTransform_AssumesLocked(..).GetLocation()  CA:883
+input RagdollPelvisLocation: vec3d <- host.ragdoll_pelvis_location;               // the pelvis body of the ragdoll: FPhysicsInterface::GetTransform_AssumesLocked(..).GetLocation()  CA:883
 input RagdollVelocity: vec3 <- host.ragdoll_velocity;                            // the pelvis body: FPhysicsInterface::GetLinearVelocity_AssumesLocked(..)  CA:884
 input RagdollFacingUp: bool <- host.ragdoll_facing_up;                           // FMath::UnwindDegrees(PelvisRotation.Roll) <= 0.0f of the pelvis bone  CA:1099
 input RotationYawSpeedCurve: float <- host.anim_curve("RotationYawSpeed");       // GetCurveValue(RotationYawSpeedCurveName) C:1814 (AlsConstants.h:81)
@@ -103,7 +104,7 @@ state DesiredVelocityYawAngle: float;                                           
 state bHasDesiredVelocity: bool;                                                 // :94
 state LocomotionState: AlsLocomotionState;                                       // :97
 state MantlingState: AlsMantlingState;                                           // :100
-state RagdollTargetLocation: vec3;                                               // :103 (replicated in ALS; here the pelvis position the capsule follows)
+state RagdollTargetLocation: vec3d;                                               // :103 (replicated in ALS; here the pelvis position the capsule follows)
 state RagdollingState: AlsRagdollingState;                                       // :106
 state RollingState: AlsRollingState;                                             // :109
 state MaxAllowedGait: AlsGait = AlsGait.Running;                                 // CMC.h:102
@@ -136,11 +137,11 @@ struct AlsMantlingRootMotionSource {
     Time: float;                                      // FRootMotionSource::GetTime()
     Duration: float;                                  // FRootMotionSource::GetDuration()
     MontageStartTime: float;
-    StartLocation: vec3;
-    StartRotation: rotator;
-    TargetLocation: vec3;
-    TargetRotation: rotator;
-    MeshRotationOffset: quat = quat(0.0, 0.0, 0.0, 1.0);   // Character.GetBaseRotationOffset()
+    StartLocation: vec3d;                             // FVector, FRotator: the engine's double types
+    StartRotation: rotatord;
+    TargetLocation: vec3d;
+    TargetRotation: rotatord;
+    MeshRotationOffset: quatd = quatd(0d, 0d, 0d, 1d);     // Character.GetBaseRotationOffset() (FQuat)
 }
 
 // The members of a UAlsMantlingSettings the start of a mantle reads (all but the two custom blend curves, which are read where they are used).
@@ -1039,13 +1040,13 @@ method start_mantling_with(trace: AlsMantlingTraceSettings) -> bool {           
     let forward_trace_delta_angle = unwind_degrees(forward_trace_angle - actor_yaw_angle);       // :191
     if (abs(forward_trace_delta_angle) > Settings.Mantling.TraceAngleThreshold) { return false; }    // :192-195
 
-    let forward_trace_direction = angle_to_direction_xy(
-        actor_yaw_angle + clamp_angle(forward_trace_delta_angle, -Settings.Mantling.MaxReachAngle, Settings.Mantling.MaxReachAngle));      // :197-200
+    let forward_trace_direction = vec3d(angle_to_direction_xy(
+        actor_yaw_angle + clamp_angle(forward_trace_delta_angle, -Settings.Mantling.MaxReachAngle, Settings.Mantling.MaxReachAngle)));      // :197-200 (an FVector)
 
-    let capsule_bottom_location = vec3(ActorLocation.x, ActorLocation.y, ActorLocation.z - CapsuleHalfHeight);    // :212
+    let capsule_bottom_location = vec3d(ActorLocation.x, ActorLocation.y, ActorLocation.z - CapsuleHalfHeight);   // :212 (FVector: the locations of the mantle are doubles up to the root motion)
     let trace_capsule_radius = CapsuleRadius - 1.0;                              // :214
     let ledge_height_min = min(trace.LedgeHeight.x, trace.LedgeHeight.y);        // FVector2D::GetMin()
-    let ledge_height_delta = (max(trace.LedgeHeight.x, trace.LedgeHeight.y) - ledge_height_min) * CapsuleScale;      // :216
+    let ledge_height_delta = float((max(trace.LedgeHeight.x, trace.LedgeHeight.y) - ledge_height_min) * CapsuleScale);      // :216 UE_REAL_TO_FLOAT(.. * CapsuleScale)
 
     // Trace forward to find an object the character cannot walk on.            :218
     var forward_trace_start = capsule_bottom_location - forward_trace_direction * CapsuleRadius;       // :222
@@ -1065,23 +1066,23 @@ method start_mantling_with(trace: AlsMantlingTraceSettings) -> bool {           
         return false;                                                            // :253
     }
 
-    let target_direction = vec3(0.0, 0.0, 0.0) - safe_normal_2d(forward_trace_hit.normal);       // :256 -ImpactNormal.GetSafeNormal2D()
+    let target_direction = vec3d(0.0, 0.0, 0.0) - safe_normal_2d(forward_trace_hit.normal);      // :256 -ImpactNormal.GetSafeNormal2D()
 
     // Trace downward from the first trace's impact point and determine if the hit location is walkable.      :258
     let target_location_offset = target_direction * (trace.TargetLocationOffset * CapsuleScale);       // :262
-    let downward_trace_start = vec3(forward_trace_hit.point.x + target_location_offset.x,
-                                    forward_trace_hit.point.y + target_location_offset.y,
-                                    capsule_bottom_location.z + ledge_height_delta + 2.5 * trace_capsule_radius + MIN_FLOOR_DIST);    // :264-268
-    let downward_trace_end = vec3(downward_trace_start.x, downward_trace_start.y,
-                                  capsule_bottom_location.z + ledge_height_min * CapsuleScale + trace_capsule_radius - MAX_FLOOR_DIST);  // :270-275
+    let downward_trace_start = vec3d(forward_trace_hit.point_d.x + target_location_offset.x,
+                                     forward_trace_hit.point_d.y + target_location_offset.y,
+                                     capsule_bottom_location.z + ledge_height_delta + 2.5 * trace_capsule_radius + MIN_FLOOR_DIST);    // :264-268
+    let downward_trace_end = vec3d(downward_trace_start.x, downward_trace_start.y,
+                                   capsule_bottom_location.z + ledge_height_min * CapsuleScale + trace_capsule_radius - MAX_FLOOR_DIST);  // :270-275
     let downward_trace_hit = host.sweep_sphere(downward_trace_start, downward_trace_end, trace_capsule_radius,
                                                Settings.Mantling.MantlingTraceChannel, Settings.Mantling.MantlingTraceResponses);    // :278-280
 
     let slope_angle_cos = downward_trace_hit.normal.z;                           // :282
     // The approximate slope angle is used in situations where the normal slope angle cannot convey the true nature of the surface slope,
     // for example, for a 45 degree staircase the slope angle will always be 90 degrees, while the approximate slope angle will be ~45 degrees.
-    let approximate_slope_normal = normalize(downward_trace_hit.location - downward_trace_hit.point);      // :288-289
-    let approximate_slope_angle_cos = approximate_slope_normal.z;                // :291
+    let approximate_slope_normal = normalize(downward_trace_hit.location_d - downward_trace_hit.point_d);      // :288-289
+    let approximate_slope_angle_cos = float(approximate_slope_normal.z);         // :291 UE_REAL_TO_FLOAT
     if (slope_angle_cos < Settings.Mantling.SlopeAngleThresholdCos
         || approximate_slope_angle_cos < Settings.Mantling.SlopeAngleThresholdCos
         || !host.is_walkable(downward_trace_hit)) {                              // :293-295
@@ -1089,9 +1090,9 @@ method start_mantling_with(trace: AlsMantlingTraceSettings) -> bool {           
     }
 
     // Check that there is enough free space for the capsule at the target location.   :313
-    let target_location = vec3(downward_trace_hit.location.x, downward_trace_hit.location.y,
-                               downward_trace_hit.point.z + MIN_FLOOR_DIST);     // :317-321
-    let target_capsule_location = vec3(target_location.x, target_location.y, target_location.z + CapsuleHalfHeight);       // :323
+    let target_location = vec3d(downward_trace_hit.location_d.x, downward_trace_hit.location_d.y,
+                                downward_trace_hit.point_d.z + MIN_FLOOR_DIST);  // :317-321 (double: 130 + 1.9f + 90 is 221.89999997615814, not the float 221.89999)
+    let target_capsule_location = vec3d(target_location.x, target_location.y, target_location.z + CapsuleHalfHeight);      // :323
     if (host.overlap_capsule(target_capsule_location, CapsuleRadius, CapsuleHalfHeight,
                              Settings.Mantling.MantlingTraceChannel, Settings.Mantling.MantlingTraceResponses)) {          // :325-327
         return false;                                                            // :345
@@ -1099,9 +1100,9 @@ method start_mantling_with(trace: AlsMantlingTraceSettings) -> bool {           
 
     // Perform additional overlap at the approximate start location to ensure there are no vertical obstacles on the path, such as a ceiling.   :348
     let start_location_offset = target_direction * (trace.StartLocationOffset * CapsuleScale);       // :353
-    let start_location = vec3(forward_trace_hit.point.x - start_location_offset.x, forward_trace_hit.point.y - start_location_offset.y,
-                              (downward_trace_hit.location.z + downward_trace_end.z) * 0.5);         // :355-359
-    let start_location_trace_capsule_half_height = (downward_trace_hit.location.z - downward_trace_end.z) * 0.5 + trace_capsule_radius;    // :361-363
+    let start_location = vec3d(forward_trace_hit.point_d.x - start_location_offset.x, forward_trace_hit.point_d.y - start_location_offset.y,
+                               (downward_trace_hit.location_d.z + downward_trace_end.z) * 0.5);      // :355-359
+    let start_location_trace_capsule_half_height = float(downward_trace_hit.location_d.z - downward_trace_end.z) * 0.5 + trace_capsule_radius;    // :361-363
     if (host.overlap_capsule(start_location, trace_capsule_radius, start_location_trace_capsule_half_height,
                              Settings.Mantling.MantlingTraceChannel, Settings.Mantling.MantlingTraceResponses)) {          // :365-367
         return false;                                                            // :386
@@ -1109,7 +1110,7 @@ method start_mantling_with(trace: AlsMantlingTraceSettings) -> bool {           
 
     var parameters = AlsMantlingParameters();                                    // :404
     parameters.TargetPrimitive = target_primitive;                               // :406
-    parameters.MantlingHeight = (target_location.z - capsule_bottom_location.z) / CapsuleScale;          // :407
+    parameters.MantlingHeight = float((target_location.z - capsule_bottom_location.z) / CapsuleScale);   // :407 UE_REAL_TO_FLOAT
 
     // Determine the mantling type by checking the movement mode and mantling height.   :409
     parameters.MantlingType = LocomotionMode != AlsLocomotionMode.Grounded ? AlsMantlingType.InAir
@@ -1117,7 +1118,7 @@ method start_mantling_with(trace: AlsMantlingTraceSettings) -> bool {           
 
     // The target primitive is always in world space here (no moving bases, :417-433).
     parameters.TargetLocation = target_capsule_location;                         // :431
-    parameters.TargetRotation = to_rotator(to_orientation_quat(target_direction));     // :402, :432
+    parameters.TargetRotation = to_rotator(to_orientation_quat(target_direction));     // :402, :432 (FQuat -> FRotator, double)
 
     start_mantling_implementation(parameters);                                   // :443 (the role branches and the RPCs :435-445 are dropped)
     return true;                                                                 // :447
@@ -1183,8 +1184,8 @@ view mantling_rotation_warp(kind: AlsMantlingSettingsKind, warp_amount: float) -
 }
 
 // Character.GetBaseRotationOffset(): the rotation of the mesh relative to the actor (ACharacter caches the mesh's relative rotation).
-view base_rotation_offset() -> quat {                                            // CA:517 (ACharacter::GetBaseRotationOffset)
-    return quat_inverse(ActorRotation) * MeshWorldTransform.rotation;
+view base_rotation_offset() -> quatd {                                           // CA:517 (ACharacter::GetBaseRotationOffset, an FQuat)
+    return quat_inverse(ActorQuat) * MeshWorldTransform.rotation;
 }
 
 method start_mantling_implementation(parameters: AlsMantlingParameters) {        // CA:464-575
@@ -1218,12 +1219,12 @@ method start_mantling_implementation(parameters: AlsMantlingParameters) {       
     source.MontageStartTime = start_time;                                        // :514
 
     let mesh_rotation_offset = base_rotation_offset();                           // :517
-    let mesh_transform = transform(vec3(0.0, 0.0, 0.0), mesh_rotation_offset);   // FTransform MeshTransform{GetBaseRotationOffset()}
+    let mesh_transform = transformd(vec3d(0d, 0d, 0d), mesh_rotation_offset);    // FTransform MeshTransform{GetBaseRotationOffset()}
     source.MeshRotationOffset = mesh_rotation_offset;
 
     // Extract the initial root transform, invert it, convert it from component space to actor space, and apply it to the actor transform.   :519
-    let actor_transform = transform(ActorLocation, to_quat(ActorRotationNow));   // :521
-    let start_root_transform = with_scale(host.montage_root_transform(ms.Montage, start_time), vec3(1.0, 1.0, 1.0));      // :523-524
+    let actor_transform = transformd(ActorLocation, quatd(to_quat(ActorRotationNow)));   // :521
+    let start_root_transform = with_scale(transformd(host.montage_root_transform(ms.Montage, start_time)), vec3d(1d, 1d, 1d));      // :523-524
     let start_root_transform_inverse = relative_transform_reverse(start_root_transform, mesh_transform);        // :526
     let start_transform = compose(start_root_transform_inverse, actor_transform);        // :527
     // (bUseTargetPrimitiveSpace is false: no relative space, :529-533)
@@ -1231,8 +1232,8 @@ method start_mantling_implementation(parameters: AlsMantlingParameters) {       
     source.StartLocation = start_transform.location;                             // :536
 
     // Extract the final root transform, invert it, convert it from component space to actor space, and apply it to the target transform.   :538
-    let target_transform = transform(parameters.TargetLocation, to_quat(normalize_rotator(parameters.TargetRotation)));       // :540
-    let end_root_transform = with_scale(host.montage_last_root_transform(ms.Montage), vec3(1.0, 1.0, 1.0));            // :549-550
+    let target_transform = transformd(parameters.TargetLocation, to_quat(normalize_rotator(parameters.TargetRotation)));      // :540
+    let end_root_transform = with_scale(transformd(host.montage_last_root_transform(ms.Montage)), vec3d(1d, 1d, 1d));  // :549-550
     let end_root_transform_inverse = relative_transform_reverse(end_root_transform, mesh_transform);            // :552
     let new_target_transform = compose(end_root_transform_inverse, target_transform);   // :553
     source.TargetRotation = to_rotator(new_target_transform.rotation);           // :561
@@ -1377,21 +1378,21 @@ method prepare_mantling_root_motion(dt: float) {                                
     let location_warp_amount = blend_in_amount * mantling_location_warp(MantlingSource.Kind, warp_amount);     // :68-72
     let rotation_warp_amount = blend_in_amount * mantling_rotation_warp(MantlingSource.Kind, warp_amount);     // :74-78
 
-    let start_transform = transform(MantlingSource.StartLocation, to_quat(MantlingSource.StartRotation));      // :80
-    let target_transform = transform(MantlingSource.TargetLocation, to_quat(MantlingSource.TargetRotation));   // :81
+    let start_transform = transformd(MantlingSource.StartLocation, to_quat(MantlingSource.StartRotation));     // :80
+    let target_transform = transformd(MantlingSource.TargetLocation, to_quat(MantlingSource.TargetRotation));  // :81
     // (the start and target transforms are in world space: no moving bases, :83-93)
 
     // Interpolate the start and target transforms to obtain the warped transform.   :95
     let warp_location = lerp(start_transform.location, target_transform.location, location_warp_amount);       // :97
-    let warp_rotation_lerp = normalize(fast_lerp(start_transform.rotation, target_transform.rotation, rotation_warp_amount));     // :99-100
+    let warp_rotation_lerp = normalize(fast_lerp(start_transform.rotation, target_transform.rotation, rotation_warp_amount));     // :99-100 (WarpRotation.Normalize())
 
     // Remove the pitch and roll components of the rotation so that the actor's Z axis is always aligned with the gravity direction.   :102
-    let warp_rotation = get_twist(warp_rotation_lerp, vec3(0.0, 0.0, 1.0));      // :104 UAlsRotation::GetTwist(WarpRotation, -GetGravityDirection())
-    let warp_transform = transform(warp_location, warp_rotation);                // :106
+    let warp_rotation = get_twist(warp_rotation_lerp, vec3d(0d, 0d, 1d));        // :104 UAlsRotation::GetTwist(WarpRotation, -GetGravityDirection())
+    let warp_transform = transformd(warp_location, warp_rotation);               // :106
 
     // Extract the current root transform and convert it from component space to actor space.   :108
-    let root_transform_component = with_scale(host.montage_root_transform(source_montage, montage_time), vec3(1.0, 1.0, 1.0));      // :110-111
-    let mesh_transform = transform(vec3(0.0, 0.0, 0.0), MantlingSource.MeshRotationOffset);      // :113
+    let root_transform_component = with_scale(transformd(host.montage_root_transform(source_montage, montage_time)), vec3d(1d, 1d, 1d));      // :110-111
+    let mesh_transform = transformd(vec3d(0d, 0d, 0d), MantlingSource.MeshRotationOffset);      // :113
     let root_transform = relative_transform_reverse(mesh_transform, root_transform_component);   // :114 MeshTransform.GetRelativeTransformReverse(RootTransform)
 
     // Apply the current root transform to the warped transform to get the target actor transform.   :116
@@ -1399,7 +1400,7 @@ method prepare_mantling_root_motion(dt: float) {                                
 
     // Calculate the final root motion by taking the delta between the current actor transform and the target actor transform.   :120
     host.root_motion_override((target_actor_transform.location - ActorLocation) / dt,
-                              target_actor_transform.rotation * quat_inverse(ActorRotation));       // :122-127
+                              target_actor_transform.rotation * quat_inverse(ActorQuat));       // :122-127 (all double: the velocity is (TargetActorTransform.GetLocation() - GetActorLocation()) / DeltaTime in FVector)
 }
 
 // ================================================================================================================================
@@ -1407,7 +1408,7 @@ method prepare_mantling_root_motion(dt: float) {                                
 // ================================================================================================================================
 
 struct AlsRagdollGroundTrace {                                                   // the (location, bGrounded) pair of RagdollTraceGround(bool& bGrounded)
-    Location: vec3;
+    Location: vec3d;
     bGrounded: bool;
 }
 
@@ -1489,17 +1490,17 @@ method refresh_ragdolling(dt: float) {                                          
 
 method ragdoll_trace_ground() -> AlsRagdollGroundTrace {                         // CA:963-999 RagdollTraceGround
     let target_is_set = RagdollTargetLocation.x != 0.0 || RagdollTargetLocation.y != 0.0 || RagdollTargetLocation.z != 0.0;      // :965 !RagdollTargetLocation.IsZero()
-    let ragdoll_location = target_is_set ? RagdollTargetLocation : ActorLocation;
+    let ragdoll_location = target_is_set ? RagdollTargetLocation : ActorLocation;       // (FVector)
 
     // We use a sphere sweep instead of a simple line trace to keep capsule movement consistent between ragdolling and regular character movement.   :967
-    let trace_start = vec3(ragdoll_location.x, ragdoll_location.y, ragdoll_location.z + 2.0 * CapsuleRadius);                 // :973
-    let trace_end = vec3(ragdoll_location.x, ragdoll_location.y, ragdoll_location.z - CapsuleHalfHeight + CapsuleRadius);     // :974
+    let trace_start = vec3d(ragdoll_location.x, ragdoll_location.y, ragdoll_location.z + 2.0 * CapsuleRadius);                // :973
+    let trace_end = vec3d(ragdoll_location.x, ragdoll_location.y, ragdoll_location.z - CapsuleHalfHeight + CapsuleRadius);    // :974
 
     // The collision channel of the capsule is ECC_Pawn; the responses are the capsule's (InitCollisionParams): what blocks mantling blocks it.   :976-980
     let ground_hit = host.sweep_sphere(trace_start, trace_end, CapsuleRadius, Channel.Pawn, Settings.Mantling.MantlingTraceResponses);       // :983-985
 
-    return AlsRagdollGroundTrace(Location: vec3(ragdoll_location.x, ragdoll_location.y,
-                                                ground_hit.blocking ? ground_hit.location.z + CapsuleHalfHeight - CapsuleRadius + MIN_FLOOR_DIST : ragdoll_location.z),
+    return AlsRagdollGroundTrace(Location: vec3d(ragdoll_location.x, ragdoll_location.y,
+                                                 ground_hit.blocking ? ground_hit.location_d.z + CapsuleHalfHeight - CapsuleRadius + MIN_FLOOR_DIST : ragdoll_location.z),
                                  bGrounded: ground_hit.blocking);                       // :993-998
 }
 

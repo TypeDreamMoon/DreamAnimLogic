@@ -70,8 +70,8 @@ struct AlsRagdollingState {                                                     
 struct AlsRollingState { TargetYawAngle: float; }                                                       // AlsRollingState.h:6
 struct AlsMantlingParameters {                                                                          // AlsMantlingSettings.h:21
     TargetPrimitive: primitive;
-    TargetLocation: vec3;
-    TargetRotation: rotator;
+    TargetLocation: vec3d;                                                                              // FVector_NetQuantize100 (a double vector)
+    TargetRotation: rotatord;                                                                           // FRotator (double)
     MantlingHeight: float;
     MantlingType: AlsMantlingType;
 }

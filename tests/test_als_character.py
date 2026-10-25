@@ -58,10 +58,10 @@ ANIM_STUB = """
 logic AlsAnimationInstance;
 state Jumps: int;
 state Teleports: int;
-state TeleportTime: float;
+state TeleportTime: double;
 state Snapshots: int;
 pub method Jump() { Jumps += 1; }
-pub method MarkTeleportedAt(Time: float) { Teleports += 1; TeleportTime = Time; }
+pub method MarkTeleportedAt(Time: double) { Teleports += 1; TeleportTime = Time; }
 pub method SnapshotFinalRagdollPose() { Snapshots += 1; }
 update(dt) { Jumps += 0; }
 """
