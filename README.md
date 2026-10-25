@@ -78,11 +78,16 @@ examples/
   hero_gait.dal                   enums, input actions, notifies, entries
   melee_combo.dal                 three-hit chain: montages, input buffer, cancel windows, combo (actor logic)
   lockon_camera.dal               lock-on target selection, line-of-sight trace, camera framing (actor logic)
-als/                              ALS-Refactored rewritten in .dal (library + character + input; the animation instance is next to them)
+als/                              ALS-Refactored rewritten in .dal (library + character + input + animation instances)
   als_lib.dal                     the shared declarations: 8 tag sets, enums, the state structs, 23 settings types (they load the data
                                   assets of G:\DCC\AlsPack) and the pure math helpers
   AlsCharacter.dal                AAlsCharacter: states, view, locomotion, gait, rotation, landing, jumping, the CMC gait settings push
   AlsInput.dal                    the example character's Enhanced Input actions
+  AlsAnimationInstance.dal        UAlsAnimationInstance: layering, pose, view, spine, head, locomotion, lean, grounded, standing, crouching, in air with
+                                  the ground prediction sweep, the foot lock, transitions and dynamic transitions, rotate and turn in place with their
+                                  montages, the final ragdoll pose, the ControlRig input, the notifies of the instance (82 of the 82 state paths of
+                                  the AnimBPs, 23 entries)
+  AlsLinkedAnimationInstance.dal  the linked instance: one forwarder per `linked` entry, generated
 tests/                            python -I -m unittest discover -s tests
   oracles/                        independent hand-written ports (ALS lean, melee, lock-on); they do not import dal
   cpp_stub/ cpp_driver.py         stand-in engine headers + build/run helper for the C++ tests
@@ -294,6 +299,8 @@ python -I -m unittest discover -s tests
 | `test_math3.py` (43) | component assignment, quaternion / vector / spring / easing built-ins by hand, `transform` (also against the animation runtime of the Blender host when it is on the machine) |
 | `test_queries.py` (23) | scene queries with channels, the extended hit, primitives, the thread-safe set; mock host vs stand-in engine scene |
 | `test_als_character.py` (62) | `als/`: every function cites its ALS line; the library's structs / settings against the C++ headers; the pack's settings load without a warning; the library math against the UE 5.8 goldens (`als/goldens`); interpreter / Python / C++ (stand-in engine) agree on random frames; gait, rotation, stance, landing, jump and input behaviour against the C++ semantics. `als_host_v2.py` was the shim that registered the host commands `hostapi.py` did not list yet; the compiler has them now (0.4.0) and the shim only carries the settings data of the system driver |
+| `test_als_anim.py` (11), `test_als_anim_scenarios.py` (110), `test_als_contract.py` (30) | `als/AlsAnimationInstance.dal`: against the independent port `oracles/als_anim_oracle.py` over random character / pose / curve / notify sequences (every state and every host command of every frame; 24 sequences, counters that prove the branches were reached, mutation checks), hand-checked scenarios (foot lock with both limits, teleports, dynamic transitions, the ground prediction against spheres and a plane, turn in place, notifies, time dilation, the pack's real curves), interpreter / Python / C++ agree on random and on character-like frames, the 82 state paths and 17 entries the AnimBPs use against the `.dab` corpus and the ALS headers |
+| `test_als_anim_truth.py` (5) | the same instance teacher forced against the recordings of the original ALS in Unreal (`G:\DCC\AlsTruth`, `truth_als_anim.py`): every frame starts from the recorded state and the recorded inputs, the result is compared with the recorded end state (foot lock: every leaf of both feet; ground prediction: the sweep it asks and its amount; rotate / turn in place; the montage commands). Skipped without the recordings |
 | `test_timer_hooks.py` (26), `test_notify.py` (20), `test_post_update.py` (20) | 0.4.0: `on timer`, the character's hook events, notify declarations with payloads (branching, ticks), `post_update` / `post_flush` and the animation instance proxy; interpreter vs Python on random frames, C++ compile-and-run |
 | `test_montage_commands.py` (38), `test_character_commands.py` (19), `test_character_gaps.py` (23) | 0.4.0: dynamic montages / slots / sources / pose snapshots, montage values as command arguments, the 17 character commands of the ALS rewrite, new host reads, settings values in state, a peer's settings member in C++, long C++ runs |
 | `test_loops.py` (19), `test_root_motion.py` (19), `test_slot_order.py` (17), `test_consume_slots.py` (8), `test_small_additions.py` (14), `test_method_calls_in_expressions.py` (11) | 0.4.0: `break` / `while`, root motion override and montage asset queries, `slot_events` and `before` / `after` (system runs against the C++), consume-on-read sampling per slot, rotator arithmetic / `valid(Peer)` / settings member initialisers, method calls inside expressions |
