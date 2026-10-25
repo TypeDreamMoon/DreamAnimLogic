@@ -13,7 +13,7 @@ The language is specified in Chinese in `I:\DCC\Plan\dal-syntax-v0.md` (v0: valu
 `I:\DCC\Plan\dal-syntax-v3.md` (v3, versions 0.3.0 and 0.4.0: libraries, structs, tags, methods and peers, tick slots, settings and curves,
 entries with parameters, transforms, scene queries -- the language ALS-Refactored is rewritten in, see `als-dal-rewrite.md`; 0.4.0 adds timer
 and hook events, notify declarations with payloads, `post_update`, dynamic montages / slots / pose snapshots, loops, root motion override and
-montage asset queries, and what the ALS rewrite found missing).
+montage asset queries, and what the ALS rewrite found missing); section 35 adds the double-precision types and the float32 mode of the Python backend.
 This README covers the repository.
 
 ```
@@ -203,6 +203,33 @@ what happens into the events the logic polls -- enough to test combos without Bl
 * Imports only `dal.runtime` (and `dal.hostapi` lazily): the `dal` package must be importable, which is
   why it is vendored as a whole.
 
+## Precision: the `double` types and the float32 mode
+
+`float`, `vec2`, `vec3`, `rotator`, `quat` and `transform` are single precision in C++ (`float`, `FVector2f`, `FVector3f`, `FRotator3f`, `FQuat4f`, `FTransform3f`);
+the engine's own positions, rotations and the world time are doubles. The language has the matching double types, and the Python backend can compute the
+float types as float32 so that it agrees with the C++ it is a model of.
+
+| | C++ | | C++ |
+|---|---|---|---|
+| `double` | `double` | `rotatord` / `quatd` | `FRotator` / `FQuat` |
+| `vec2d` / `vec3d` | `FVector2D` / `FVector` | `transformd` | `FTransform` |
+
+* `0.2d` is a double literal; `0.2` stays a float (there is no `f` suffix). A float widens to its double type implicitly (it is exact, and a float *literal*
+  keeps its float32 value: `double d = 0.1;` is `(double)0.1f`); narrowing is written: `float(d)`, `vec3(v)`, `quat(q)` ... Mixed arithmetic is done in double.
+  Every built-in that has a float version also has the double version (except `interp_to`, `interp_constant_to`, `exponential_smoothing`, `inv_exp_approx`,
+  `half_life_to_smoothing_time`, `critical_spring_damper`, `blend_alpha`: float only in the engine).
+* Host reads take either precision (`input T: double <- host.time;` reads `GetTimeSeconds()` as it is, `input T: float <- host.time;` narrows it). The position
+  parameters of `root_motion_override`, `set_actor_location` and of the traces/overlaps are `vec3d` (a `vec3` widens), and `hit.point_d` / `hit.location_d` are
+  the engine's double `ImpactPoint` / `Location` (`hit.point` / `hit.location` stay `vec3`).
+* **Float32 mode** (Python backend and interpreter): `generate_python(module, float32=True)`, `load_class(module, float32=True)`, `Interpreter(module, float32=True)`,
+  `harness.verify(..., float32=True)`, `python -m dal compile --py DIR --float32`, `python -m dal verify --float32`; the generated class has `DAL_FLOAT32 = True`.
+  Every operation that makes a new `float` rounds its result to float32 (`dal.runtime.f32`), so `+ - * /` and the comparisons agree with C++ `float` to the last
+  bit (the stand-in-engine tests in `tests/test_cpp_double.py` check that with tolerance 0); library functions are computed in double and rounded once, so they can
+  differ from the C++ float version by an ulp. A `double` is never rounded. The default is the plain mode (a `float` is a Python float, a double); the
+  environment variable `DAL_FLOAT32=1` makes float32 the default of a process. It costs little (the ALS rewrite: the logic's time +4% to +7% in two measurements, 0.05 to 0.09 ms of a tick whose whole step is 12-13 ms and does not change measurably),
+  but it moves every number a program computes by an ulp-sized amount, which the existing tests (analytic expectations at 1e-9) would have to follow, so
+  the hosts that compare with the engine switch it on (the Blender ALS spec, the closed-loop and teacher tools) and the compiler's default stays.
+
 ## Generated C++ (UE 5.8)
 
 Anim logic (`logic X;`, v0 shape, unchanged):
@@ -295,7 +322,7 @@ value-returning method call inside an expression (it was DAL4042 everywhere but 
 python -I -m unittest discover -s tests
 ```
 
-1195 tests (about 15 minutes; the C++ compile tests are most of it): 608 at 0.3.0, 379 when DalLive was added, 184 of them from v0 unchanged. Python 3.11+ syntax; also run under Blender 5.2's embedded Python 3.13.
+1256 tests (about 17 minutes; the C++ compile tests are most of it): 608 at 0.3.0, 379 when DalLive was added, 184 of them from v0 unchanged. Python 3.11+ syntax; also run under Blender 5.2's embedded Python 3.13.
 
 | File | What it checks |
 |---|---|
@@ -313,6 +340,8 @@ python -I -m unittest discover -s tests
 | `test_cpp_v1.py` | golden C++ text of the two actor examples and an anim instance with host traffic; invariants of the component (tick order, queues, delegates, input binding, executors) |
 | `test_cpp_compile.py` | compiles the generated C++ (MSVC `/W4 /WX`, or g++/clang++) against stand-in engine headers (`tests/cpp_stub`) and compares states **and the host effects** (CMC writes, montage calls ...) with the Python backend, for the v0 examples, both actor examples, every host command, traces / targets, an anim instance with events and **every built-in signature** (`everything_source`); skipped when no compiler is found. `run_case(..., params=...)` feeds settings data to both sides |
 | `test_cli.py` | `python -m dal` |
+| `test_double.py` | the double types: the `d` literal, widening and narrowing, mixed arithmetic, members, built-ins, host reads at either precision, commands / queries / `hit.point_d`, settings; the float32 mode (the 7-additions threshold, a double clock with float deltas, every float a float32, arithmetic equal to the correctly rounded float result, params and settings rounded) on the interpreter and the generated class; `compile --float32` |
+| `test_cpp_double.py` (15) | the double types and the float32 mode against the generated C++ in the stand-in engine: every type and conversion, every double built-in, settings members, and the float32 mode bit for bit equal to the C++ `float` run |
 | `test_cpp_bag.py` | the property bag (`--bag`): same UPROPERTYs as the main class, no logic, off by default (other output byte-identical) |
 | `test_use.py` (21) | libraries: loading, merging, cycles, root escape, diagnostics that point into the library, one shared C++ header, a library compiling alone |
 | `test_asset_compat.py` (12) | `--object-settings`, `--native-struct`, `--channel-default`: the generated text, the restoration of the types after a generation, errors, the stand-in engine compile and run against Python with object-held settings |
@@ -366,9 +395,9 @@ Regenerate golden files with `UPDATE_GOLDEN=1 python -I -m unittest discover -s 
 * Settings in C++ are filled by the engine's property system (`.uasset`); the JSON loader is Python only. A response container
   (`FCollisionResponseContainer`) in exported data is read as the list of channels that block; curves are `UCurveFloat` /
   `UCurveVector` objects.
-* Float precision: the Python backend computes in double, the C++ backend in `float`. Programs with hard
-  thresholds can differ by a frame at the boundary. (A float32 mode for the Python backend is not implemented: it would have to
-  round after every operation; the tests compare with tolerances instead.)
+* Float precision: in the plain mode the Python backend computes `float` in double, the C++ backend in `float`, so a program with a hard threshold can differ by a
+  frame at the boundary. The float32 mode (see Precision) removes that for the arithmetic; the library functions (`sin`, `interp_to` ...) still round once, not at every
+  internal step, and MSVC may contract `a * b + c` into an FMA that Python does not (the stand-in-engine build does not).
 * `to_rotator()` uses an exact `asin`; UE's float `FQuat::Rotator()` uses `FMath::FastAsin` (error up to
   about 7e-5 rad). `atan2()` likewise uses the C library; UE's float version is a minimax approximation
   with relative error below 1e-6.

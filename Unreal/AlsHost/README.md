@@ -36,6 +36,10 @@ pwsh Unreal\AlsHost\scripts\run_editor.ps1 -Script Unreal\AlsHost\scripts\runtim
 python Unreal\AlsHost\scripts\c3_host_compare.py --set als_ext          # Blender 一侧 c3 的 18 个 UE 确认场景（8 个要 DalTestCharacter）
 ```
 
+`refresh_host.ps1` 把 DalRuntime 复制进宿主以后，把插件源码的修改时间更新到现在：UBT 靠和上一次构建的 .obj 比时间戳决定重编什么，robocopy 保留源文件的时间，换成较旧的版本（旧提交、`git archive` 打的包）时头文件比 .obj 还旧，模块被当作最新而沿用另一个版本的 .obj（`DalHost.h` 里 `FHit` / `FCommand` 的布局变了就会在运行时崩溃，`UDalHookProbe`）。
+
+double 类型之后（`DAL_HOST_VERSION` 3，`dal-syntax-v3.md` 第 35 节）roll 的脚锁定和 mantle 的终点对原版：`Anim.FeetState.*.FinalLocation.Y` 最大差 1.632 → 0.0005 cm，`Actor.Location.Z` 最大差 0.250 → 0.0000000 cm；`cycle.ps1` 的整轮（十条录像）位置 / 速度 / 偏航全 0.0，角色离散字段 0 帧不符。
+
 `gen_als.py` 默认取 HEAD 的 `.dal`（别人在工作区里改 `als/` 不影响），`--rev worktree` 取工作区。生成时带的编译选项在它的 `ASSET_COMPAT`：`--double-members`（Control Rig 的引脚）、`--object-settings AlsTurnInPlaceSettings`（原地转的 8 个设置在资产里是 `Instanced` 的 `UObject`）、`--native-struct AlsFloatInterval=FFloatInterval=Math/Interval.h`、四条 `--channel-default`（原版构造函数设的碰撞通道默认值，资产里没存）。没有它们，生成的设置类型读不进原版资产里的东西：原地转不播、攀爬打不到任何东西、落地预测扫不到地面。
 
 | 文件 | 内容 |
