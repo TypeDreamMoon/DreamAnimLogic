@@ -43,7 +43,7 @@ if (Test-Path $rigRef) {
         if ($t -eq 'ragdoll' -or -not (Test-Path $ref)) { continue }
         python -I (Join-Path $PSScriptRoot 'compare_takes.py') (Join-Path $Out "takes\als_$t.dvrec") $ref --json (Join-Path $Out "rig_$t.json") --md (Join-Path $Out "rig_$t.md") | Out-Null
     }
-    Write-Host "against the original recorded with the current recorder (G:\DCC\AlsTruth\rig):"
+    Write-Host "against the original recorded with the current recorder (G:\DCC\AlsTruth\rig; read the rig_values_off / rig_max columns: the pose columns here depend on that run's animation phase, which is not the one of the truth takes):"
     python -I (Join-Path $PSScriptRoot 'summarize_takes.py') (Join-Path $Out 'rig_')
 }
 if (Test-Path (Join-Path $Out 'ragdoll_cmp.md')) { Get-Content (Join-Path $Out 'ragdoll_cmp.md') }
