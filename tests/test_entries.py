@@ -308,7 +308,8 @@ class EntryCppTests(unittest.TestCase):
         files = generate_cpp(dal.check_source(MAIN, "Main.dal").module)
         h, cpp = files["Main.h"], files["Main.cpp"]
         self.assertIn("void SetHips(EHips NewHips = EHips::Forward);", h)
-        self.assertIn("void Play(TObjectPtr<UAnimSequenceBase> Sequence, float BlendIn = 0.2f, float PlayRate = 1.5f, FGameplayTag Where = ModeTags::View,", h)
+        # UHT wants the raw pointer for an asset in a UFUNCTION parameter
+        self.assertIn("void Play(UAnimSequenceBase* Sequence, float BlendIn = 0.2f, float PlayRate = 1.5f, FGameplayTag Where = ModeTags::View,", h)
         self.assertIn("void UMain::Local([[maybe_unused]] const float X)\n{\n\t[[maybe_unused]] const float dt = Dal_DeltaSeconds;", cpp)
         self.assertIn("void UMain::NoArgs()", cpp)
         sub = generate_cpp(dal.check_source(SUB, "Sub.dal", files=FILES).module)

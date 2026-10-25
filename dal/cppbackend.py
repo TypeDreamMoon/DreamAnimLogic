@@ -231,18 +231,27 @@ def is_by_ref(ty: Type) -> bool:
     return (isinstance(ty, StructType) and ty.is_settings) or isinstance(ty, (MapType, ArrayType))
 
 
-def cpp_param(ty: Type, name: str, unused: bool = False) -> str:
-    """One parameter of a function or method."""
+def cpp_ufunc_type(ty: Type) -> str:
+    """The type of a UFUNCTION parameter or return value: UHT does not accept TObjectPtr there, only the raw pointer."""
+    if isinstance(ty, AssetType) and not ty.by_value:
+        return f"{ty.cpp_class}*"
+    return cpp_type(ty)
+
+
+def cpp_param(ty: Type, name: str, unused: bool = False, ufunc: bool = False) -> str:
+    """One parameter of a function or method (ufunc: of a UFUNCTION)."""
     mark = "[[maybe_unused]] " if unused else ""
     if isinstance(ty, StructType) and ty.is_notify:
         return f"{mark}const {ty.cpp_type}*{' const' if unused else ''} {name}"       # the notify object: its properties are the payload
     if is_by_ref(ty):
         return f"{mark}const {cpp_type(ty)}& {name}"
+    if ufunc and isinstance(ty, AssetType) and not ty.by_value:
+        return f"{mark}{cpp_ufunc_type(ty)}{' const' if unused else ''} {name}"
     return f"{mark}{'const ' if unused else ''}{cpp_type(ty)} {name}"
 
 
-def cpp_params(params, unused: bool = False) -> str:
-    return ", ".join(cpp_param(t, n, unused) for n, t in params)
+def cpp_params(params, unused: bool = False, ufunc: bool = False) -> str:
+    return ", ".join(cpp_param(t, n, unused, ufunc) for n, t in params)
 
 
 def enum_cast(ty: Type) -> str | None:
@@ -316,6 +325,15 @@ def cpp_struct_value(ty: StructType, v, var: str = "Dal_S") -> str:
         return f"{ty.cpp_type}()"
     sets = " ".join(f"{var}.{f.name} = {cpp_value(f.ty, getattr(v, f.name))};" for f in diffs)
     return f"[]() {{ {ty.cpp_type} {var}; {sets} return {var}; }}()"
+
+
+def member_init(ty: Type, v) -> tuple[str, str | None]:
+    """A default member initializer for a UPROPERTY: ``(" = value", None)``, or ``("", "value")`` when the value is an immediately-invoked
+    lambda (a struct with non-default members): UHT cannot parse those inside a USTRUCT / UCLASS, so the value goes into a constructor."""
+    text = cpp_value(ty, v)
+    if "[]()" in text:
+        return "", text
+    return f" = {text}", None
 
 
 def _is_nonzero_number(e: ir.Expr) -> bool:
@@ -751,7 +769,7 @@ class CppGen:
         """The parameter list of an entry in the header: the declared defaults become C++ default arguments."""
         parts = []
         for p in e.params:
-            text = cpp_param(p.ty, p.name)
+            text = cpp_param(p.ty, p.name, ufunc=True)
             if p.has_default:
                 text += f" = {cpp_value(p.ty, p.default)}"
             parts.append(text)
@@ -1216,9 +1234,9 @@ class CppGen:
         out: list[Method] = []
         for x in self.m.methods:
             name = self.ex.method_name(x.name)
-            params = cpp_params(x.params)
-            dparams = cpp_params(x.params, True)
-            ret = cpp_type(x.ret) if x.ret is not None else "void"
+            params = cpp_params(x.params, ufunc=x.pub)
+            dparams = cpp_params(x.params, True, ufunc=x.pub)
+            ret = (cpp_ufunc_type(x.ret) if x.pub else cpp_type(x.ret)) if x.ret is not None else "void"
             spec = ""
             if x.pub:
                 spec = 'BlueprintPure, Category = "DAL|View"' if x.is_view else 'BlueprintCallable, Category = "DAL|Method"'
@@ -1789,10 +1807,16 @@ class CppGen:
         if st.is_settings:
             return self.settings_decl(st)
         out = ["USTRUCT(BlueprintType)", f"struct {st.cpp_type}", "{", f"{T}GENERATED_BODY()"]
+        ctor: list[str] = []
         for f in st.fields:
             out.append("")
             out.append(f'{T}UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "DAL")')
-            out.append(f"{T}{cpp_prop_type(f.ty)} {f.name} = {cpp_value(f.ty, f.default)};")
+            init, late = member_init(f.ty, f.default)
+            out.append(f"{T}{cpp_prop_type(f.ty)} {f.name}{init};")
+            if late is not None:
+                ctor.append(f"{T}{T}{f.name} = {late};")
+        if ctor:
+            out += ["", f"{T}{st.cpp_type}()", f"{T}{{", *ctor, f"{T}}}"]
         out.append("};")
         return out
 
@@ -1803,22 +1827,29 @@ class CppGen:
         root = st.asset_root
         recompute = needs_recompute(st)
         inst = values.default_of(st) if any(f.derived for f in st.fields) else None
-        if root:
-            out = ["UCLASS(BlueprintType)", f"class {self.api}{st.cpp_type} : public UDataAsset", "{", f"{T}GENERATED_BODY()", "", "public:"]
-            if recompute:
-                out += [f"{T}{st.cpp_type}()", f"{T}{{", f"{T}{T}DalRecomputeDerived();", f"{T}}}", ""]
-        else:
-            out = ["USTRUCT(BlueprintType)", f"struct {st.cpp_type}", "{", f"{T}GENERATED_BODY()", ""]
+        ctor: list[str] = []                    # members whose default is an expression UHT cannot read as an initializer
+        members: list[str] = []
         for k, f in enumerate(st.fields):
             if k:
-                out.append("")
+                members.append("")
             if f.derived:
-                out.append(f'{T}UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "DAL", Transient)')
-                init = f" = {cpp_value(f.ty, getattr(inst, f.name))}"
+                members.append(f'{T}UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "DAL", Transient)')
+                init, late = member_init(f.ty, getattr(inst, f.name))
             else:
-                out.append(f'{T}UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "DAL")')
-                init = "" if isinstance(f.ty, (MapType, ArrayType, AssetType)) else f" = {cpp_value(f.ty, f.default)}"
-            out.append(f"{T}{cpp_prop_type(f.ty)} {f.name}{init};")
+                members.append(f'{T}UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "DAL")')
+                init, late = ("", None) if isinstance(f.ty, (MapType, ArrayType, AssetType)) else member_init(f.ty, f.default)
+            members.append(f"{T}{cpp_prop_type(f.ty)} {f.name}{init};")
+            if late is not None:
+                ctor.append(f"{T}{T}{f.name} = {late};")
+        if root:
+            out = ["UCLASS(BlueprintType)", f"class {self.api}{st.cpp_type} : public UDataAsset", "{", f"{T}GENERATED_BODY()", "", "public:"]
+            if recompute or ctor:
+                out += [f"{T}{st.cpp_type}()", f"{T}{{", *ctor, *([f"{T}{T}DalRecomputeDerived();"] if recompute else []), f"{T}}}", ""]
+        else:
+            out = ["USTRUCT(BlueprintType)", f"struct {st.cpp_type}", "{", f"{T}GENERATED_BODY()", ""]
+            if ctor:
+                members += ["", f"{T}{st.cpp_type}()", f"{T}{{", *ctor, f"{T}}}"]
+        out += members
         if recompute:
             out.append("")
             out.append(f"{T}/** Computes the derived members from the others: call it after the data was loaded or edited. */")
@@ -1974,7 +2005,7 @@ class CppGen:
                 if isinstance(p.ty, StructType) and p.ty.asset_root:
                     L.append(f"{T}TObjectPtr<{p.ty.cpp_type}> {p.name};")
                 else:
-                    L.append(f"{T}{cpp_prop_type(p.ty)} {p.name} = {cpp_value(p.ty, p.default)};")
+                    L.append(f"{T}{cpp_prop_type(p.ty)} {p.name}{member_init(p.ty, p.default)[0]};")
                 L.append("")
         if m.inputs:
             L.append(f"{T}// ---- inputs: filled from the host each frame (or set by game code when free) ----")
@@ -1986,13 +2017,13 @@ class CppGen:
                     L.append(f'{T}UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "DAL|Input", Transient)')
                 else:
                     L.append(f'{T}UPROPERTY(VisibleAnywhere, BlueprintReadWrite, Category = "DAL|Input", Transient)')
-                L.append(f"{T}{cpp_prop_type(i.ty)} {i.name} = {cpp_value(i.ty, i.default)};")
+                L.append(f"{T}{cpp_prop_type(i.ty)} {i.name}{member_init(i.ty, i.default)[0]};")
                 L.append("")
         if m.states:
             L.append(f"{T}// ---- state: written by the logic, readable from the animation graph ----")
             for s in m.states:
                 L.append(f'{T}UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "DAL|State", Transient)')
-                L.append(f"{T}{cpp_prop_type(s.ty)} {s.name} = {cpp_value(s.ty, s.default)};")
+                L.append(f"{T}{cpp_prop_type(s.ty)} {s.name}{member_init(s.ty, s.default)[0]};")
                 L.append("")
         return L
 
@@ -2735,10 +2766,10 @@ class CppGen:
         if m.linked is not None:
             for e in m.linked.entries:
                 args = ", ".join(p.name for p in e.params)
-                blocks.append([f"void {cls}::{e.name}({cpp_params([(p.name, p.ty) for p in e.params], True)})", "{",
+                blocks.append([f"void {cls}::{e.name}({cpp_params([(p.name, p.ty) for p in e.params], True, True)})", "{",
                                f"{T}if (Parent.IsValid())", f"{T}{{", f"{T}{T}Parent->{e.name}({args});", f"{T}}}", "}"])
         for e in m.entries:
-            lines = [f"void {cls}::{e.name}({cpp_params([(p.name, p.ty) for p in e.params], True)})", "{"]
+            lines = [f"void {cls}::{e.name}({cpp_params([(p.name, p.ty) for p in e.params], True, True)})", "{"]
             if e.dt_name:
                 lines.append(f"{T}[[maybe_unused]] const float {e.dt_name} = Dal_DeltaSeconds;")
             lines.extend(self.stmts(e.body, 1))

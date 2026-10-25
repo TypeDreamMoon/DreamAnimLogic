@@ -248,7 +248,9 @@ class StructCppTests(unittest.TestCase):
         files = generate_cpp(compile_ok(PROGRAM).module)
         h, cpp = files["Sketch.h"], files["Sketch.cpp"]
         self.assertIn("USTRUCT(BlueprintType)\nstruct FVelocityBlend\n{\n\tGENERATED_BODY()", h)
-        self.assertIn("FFootState Right = []() { FFootState Dal_S;", h)
+        # UHT cannot read a lambda as a default member initializer: the member is set in a constructor instead
+        self.assertNotIn("FFootState Right = []()", h)
+        self.assertIn("\tFFeet()\n\t{\n\t\tRight = []() { FFootState Dal_S; Dal_S.Axis = FVector3f(0.0f, 0.0f, 1.0f);", h)
         self.assertIn("Pose.Feet.Left.Heading = (Velocity.X > 0.0f) ? EDirection::Forward : EDirection::Backward;", cpp)
         self.assertIn("FVelocityBlend Dal_Fn_blend_of", cpp)
 

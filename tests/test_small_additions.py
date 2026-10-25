@@ -196,7 +196,9 @@ class SettingsInitializerTests(unittest.TestCase):
 
     def test_the_generated_c_plus_plus(self):
         files = generate_cpp(compile_ok(SETTINGS))
-        self.assertIn("FTrace Near = []() { FTrace Dal_S; Dal_S.Reach = 10.0f; return Dal_S; }();", files["Sr.h"])
+        # UHT cannot read a lambda as a default member initializer: the constructor sets the member
+        self.assertNotIn("FTrace Near = []()", files["Sr.h"])
+        self.assertIn("\t\tNear = []() { FTrace Dal_S; Dal_S.Reach = 10.0f; return Dal_S; }();", files["Sr.h"])
         self.assertIn("FTrace Plain = FTrace();", files["Sr.h"])
 
     @unittest.skipIf(tcc is None or tcc.COMPILER is None, "no C++ compiler found")
