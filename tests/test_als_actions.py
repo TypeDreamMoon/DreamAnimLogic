@@ -1,9 +1,10 @@
 """The actions of the ALS character in DAL (``als/AlsCharacter.dal``, ports of ``AlsCharacter_Actions.cpp`` and the root motion source of the
-mantling): rolling and mantling, and the notify states they end on.
+mantling): rolling, mantling, getting up and ragdolling, and the notify states they end on.
 
 * behaviour against the C++ they port: the start conditions and the commands each action hands to the host, the state they keep;
 * the mantling against a scene (``als_world.BoxWorld``: a wall, a ledge, a ceiling) and a movement component that obeys the commands
   (``als_world.MoveSim``), with synthetic montages whose root motion is a straight line;
+* the ragdoll against the host commands of the ragdoll service (``ragdoll_*``) and the pelvis bone the host serves;
 * the interpreter and the generated Python agree on every scenario; the generated C++ has the notify classes of the actions and compiles
   with the rest of the system (``test_als_character.py`` runs it against the stand-in engine on random frames, hooks and notifies included).
 
@@ -217,6 +218,16 @@ class RollingTests(Case):
             self.assertClose(rig.s["RollingState.TargetYawAngle"], 90.0)                              # VelocityYawAngle (the velocity has a horizontal part)
             self.assertEqual(rig.commands("set_braking_friction_factor"), [])                         # and not the friction of a soft landing
 
+    def test_rolling_in_the_air_ends_in_a_ragdoll_when_the_settings_say_so(self):
+        for rig in rigs(ragdoll_supported=True):
+            rig.step(events=[("Roll", "triggered", True)])
+            rig.step(movement_mode=base.FALLING_MODE, is_grounded=False, velocity=(0.0, 0.0, -100.0))
+            self.assertEqual(rig.s["LocomotionAction"], RAGDOLLING)                                   # C:552-558
+        settings = character_settings(Rolling=dict(ROLL_SETTINGS, bInterruptRollingWhenInAir=False))
+        for rig in rigs(settings=settings, ragdoll_supported=True):
+            rig.step(events=[("Roll", "triggered", True)])
+            rig.step(movement_mode=base.FALLING_MODE, is_grounded=False, velocity=(0.0, 0.0, -100.0))
+            self.assertEqual(rig.s["LocomotionAction"], ROLLING)
 
 
 class NotifyStateTests(Case):
@@ -456,6 +467,25 @@ class MantlingTests(Case):
             self.assertEqual(rig.command("montage_stop"), ("AM_High", 0.3))                           # Settings.Mantling.BlendOutDuration  CA:702
             self.assertEqual(rig.commands("set_movement_mode"), [(1,)])
 
+    def test_when_the_target_is_destroyed_the_character_stops_and_ragdolls(self):
+        for rig in rigs(boxes=[wall()], ragdoll_supported=True):
+            sim = W.MoveSim(STAND)
+            run_mantle(rig, sim, 30)
+            for h in rig.hosts.values():
+                h.gone.add("Wall")
+            tick(rig, sim)
+            self.assertEqual(rig.s["MantlingState.RootMotionSourceId"], 0)
+            self.assertEqual(rig.s["LocomotionAction"], RAGDOLLING)                                   # CA:665-678
+            self.assertEqual(len(rig.commands("ragdoll_begin")), 1)
+        for rig in rigs(boxes=[wall()], ragdoll_supported=False):
+            sim = W.MoveSim(STAND)
+            run_mantle(rig, sim, 30)
+            for h in rig.hosts.values():
+                h.gone.add("Wall")
+            tick(rig, sim)
+            self.assertEqual(rig.s["MantlingState.RootMotionSourceId"], 0)
+            self.assertNotEqual(rig.s["LocomotionAction"], RAGDOLLING)
+
     def test_the_two_python_implementations_play_the_same_mantle(self):
         out = {}
         for backend in base.BACKENDS:
@@ -466,6 +496,190 @@ class MantlingTests(Case):
         for a, b in zip(out["python"], out["interp"]):
             self.assertClose(a[0], b[0], 1e-9)
             self.assertEqual(a[1:], b[1:])
+
+
+# ---- ragdolling -----------------------------------------------------------------------------------------------------------------------------------
+
+def pelvis(location, yaw=0.0, roll=0.0):
+    """The pelvis bone the host serves (the pose evaluated last): ``bones=`` for ``Rig.step``."""
+    q = rt.to_quat(rt.Rotator(0.0, yaw, roll))
+    world = (tuple(location), (q.x, q.y, q.z, q.w), (1.0, 1.0, 1.0))
+    return {"pelvis": {"world": world, "component": world}}
+
+
+GROUND = {"ground_z": 0.0}
+
+
+class RagdollTests(Case):
+    """IsRagdollingAllowedToStart, StartRagdolling, RefreshRagdolling, RagdollTraceGround, StopRagdolling (CA:717-1170)."""
+
+    def ragdolling(self, rig, velocity_now=(300.0, 0.0, 0.0), at=(0.0, 0.0, 92.2)):
+        """The character runs and the ragdoll key is pressed."""
+        rig.step(velocity=velocity_now, bones=pelvis(at), world=GROUND)
+        rig.step(events=[("Ragdoll", "triggered", True)], velocity=velocity_now, bones=pelvis(at), world=GROUND)
+        return rig
+
+    def test_without_a_ragdoll_in_the_host_nothing_ragdolls(self):
+        for rig in rigs(ragdoll_supported=False):
+            rig.step()
+            rig.step(events=[("Ragdoll", "triggered", True)])
+            self.assertEqual((rig.s["LocomotionAction"], rig.commands("ragdoll_begin")), ("", []))     # CA:719-723: the physics asset needs the pelvis and spine_03 bodies
+            rig.call("StartRagdolling")
+            rig.step()
+            self.assertEqual(rig.s["LocomotionAction"], "")
+
+    def test_the_ragdoll_key_hands_the_character_to_the_ragdoll(self):
+        for rig in rigs(ragdoll_supported=True):
+            self.ragdolling(rig)
+            self.assertEqual(rig.s["LocomotionAction"], RAGDOLLING)                                   # CA:841
+            self.assertEqual(rig.commands("montage_stop_all"), [(0.2,)])                              # CA:777
+            self.assertEqual(rig.commands("ragdoll_begin"), [(True, 300.0)])                          # bLimitInitialRagdollSpeed, Max(200, speed)  CA:811-821
+            self.assertEqual(rig.commands("set_movement_mode"), [(0,)])                               # MOVE_None  CA:838
+            self.assertEqual(rig.commands("set_movement_mode_locked"), [(True,)])                     # CA:839
+            names = rig.names()
+            self.assertLess(names.index("ragdoll_begin"), names.index("set_movement_mode"))
+            self.assertEqual(rig.s["LocomotionMode"], "")                                             # the movement mode is none: no locomotion mode (C:485-488)
+            self.assertEqual(rig.s["RagdollingState.SpeedLimit"], 300.0)
+            self.assertEqual(rig.s["RagdollingState.PullForce"], 0.0)
+            self.assertClose(rig.s["RagdollTargetLocation"], (0.0, 0.0, 92.2), 1e-6)                  # the pelvis (CA:833)
+
+    def test_a_slow_character_still_gets_the_minimum_speed_limit(self):
+        for rig in rigs(ragdoll_supported=True):
+            self.ragdolling(rig, velocity_now=(50.0, 0.0, 0.0))
+            self.assertEqual(rig.commands("ragdoll_begin"), [(True, 200.0)])                          # MinSpeedLimit = 200  CA:818
+
+    def test_the_initial_speed_limit_holds_for_eight_ticks(self):
+        for rig in rigs(ragdoll_supported=True):
+            self.ragdolling(rig)
+            sent = len(rig.commands("ragdoll_limit_speed"))                                           # the start frame's refresh is the first tick  CA:955-959
+            self.assertEqual(rig.s["RagdollingState.SpeedLimitFrameTimeRemaining"], 7)
+            for _ in range(10):
+                rig.step(bones=pelvis((0.0, 0.0, 92.2)), world=GROUND)
+                sent += len(rig.commands("ragdoll_limit_speed"))
+                if rig.commands("ragdoll_limit_speed"):
+                    self.assertEqual(rig.command("ragdoll_limit_speed"), (300.0,))
+            self.assertEqual(sent, 8)
+            self.assertEqual(rig.s["RagdollingState.SpeedLimitFrameTimeRemaining"], 0)
+        settings = character_settings(Ragdolling=dict(RAGDOLL_SETTINGS, bLimitInitialRagdollSpeed=False))
+        for rig in rigs(ragdoll_supported=True, settings=settings):
+            self.ragdolling(rig)
+            self.assertEqual(rig.commands("ragdoll_limit_speed"), [])
+            self.assertEqual(rig.commands("ragdoll_begin")[0][0], False)
+
+    def test_the_motor_strength_follows_the_speed_of_the_pelvis(self):
+        for rig in rigs(ragdoll_supported=True):
+            self.ragdolling(rig, velocity_now=(0.0, 0.0, 0.0))
+            for k in range(1, 4):
+                rig.step(bones=pelvis((10.0 * k, 0.0, 92.2)), world=GROUND)                           # 10 cm per tick: 600 cm/s
+            self.assertClose(rig.s["RagdollingState.Velocity"], (600.0, 0.0, 0.0), 1e-4)              # [the velocity read of the pelvis body: the difference of its positions]
+            self.assertClose(rig.command("ragdoll_set_motor_strength")[0], 0.6 * 25000.0, 1e-4)       # Clamp01(Speed / 1000) * Stiffness  CA:949-951
+            rig.step(bones=pelvis((10.0 * 3 + 40.0, 0.0, 92.2)), world=GROUND)                        # 40 cm per tick: past the reference speed
+            self.assertClose(rig.command("ragdoll_set_motor_strength")[0], 25000.0, 1e-6)
+
+    def test_the_capsule_follows_the_pelvis_and_stands_on_the_ground_below_it(self):
+        for rig in rigs(ragdoll_supported=True):
+            self.ragdolling(rig, at=(0.0, 0.0, 92.2))
+            rig.step(bones=pelvis((50.0, 20.0, 50.0)), world=GROUND)
+            (location, sweep, teleport), = rig.commands("set_actor_location")
+            self.assertEqual((sweep, teleport), (False, True))                                        # SetActorLocation(.., false, nullptr, TeleportPhysics)  CA:901
+            # the sphere (radius 30) sweeps from Z + 60 to Z - 60 and meets the ground when its centre is 30 high: Z = 30 + 90 - 30 + 1.9
+            self.assertClose(location, (50.0, 20.0, 91.9), 1e-6)                                      # CA:993-997
+            rig.step(bones=pelvis((50.0, 20.0, 200.0)), world=GROUND)
+            (location, _s, _t), = rig.commands("set_actor_location")
+            self.assertClose(location, (50.0, 20.0, 200.0), 1e-6)                                     # nothing to stand on: the pelvis' height
+
+    def stop(self, rig, facing_roll, yaw=30.0, at=(50.0, 20.0, 25.0), **host):
+        self.ragdolling(rig)
+        rig.step(bones=pelvis(at, yaw=yaw, roll=facing_roll), world=GROUND, **host)
+        rig.step(events=[("Ragdoll", "triggered", True)], bones=pelvis(at, yaw=yaw, roll=facing_roll), world=GROUND, **host)
+        return rig
+
+    def test_the_ragdoll_key_stops_the_ragdoll_and_it_gets_up_facing_the_way_it_lay(self):
+        for roll, upward, yaw, montage in ((-90.0, True, 30.0 - 180.0, "AM_GetUp_Back"), (90.0, False, 30.0, "AM_GetUp_Front"), (0.0, True, -150.0, "AM_GetUp_Back")):
+            for rig in rigs(ragdoll_supported=True):
+                self.stop(rig, roll)
+                names = rig.names()
+                self.assertEqual(rig.commands("ragdoll_end"), [()], roll)
+                self.assertEqual(rig.anim.snapshot()["Snapshots"], 1)                                 # the animation instance takes the final pose (CA:1076)
+                (rotation, teleport), = rig.commands("set_actor_rotation")
+                self.assertTrue(teleport)
+                self.assertClose(rotation[1], yaw, 1e-4)                                              # Yaw - 180 when it lay on its back  CA:1099-1102
+                (location, _sweep, _teleport), = rig.commands("set_actor_location")
+                self.assertClose(location, (50.0, 20.0, 91.9), 1e-6)                                  # the ground below the pelvis  CA:1094-1104
+                self.assertEqual(rig.commands("set_movement_mode_locked"), [(False,)])                # CA:1143
+                self.assertEqual(rig.commands("set_movement_mode"), [(1,)])                           # MOVE_Walking: on the ground  CA:1147
+                self.assertEqual(rig.command("montage_play"), (montage, 1.0, None))                   # SelectGetUpMontage(bRagdollFacingUpward)  CA:1159, :1169
+                self.assertEqual(rig.commands("set_input_blocked"), [(False,), (True,)])              # the empty action unblocks (C:1095), then CA:1161 blocks for the get up
+                self.assertEqual(rig.s["LocomotionAction"], GETTING_UP)                               # CA:1163
+                for first, second in (("ragdoll_end", "set_actor_location"), ("set_movement_mode_locked", "set_movement_mode"), ("set_movement_mode", "montage_play")):
+                    self.assertLess(names.index(first), names.index(second), (roll, first, second))   # the order of the C++ calls
+                self.assertEqual(rig.s["LocomotionMode"], base.GROUNDED)                              # (OnMovementModeChanged inside SetMovementMode)
+                self.assertEqual(upward, roll <= 0.0)
+
+    def test_the_notify_state_of_the_get_up_montage_gives_the_input_back(self):
+        for rig in rigs(ragdoll_supported=True):
+            self.stop(rig, 90.0)
+            rig.step(hooks=[notify("notify_begin", NOTIFY_ACTION, {"LocomotionAction": GETTING_UP})])
+            self.assertEqual(rig.s["LocomotionAction"], GETTING_UP)
+            rig.step(hooks=[notify("notify_end", NOTIFY_ACTION, {"LocomotionAction": GETTING_UP})])
+            self.assertEqual(rig.s["LocomotionAction"], "")
+            self.assertEqual(rig.command("set_input_blocked"), (False,))                              # C:1095
+
+    def test_a_ragdoll_that_stops_in_the_air_falls_with_its_velocity(self):
+        for rig in rigs(ragdoll_supported=True):
+            self.ragdolling(rig)
+            rig.step(bones=pelvis((0.0, 0.0, 300.0)), world=GROUND)
+            rig.step(bones=pelvis((6.0, 0.0, 294.0)), world=GROUND)
+            velocity_now = rig.s["RagdollingState.Velocity"]
+            rig.step(events=[("Ragdoll", "triggered", True)], bones=pelvis((6.0, 0.0, 294.0)), world=GROUND)
+            self.assertEqual(rig.commands("set_movement_mode"), [(3,)])                               # MOVE_Falling  CA:1151
+            self.assertEqual(rig.commands("set_velocity"), [(tuple(velocity_now),)])                  # CA:1152
+            self.assertEqual(rig.commands("montage_play"), [])                                        # no get up in the air
+            self.assertEqual(rig.s["LocomotionAction"], "")
+            self.assertEqual(rig.s["LocomotionMode"], base.IN_AIR)
+
+    def test_stopping_needs_a_ragdoll(self):
+        for rig in rigs(ragdoll_supported=True):
+            self.assertFalse(rig.call("StopRagdolling"))                                              # CA:1026-1036
+            rig.step()
+            self.assertEqual(rig.commands("ragdoll_end"), [])
+            self.ragdolling(rig)
+            self.assertTrue(rig.call("StopRagdolling"))
+
+    def test_the_jump_key_stops_the_ragdoll_before_it_mantles_or_jumps(self):
+        for rig in rigs(ragdoll_supported=True):
+            self.ragdolling(rig)
+            rig.step(events=[("Jump", "triggered", True)], bones=pelvis((50.0, 20.0, 25.0)), world=GROUND)      # EX:160
+            self.assertEqual(rig.commands("ragdoll_end"), [()])
+            self.assertEqual(rig.commands("jump"), [])
+
+    def test_a_hard_landing_ragdolls_a_harder_one_than_it_rolls(self):
+        for rig in rigs(ragdoll_supported=True):
+            rig.step(movement_mode=base.FALLING_MODE, is_grounded=False, velocity=(0.0, 0.0, -1200.0), bones=pelvis(STAND))
+            rig.step(movement_mode=base.WALKING_MODE, is_grounded=True, velocity=(0.0, 0.0, -1200.0), bones=pelvis(STAND))
+            self.assertEqual(rig.s["LocomotionAction"], RAGDOLLING)                                   # C:512-516: before the roll
+            self.assertEqual(len(rig.commands("ragdoll_begin")), 1)
+            self.assertEqual(rig.commands("montage_play"), [])
+        for rig in rigs(ragdoll_supported=False):
+            rig.step(movement_mode=base.FALLING_MODE, is_grounded=False, velocity=(0.0, 0.0, -1200.0))
+            rig.step(movement_mode=base.WALKING_MODE, is_grounded=True, velocity=(0.0, 0.0, -1200.0))
+            self.assertEqual(rig.s["LocomotionAction"], "")                                           # no ragdoll in the host: nothing starts (the friction branch is skipped too)
+            self.assertEqual(rig.commands("set_braking_friction_factor"), [])
+
+    def test_the_two_python_implementations_play_the_same_fall(self):
+        out = {}
+        for backend in base.BACKENDS:
+            rig = rig_with(backend, ragdoll_supported=True)
+            trace = []
+            self.ragdolling(rig)
+            for k in range(1, 30):
+                rig.step(bones=pelvis((7.0 * k, 0.0, max(25.0, 92.0 - 3.0 * k))), world=GROUND)
+                trace.append((rig.s["RagdollingState.Velocity"], list(rig.cmds["AlsCharacter"])))
+            rig.step(events=[("Ragdoll", "triggered", True)], bones=pelvis((200.0, 0.0, 25.0), yaw=70.0, roll=-80.0), world=GROUND)
+            trace.append((rig.s["LocomotionAction"], list(rig.cmds["AlsCharacter"])))
+            out[backend] = trace
+        for a, b in zip(out["python"], out["interp"]):
+            self.assertEqual(str(a), str(b))
 
 
 if __name__ == "__main__":

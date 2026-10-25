@@ -7,7 +7,7 @@ of the frame, hands it the inputs of the frame and compares the state at the end
 the ``.dvrec`` takes are imported from the DreamVEd tree read-only (``DAL_BLENDER_MODULES``); the compiler is this repository's.  Everything
 here skips when the takes, the ALS pack or the Blender-side modules are not on the machine.
 
-* ``TeacherTakeTests``: all ten takes, the character logic only: not one of its 38 state fields may differ in any frame of any take.  The
+* ``TeacherTakeTests``: all ten takes, the character logic only: not one of its 39 state fields may differ in any frame of any take.  The
   commands that push the movement settings to the movement component (``effects``) are compared too; where they differ is the known
   timing of ``RefreshGroundedMovementSettings`` inside ``PhysWalking`` (a crouch or the velocity of the root motion that the movement
   component applies before it), counted per take against ``EFFECT_LIMITS``.
@@ -120,7 +120,7 @@ class TeacherTakeTests(unittest.TestCase):
             print(f"[truth] {take:16s} {r.frames:5d} frames  {compared} state fields  mismatching fields {len(bad)}  flips {len(flips)}")
             self.assertEqual(bad, {}, take)
             self.assertEqual(flips, [], take)
-            self.assertGreaterEqual(compared, 38, take)
+            self.assertGreaterEqual(compared, 39, take)
             out.append(take)
         self.assertEqual(out, list(TAKES))
 

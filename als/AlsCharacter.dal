@@ -13,10 +13,9 @@
 //   * rolling (CA:22-139): start conditions and direction, the montage, the rotation towards the target yaw while rolling;
 //   * mantling (CA:141-713, RMS:37-128): the forward / downward traces and overlaps, the selection of the mantling settings, the start time,
 //     the root motion source as a driver in the pre_movement block (root_motion_override + the custom movement mode), stopping;
+//   * ragdolling (CA:717-1170): start (on request, on a hard landing), the refresh (pelvis, capsule snap, motor strength, speed limit), stop
+//     and the get up montage chosen by the facing of the ragdoll, the FinalRagdollPose handshake with the animation instance;
 //   * the three notify states the actions end on: SetLocomotionAction, SetRootMotionScale and EarlyBlendOut (Notifies/*).
-//
-// Not in (stubs, the next port): ragdolling and the get up (CA:717-1170) -- StartRagdolling / StopRagdolling exist with the ALS signatures so
-// that AlsInput and the landing code can call them.
 //
 // Dropped for good (single player, no moving bases): everything that replicates (Server* / Client* / Multicast* / OnRep_*, view network
 // smoothing, the network branches of RefreshLocomotion), RefreshMovementBase and the movement base parts of the Refresh* functions (the
@@ -37,10 +36,13 @@
 //     runs at the end of the after_movement block with the velocity at the end of the movement, which is the same value one frame later;
 //   * a data asset cannot be handed around in DAL, so SelectMantlingSettings (a Blueprint event in ALS) is the enum AlsMantlingSettingsKind
 //     and views that read the selected asset's members out of the `param`s MantlingHigh ... (see als/bindings.json for the data assets);
+//   * the physics of a ragdoll (bodies, joints, motors, the pelvis body) belong to the host's ragdoll service: ragdoll_begin / _end /
+//     _limit_speed / _set_motor_strength; this logic keeps what ALS keeps in the character (when to start and stop, the speed limit frames,
+//     the capsule on the ground, the get up montage).
 
 use "als_lib.dal";
 
-peer Anim: AlsAnimationInstance;                       // AlsCharacter.h:57 AnimationInstance: Jump() is called on it (queued)
+peer Anim: AlsAnimationInstance;                       // AlsCharacter.h:57 AnimationInstance: Jump() and SnapshotFinalRagdollPose() are called on it (queued)
 logic AlsCharacter : actor slot_events in after_movement;   // the ALS Tick runs after the movement component (als-dal-rewrite.md 1.9)
 
 param Settings: AlsCharacterSettings;                  // AlsCharacter.h:31
@@ -69,6 +71,8 @@ input CapsuleRadius: float <- host.capsule_radius;                              
 input CapsuleHalfHeight: float <- host.capsule_half_height;                      // GetCapsuleComponent()->GetScaledCapsuleHalfHeight()  CA:210
 input CapsuleScale: float <- host.actor_scale;                                   // GetCapsuleComponent()->GetComponentScale().Z         CA:208
 input MeshWorldTransform: transform <- host.mesh_world_transform;                // GetMesh()->GetComponentTransform(): GetBaseRotationOffset() is the actor's rotation to it   CA:517
+input RagdollSupported: bool <- host.ragdoll_supported;                          // the mesh has the pelvis and spine_03 bodies  CA:720-722
+input PelvisTransform: transform <- host.bone_world_transform("pelvis");         // GetMesh()->GetSocketTransform(PelvisBoneName)  CA:1078 (AlsConstants.h: "pelvis")
 input RotationYawSpeedCurve: float <- host.anim_curve("RotationYawSpeed");       // GetCurveValue(RotationYawSpeedCurveName) C:1814 (AlsConstants.h:81)
 input RotationYawOffsetCurve: float <- host.anim_curve("RotationYawOffset");     // GetCurveValue(RotationYawOffsetCurveName) C:1650
 
@@ -91,6 +95,7 @@ state DesiredVelocityYawAngle: float;                                           
 state bHasDesiredVelocity: bool;                                                 // :94
 state LocomotionState: AlsLocomotionState;                                       // :97
 state MantlingState: AlsMantlingState;                                           // :100
+state RagdollTargetLocation: vec3;                                               // :103 (replicated in ALS; here the pelvis position the capsule follows)
 state RagdollingState: AlsRagdollingState;                                       // :106
 state RollingState: AlsRollingState;                                             // :109
 state MaxAllowedGait: AlsGait = AlsGait.Running;                                 // CMC.h:102
@@ -104,6 +109,8 @@ state MovementModeNow: MovementMode;                                            
 state MantlingSource: AlsMantlingRootMotionSource;                               // the FAlsRootMotionSource_Mantling the movement component would hold (RMS.h)
 state MantlingSourceCount: int;                                                  // the ids ApplyRootMotionSource hands out (MantlingState.RootMotionSourceId)
 state AnimRootMotionTranslationScale: float = 1.0;                               // Character->GetAnimRootMotionTranslationScale(), as the SetRootMotionScale notify state left it
+state PelvisLocationPrevious: vec3;                                              // RefreshRagdolling: the pelvis location of the last tick (the velocity is its difference)
+state bPelvisLocationPreviousValid: bool;
 timer BrakingFrictionFactorResetTimer = 0.5;                                     // C:538-544 (ResetDelay)
 
 // ---- types of the actions --------------------------------------------------------------------------------------------------------
@@ -214,7 +221,7 @@ update(dt) in after_movement {                                                  
     refresh_rotation(dt);                                                        // :290
     auto_start_mantling();                                                       // :292
     refresh_mantling();                                                          // :293
-    // RefreshRagdolling(dt);                                                    // :294 (ragdolling: the next port)
+    refresh_ragdolling(dt);                                                      // :294
     refresh_rolling(dt);                                                         // :295
     // Super::Tick(DeltaTime);                                                   // :297
     refresh_locomotion_late();                                                   // :299
@@ -1373,15 +1380,182 @@ method prepare_mantling_root_motion(dt: float) {                                
 }
 
 // ================================================================================================================================
-// ragdolling (AlsCharacter_Actions.cpp:717-1170): the next port.  The signatures are ALS's; the bodies do what the C++ does when the action is not
-// allowed to start.
+// ragdolling (AlsCharacter_Actions.cpp:717-1170)
 // ================================================================================================================================
 
-pub method StartRagdolling() {                                                   // CA:717-844 (IsRagdollingAllowedToStart is false while the host cannot ragdoll)
+struct AlsRagdollGroundTrace {                                                   // the (location, bGrounded) pair of RagdollTraceGround(bool& bGrounded)
+    Location: vec3;
+    bGrounded: bool;
 }
 
-pub method StopRagdolling() -> bool {                                            // CA:1026-1165 (IsRagdollingAllowedToStop is false when not ragdolling)
-    return false;
+view is_ragdolling_allowed_to_start() -> bool {                                  // CA:717-724 (the physics asset must have the pelvis and spine_03 bodies: the host says so)
+    return LocomotionAction != AlsLocomotionAction.Ragdolling && RagdollSupported;       // :719-723
+}
+
+pub method StartRagdolling() {                                                   // CA:726-757 (the role check and the RPCs are dropped)
+    let allowed = is_ragdolling_allowed_to_start();
+    if (!allowed) { return; }                                                    // :728
+    start_ragdolling_implementation();                                           // :741, :756
+}
+
+method start_ragdolling_implementation() {                                       // CA:759-844
+    let allowed = is_ragdolling_allowed_to_start();
+    if (!allowed) { return; }                                                    // :761-764
+
+    // bUpdateJointsFromAnimation, UpdateRBJointMotors (:766-771) and everything between :779 and :798 (network smoothing, detaching the
+    // mesh, the capsule's collision, simulating physics, ResetAllBodiesSimulatePhysics): host.ragdoll_begin below.
+
+    // Stop any active montages.   :773
+    host.montage_stop_all(0.2);                                                  // :775-777 BlendOutDuration = 0.2
+
+    // The pelvis body's location and velocity (:800-807): the character's own until the first refresh, which reads the pelvis.
+    RagdollingState.Velocity = LocomotionState.Velocity;                         // :806
+    PelvisLocationPrevious = PelvisTransform.location;
+    bPelvisLocationPreviousValid = true;
+    RagdollingState.PullForce = 0.0;                                             // :809
+
+    if (Settings.Ragdolling.bLimitInitialRagdollSpeed) {                         // :811
+        // Limit the ragdoll's speed for a few frames, because for some unclear reason, it can get a much higher initial speed than the character's last speed.
+        RagdollingState.SpeedLimitFrameTimeRemaining = 8;                        // :820
+        RagdollingState.SpeedLimit = max(200.0, length(LocomotionState.Velocity));      // :818 MinSpeedLimit, :821
+        // ConstraintRagdollSpeed() at once (:823): the service limits the speed in ragdoll_begin
+    }
+    host.ragdoll_begin(Settings.Ragdolling.bLimitInitialRagdollSpeed, RagdollingState.SpeedLimit);      // :766-798, :823
+
+    RagdollTargetLocation = PelvisTransform.location;                            // :826-834 SetRagdollTargetLocation (the locally controlled branch)
+
+    // Clear the character movement mode and set the locomotion action to ragdolling.   :836
+    host.set_movement_mode(MovementMode.None);                                   // :838
+    MovementModeNow = MovementMode.None;
+    LocomotionMode = AlsLocomotionMode.None;                                     // C:469-491 at once.  Not through apply_movement_mode: its notification can start a ragdoll
+                                                                                 // (C:512-516) and DAL has no recursion; a locomotion mode of None has nothing to notify.
+    host.set_movement_mode_locked(true);                                         // :839
+
+    SetLocomotionAction(AlsLocomotionAction.Ragdolling);                         // :841
+
+    // OnRagdollingStarted()                                                     // :843 (Blueprint event)
+}
+
+method refresh_ragdolling(dt: float) {                                           // CA:868-961
+    if (LocomotionAction != AlsLocomotionAction.Ragdolling) { return; }          // :870-873
+
+    // The pelvis body (:875-885).  The host serves the simulated pose of the last tick through the pelvis bone, which is what the physics
+    // handle returns in ALS at this point of the frame.  The velocity is the pelvis' displacement over the tick: the ragdoll service has a
+    // velocity read (RagdollHost.ragdoll_velocity) that the host protocol of the compiler does not list yet.
+    let pelvis_location = PelvisTransform.location;                              // :883
+    if (bPelvisLocationPreviousValid && dt > SMALL_NUMBER) {
+        RagdollingState.Velocity = (pelvis_location - PelvisLocationPrevious) / dt;     // :884
+    }
+    PelvisLocationPrevious = pelvis_location;
+    bPelvisLocationPreviousValid = true;
+
+    // bLocallyControlled is always true (:887)
+    RagdollTargetLocation = pelvis_location;                                     // :889-892 SetRagdollTargetLocation(PelvisLocation)
+
+    // Prevent the capsule from going through the ground when the ragdoll is lying on the ground.   :894
+    // While we could get rid of the line trace here and just use RagdollTargetLocation as the character's location, we don't do that
+    // because the camera depends on the capsule's bottom location, so its removal will cause the camera to behave erratically.
+    let ground = ragdoll_trace_ground();                                         // :900
+    host.set_actor_location(ground.Location, false, true);                       // :901 SetActorLocation(.., false, nullptr, ETeleportType::TeleportPhysics)
+
+    // The pull force that corrects a ragdoll that is not locally controlled (:903-942) is a network feature: dropped.
+
+    // Use the speed to scale ragdoll joint strength for physical animation.   :944
+    let speed_amount = clamp01(length(RagdollingState.Velocity) / 1000.0);       // :946, :949 ReferenceSpeed
+    host.ragdoll_set_motor_strength(speed_amount * 25000.0);                     // :947, :951 Stiffness
+
+    // Limit the speed of ragdoll bodies.   :953
+    if (RagdollingState.SpeedLimitFrameTimeRemaining > 0) {                      // :955
+        RagdollingState.SpeedLimitFrameTimeRemaining -= 1;                       // :957
+        host.ragdoll_limit_speed(RagdollingState.SpeedLimit);                    // :959 ConstraintRagdollSpeed()
+    }
+}
+
+method ragdoll_trace_ground() -> AlsRagdollGroundTrace {                         // CA:963-999 RagdollTraceGround
+    let target_is_set = RagdollTargetLocation.x != 0.0 || RagdollTargetLocation.y != 0.0 || RagdollTargetLocation.z != 0.0;      // :965 !RagdollTargetLocation.IsZero()
+    let ragdoll_location = target_is_set ? RagdollTargetLocation : ActorLocation;
+
+    // We use a sphere sweep instead of a simple line trace to keep capsule movement consistent between ragdolling and regular character movement.   :967
+    let trace_start = vec3(ragdoll_location.x, ragdoll_location.y, ragdoll_location.z + 2.0 * CapsuleRadius);                 // :973
+    let trace_end = vec3(ragdoll_location.x, ragdoll_location.y, ragdoll_location.z - CapsuleHalfHeight + CapsuleRadius);     // :974
+
+    // The collision channel of the capsule is ECC_Pawn; the responses are the capsule's (InitCollisionParams): what blocks mantling blocks it.   :976-980
+    let ground_hit = host.sweep_sphere(trace_start, trace_end, CapsuleRadius, Channel.Pawn, Settings.Mantling.MantlingTraceResponses);       // :983-985
+
+    return AlsRagdollGroundTrace(Location: vec3(ragdoll_location.x, ragdoll_location.y,
+                                                ground_hit.blocking ? ground_hit.location.z + CapsuleHalfHeight - CapsuleRadius + MIN_FLOOR_DIST : ragdoll_location.z),
+                                 bGrounded: ground_hit.blocking);                       // :993-998
+}
+
+view is_ragdolling_allowed_to_stop() -> bool {                                   // CA:1026-1029
+    return LocomotionAction == AlsLocomotionAction.Ragdolling;                   // :1028
+}
+
+pub method StopRagdolling() -> bool {                                            // CA:1031-1048 (the role check and the RPCs are dropped)
+    let allowed = is_ragdolling_allowed_to_stop();
+    if (!allowed) { return false; }                                              // :1033-1036
+    stop_ragdolling_implementation();                                            // :1040, :1061
+    return true;                                                                 // :1047
+}
+
+method stop_ragdolling_implementation() {                                        // CA:1064-1165
+    let allowed = is_ragdolling_allowed_to_stop();
+    if (!allowed) { return; }                                                    // :1066-1069
+    if (!valid(Anim)) { return; }                                                // :1071 (the animation instance has to be there to take the pose)
+
+    // The final pose: the animation instance takes the snapshot (queued, it runs in the animation update of this tick, SnapshotPose command).
+    // The host keeps the pose of the ragdoll that ragdoll_end ends until then (the pelvis fix of :1128-1138 is its part).
+    Anim.SnapshotFinalRagdollPose();                                             // :1076
+
+    let pelvis_rotation = to_rotator(PelvisTransform.rotation);                  // :1078-1079
+
+    // Disable mesh physics simulation and enable capsule collision.   :1081
+    host.ragdoll_end();                                                          // :1083-1092 (and the network smoothing :1091-1092)
+
+    let ground = ragdoll_trace_ground();                                         // :1094-1095
+
+    // Determine whether the ragdoll is facing upward or downward and set the actor rotation accordingly.   :1097
+    let ragdoll_facing_upward = unwind_degrees(pelvis_rotation.roll) <= 0.0;     // :1099
+
+    var new_actor_rotation = ActorRotationNow;                                   // :1101
+    new_actor_rotation.yaw = ragdoll_facing_upward ? pelvis_rotation.yaw - 180.0 : pelvis_rotation.yaw;       // :1102
+
+    host.set_actor_location(ground.Location, false, true);                       // :1104 SetActorLocationAndRotation(.., false, nullptr, ETeleportType::TeleportPhysics)
+    set_actor_rotation_now(new_actor_rotation, true);
+
+    // Attach the mesh back and restore its default relative location (:1106-1126), restore the pelvis transform of the final pose (:1128-1138):
+    // the host's ragdoll service.
+
+    // If the ragdoll is on the ground, set the movement mode to walking and play a get up montage. If not, set the movement mode to
+    // falling and update the character movement velocity to match the last ragdoll velocity.   :1140
+    host.set_movement_mode_locked(false);                                        // :1143
+
+    if (ground.bGrounded) {                                                      // :1145
+        set_movement_mode_now(MovementMode.Walking);                             // :1147
+    } else {
+        set_movement_mode_now(MovementMode.Falling);                             // :1151
+        host.set_velocity(RagdollingState.Velocity);                             // :1152
+    }
+
+    SetLocomotionAction(AlsLocomotionAction.None);                               // :1155 FGameplayTag::EmptyTag
+
+    // OnRagdollingEnded()                                                       // :1157 (Blueprint event)
+
+    if (ground.bGrounded) {                                                      // :1159
+        let get_up_montage = select_get_up_montage(ragdoll_facing_upward);
+        if (valid(get_up_montage)) {                                             // Montage_Play(..) > 0
+            host.montage_play(get_up_montage, 1.0);                              // :1159
+            host.set_input_blocked(true);                                        // :1161 AlsCharacterMovement->SetInputBlocked(true)
+            SetLocomotionAction(AlsLocomotionAction.GettingUp);                  // :1163 (the SetLocomotionAction notify state of the montage ends it)
+        }
+    }
+}
+
+method select_get_up_montage(bRagdollFacingUpward: bool) -> montage {            // CA:1167-1170 SelectGetUpMontage_Implementation
+    if (bRagdollFacingUpward) {
+        return Settings.Ragdolling.GetUpBackMontage;                             // :1169
+    }
+    return Settings.Ragdolling.GetUpFrontMontage;                                // :1169
 }
 
 // ================================================================================================================================

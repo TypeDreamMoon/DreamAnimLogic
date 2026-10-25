@@ -1424,6 +1424,7 @@ class GeneratedCppShapeTests(Case):
         self.has(c, "DalPhaseTicks[0].TickGroup = TG_PrePhysics;")
         self.has(c, "DalPhaseTicks[1].AddPrerequisite(DalMovement, DalMovement->PrimaryComponentTick);")    # after the movement component
         self.has(c, "Anim->DalQueue_Jump();")                                               # the animation instance is called through its queue
+        self.has(c, "Anim->DalQueue_SnapshotFinalRagdollPose();")                           # and so is the pose of the ragdoll
         for notify_class in ("UAlsAnimNotifyState_SetLocomotionAction", "UAlsAnimNotifyState_SetRootMotionScale", "UAlsAnimNotifyState_EarlyBlendOut"):
             self.has(h + c, notify_class)                                                   # the classes of the montages' notify states are the ALS ones
         self.has(h, "MantlingHigh;")                                                        # one UAlsMantlingSettings per kind of mantle
@@ -1462,6 +1463,7 @@ class BackendAgreementTests(Case):
         def patch(text, modules_, frames):
             return input_events_patch(text, modules_, frames)
 
+        seen_by_kind = {True: set(), False: set()}                             # the commands of the seeds with a ragdoll in the host / without
         for seed, ragdoll in ((1, True), (2, True), (3, False)):
             params = system_params(seed, polyline=True)                       # the stand-in engine evaluates polylines
             if not ragdoll:
@@ -1479,8 +1481,9 @@ class BackendAgreementTests(Case):
             self.assertGreater(sum(len(f["AlsCharacter"]["__cmds__"]) for f in cpp), 100)
             seen = {c[0] for f in cpp for logic in ("AlsInput", "AlsCharacter") for c in f[logic]["__cmds__"]}
             self.assertTrue({"add_movement_input", "add_controller_yaw_input", "set_actor_rotation", "set_max_walk_speed"} <= seen, seen)   # the input events reached AlsInput
-            if not ragdoll:
-                self.assertTrue({"montage_play", "crouch"} <= seen, seen)                                # the roll: the montage and the crouch of its stance
+            seen_by_kind[ragdoll] |= seen
+        self.assertTrue({"ragdoll_begin", "ragdoll_end", "ragdoll_set_motor_strength", "set_actor_location"} <= seen_by_kind[True], seen_by_kind[True])   # a ragdoll, begun and ended
+        self.assertTrue({"montage_play", "crouch"} <= seen_by_kind[False], seen_by_kind[False])                    # the roll: the montage and the crouch of its stance
 
 
 def input_events_patch(text, modules_, frames):
