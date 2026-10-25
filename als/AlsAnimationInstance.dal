@@ -1113,7 +1113,10 @@ entry PlayTransitionRightAnimation(BlendInDuration: float = 0.2, BlendOutDuratio
 entry StopTransitionAndTurnInPlaceAnimations(BlendOutDuration: float = -1.0) {                   // AI:1664
     TransitionsState.bStopTransitionsQueued = true;
     TransitionsState.QueuedStopTransitionsBlendOutDuration = BlendOutDuration;
-    // (AI:1669-1672: on the game thread ALS stops at once; here the stop is queued for the post_update of the same frame.)
+
+    if (host.is_game_thread()) {                                                                     // AI:1669
+        stop_queued_transition_and_turn_in_place_animations();
+    }
 }
 
 method play_transition_animation(sequence_to_play: sequence, blend_in_duration: float, blend_out_duration: float, play_rate: float,
@@ -1128,6 +1131,11 @@ method play_transition_animation(sequence_to_play: sequence, blend_in_duration: 
     TransitionsState.QueuedTransitionBlendOutDuration = blend_out_duration;
     TransitionsState.QueuedTransitionPlayRate = play_rate;
     TransitionsState.QueuedTransitionStartTime = start_time;
+
+    // On the game thread the montage plays at once (the commands of an entry run at its end there; on a worker thread the post_update plays it).
+    if (host.is_game_thread()) {                                                                     // AI:1630
+        play_queued_transition_animation();
+    }
 }
 
 method play_transition_left_animation(blend_in_duration: float, blend_out_duration: float, play_rate: float, start_time: float,
@@ -1202,6 +1210,10 @@ entry RefreshDynamicTransitions() linked {                                      
         TransitionsState.QueuedTransitionBlendOutDuration = Settings.DynamicTransitions.BlendDuration;
         TransitionsState.QueuedTransitionPlayRate = Settings.DynamicTransitions.PlayRate;
         TransitionsState.QueuedTransitionStartTime = 0.0;
+
+        if (host.is_game_thread()) {                                                                 // AI:1773
+            play_queued_transition_animation();
+        }
     }
 }
 
@@ -1354,6 +1366,10 @@ method queue_turn_in_place(turn_in_place_settings: AlsTurnInPlaceSettings, turn_
         TurnInPlaceState.QueuedSettings = turn_in_place_settings;                                    // AI:2001
         TurnInPlaceState.QueuedSlotName = turn_in_place_slot_name;
         TurnInPlaceState.QueuedTurnYawAngle = ViewState.YawAngle;
+
+        if (host.is_game_thread()) {                                                                 // AI:2005
+            play_queued_turn_in_place_animation();
+        }
     }
 }
 
