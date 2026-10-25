@@ -2876,6 +2876,8 @@ class CppGen:
                 upd.append(f"{T}DalSampleInputs();")
                 if self.queue_target:
                     upd.append(f"{T}DalDrainPeerCalls();")
+                    if self.game_thread_flush:                          # the commands of what other logics asked of this one run now: the graph updates next
+                        upd.append(f"{T}DalFlushCommands();")
                 if self.has_events:
                     upd.append(f"{T}DalTakeEvents();")
             else:

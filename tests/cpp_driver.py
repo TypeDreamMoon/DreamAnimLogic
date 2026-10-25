@@ -667,7 +667,11 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
         elif actor:
             L.append(f"\t\tObj.TickComponent({dt}f, LEVELTICK_All, nullptr);")
         else:
+            for name in f.get("peer_calls", []):                      # what another logic asked of this animation instance (the queue the update drains)
+                L.append(f"\t\tObj.DalQueue_{name}();")
             L.append(f"\t\tObj.NativeUpdateAnimation({dt}f);")
+            if f.get("mark_native"):
+                L.append('\t\tStubLog::Lines().push_back("mark_native_updated");')
             L.append(f"\t\tObj.NativeThreadSafeUpdateAnimation({dt}f);")
         if f.get("mark"):                                           # (a test asks where in the frame the commands ran)
             L.append('\t\tStubLog::Lines().push_back("mark_updated");')

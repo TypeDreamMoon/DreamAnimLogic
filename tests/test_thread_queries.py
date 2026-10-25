@@ -49,6 +49,12 @@ state N: int;
 update(dt) { host.stop_montages_with_slot("InUpdate", 0.1); }
 entry Stop() { host.stop_montages_with_slot("InEntry", 0.2); N += 1; }
 """
+PEER = """
+logic Pe : anim post_flush;
+state N: int;
+pub method Do() { host.stop_montages_with_slot("Asked", 0.3); N += 1; }
+update(dt) { if (host.is_game_thread()) { host.stop_montages_with_slot("InUpdate", 0.1); } }
+"""
 ACTOR = """
 logic Ac : actor;
 state Where: vec3;
@@ -167,6 +173,20 @@ class CppTests(unittest.TestCase):
         self.assertEqual(got_on.index("mark_calls_done"), 3, got_on)
         self.assertEqual(got_off[:2], ["mark_updated", "mark_calls_done"], got_off)
         self.assertEqual(len([n for n in got_off if not n.startswith("mark_")]), 1, got_off)          # (the update asked while off the game thread: it issued nothing)
+
+    def test_what_another_logic_asked_runs_before_the_graph_updates_on_the_game_thread(self):
+        # SnapshotFinalRagdollPose() is called on the animation instance by the character; ALS takes the pose at once, so the PoseSnapshot node of the same
+        # frame's graph update already sees it.  The queued call is drained at the start of the update and its commands run there, not after the graph.
+        m = module(PEER, "Pe.dal")
+        cpp = generate_cpp(m)["Pe.cpp"]
+        drain = cpp.split("void UPe::NativeUpdateAnimation")[1].split("\n}\n")[0]
+        self.assertEqual(drain.split("DalDrainPeerCalls();")[1].split("\n")[1].strip(), "DalFlushCommands();")
+        for thread in (True, False):                                                                  # (the drain is on the game thread whatever the stand-in engine says)
+            states = cpp_driver.build_and_run(m, [frame(game_thread=thread, mark_native=True, peer_calls=["Do"])])[0]
+            got = [c[0] for c in states[0]["__cmds__"]]
+            asked = [c for c in states[0]["__cmds__"] if c[0] == "montage_instance_stop" and "Asked" in str(c[1])]
+            self.assertEqual(len(asked), 1, got)
+            self.assertLess(states[0]["__cmds__"].index(asked[0]), got.index("mark_native_updated"), got)      # before the graph's update
 
     def test_random_frames_agree_with_python(self):
         for src, name in ((PROXY, "Px.dal"), (GAME, "Gt.dal")):
