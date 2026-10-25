@@ -163,6 +163,43 @@ def pose_errors(gen: Take, truth: Take, n: int):
             "worst_bone_t": dt.argmax(axis=1)}
 
 
+RIG_PREFIX = "var:GetControlRigInput."          # the watches of the recorder that call the pure function the Control Rig node reads (ALS: GetControlRigInput)
+
+
+def read_matrix(rec: Recording, n: int):
+    """The values the recorder read each frame (watches that are not part of a truth channel): (names, frames x names, NaN where not read)."""
+    try:
+        keys, vals, off = rec.arrays["read_keys"], rec.arrays["read_values"], rec.arrays["read_offsets"]
+    except KeyError:
+        return [], np.zeros((0, 0))
+    n = min(n, len(off) - 1)
+    mat = np.full((n, len(rec.keys)), np.nan)
+    for f in range(n):
+        a, b = int(off[f]), int(off[f + 1])
+        mat[f, keys[a:b].astype(int)] = vals[a:b]
+    return [k["name"] for k in rec.keys], mat
+
+
+def rig_input_errors(gen: Take, truth: Take, n: int, tol=1e-3):
+    """What the animation graph hands the foot IK of the Control Rig (GetControlRigInput: FootLeft/RightLocation and Rotation) in the two takes.
+    Empty when a take has no such reads (a recording made before the recorder could call the function)."""
+    gn, gm = read_matrix(gen.rec, n)
+    tn, tm = read_matrix(truth.rec, n)
+    gi = {k: i for i, k in enumerate(gn)}
+    m = min(len(gm), len(tm))
+    out = {}
+    for i, name in enumerate(tn):
+        if not name.startswith(RIG_PREFIX) or name not in gi:
+            continue
+        a, b = tm[:m, i], gm[:m, gi[name]]
+        ok = ~np.isnan(a) & ~np.isnan(b)
+        if not ok.any():
+            continue
+        d = np.abs(a[ok] - b[ok])
+        out[name[len(RIG_PREFIX):]] = {"max": float(d.max()), "rms": float(np.sqrt((d ** 2).mean())), "frames_over_tol": int((d > tol).sum()), "frames": int(ok.sum())}
+    return out
+
+
 def segment_table(seg_info, n, columns: dict):
     rows = []
     for s in seg_info:
@@ -229,6 +266,10 @@ def compare(gen_path, truth_path, seg_path=None, verbose=True):
         names = truth.rec.curve_names
         res["curves"]["worst"] = {"frame": int(worst[0]), "curve": names[worst[1]] if worst[1] < len(names) else int(worst[1])}
 
+    rig = rig_input_errors(gen, truth, n)
+    if rig:
+        res["rig_input"] = rig
+
     # --- by route segment
     if seg_path:
         info = json.loads(Path(seg_path).read_text(encoding="utf-8"))
@@ -281,6 +322,12 @@ def fmt_md(res) -> str:
         bad = [(p, f["max"], f["rms"]) for p, f in fields.items() if f["kind"] == "num" and f["max"] > 1e-3]
         L.append("")
         L.append(f"pushed to the movement component, seen at {ch}: " + ("; ".join(f"{p.split('.',1)[1]} max {m:.4g} rms {r:.3g}" for p, m, r in sorted(bad, key=lambda x: -x[1])) or "all equal"))
+    if res.get("rig_input"):
+        r = res["rig_input"]
+        worst = sorted(r.items(), key=lambda kv: -kv[1]["max"])[:4]
+        L.append("")
+        L.append(f"Control Rig input (GetControlRigInput, {len(r)} values): {sum(1 for v in r.values() if v['frames_over_tol'])} off; worst "
+                 + "; ".join(f"{k} max {v['max']:.4g} rms {v['rms']:.3g} ({v['frames_over_tol']} frames over 1e-3)" for k, v in worst))
     if res.get("segments"):
         L.append("")
         L.append("| segment | frames | location error cm | velocity err | speed err | pose cm | pose deg |")

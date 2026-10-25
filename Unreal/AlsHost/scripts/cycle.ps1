@@ -34,4 +34,17 @@ foreach ($t in $Takes.Split(',')) {
     python -I @args_ | Out-Null
 }
 python -I (Join-Path $PSScriptRoot 'summarize_takes.py') (Join-Path $Out 'cmp_')
+# The truth takes were recorded before the recorder could call GetControlRigInput.  The original ALS recorded again with the current recorder (G:\DCC\AlsTruth\rig, same
+# routes, rendered offscreen) has those reads: against it the foot IK input of the graph is compared too (and the pose, with the run-to-run noise of the original in it).
+$rigRef = Join-Path $truth 'rig'
+if (Test-Path $rigRef) {
+    foreach ($t in $Takes.Split(',')) {
+        $ref = Join-Path $rigRef "als_$t.dvrec"
+        if ($t -eq 'ragdoll' -or -not (Test-Path $ref)) { continue }
+        python -I (Join-Path $PSScriptRoot 'compare_takes.py') (Join-Path $Out "takes\als_$t.dvrec") $ref --json (Join-Path $Out "rig_$t.json") --md (Join-Path $Out "rig_$t.md") | Out-Null
+    }
+    Write-Host "against the original recorded with the current recorder (G:\DCC\AlsTruth\rig):"
+    python -I (Join-Path $PSScriptRoot 'summarize_takes.py') (Join-Path $Out 'rig_')
+}
+if (Test-Path (Join-Path $Out 'ragdoll_cmp.md')) { Get-Content (Join-Path $Out 'ragdoll_cmp.md') }
 if ($WithC3) { python -I (Join-Path $PSScriptRoot 'c3_host_compare.py') --set als_ext --out (Join-Path $Out 'c3') }
