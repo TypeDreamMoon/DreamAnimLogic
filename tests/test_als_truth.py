@@ -45,6 +45,7 @@ logic AlsAnimationInstance;
 state Jumps: int;
 state Snapshots: int;
 pub method Jump() { Jumps += 1; }
+pub method MarkTeleportedAt(Time: float) { Jumps += 0; }
 pub method SnapshotFinalRagdollPose() { Snapshots += 1; }
 update(dt) { Jumps += 0; }
 """
