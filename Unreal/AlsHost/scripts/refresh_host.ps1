@@ -16,4 +16,8 @@ python Unreal\AlsHost\host_als.py apply --gen $Gen --host $Host_
 # DalHost.h in the plugin is a copy of the compiler's (the event router must be one object; tests/test_dalruntime.py checks they agree)
 Copy-Item (Join-Path $repo 'dal\cpp\DalHost.h') (Join-Path $repo 'Unreal\DalRuntime\Source\DalRuntime\Public\DalHost.h') -Force
 robocopy (Join-Path $repo 'Unreal\DalRuntime') (Join-Path $Host_ 'Plugins\DalRuntime') /MIR /XD Binaries Intermediate /NFL /NDL /NJH /NJS /NP | Out-Null
+# robocopy keeps the time stamps of the sources.  UBT decides what to recompile by comparing them with the time stamps of its objects, so a revision whose headers are
+# OLDER than the objects of the build before (an older commit, an archive: git archive stamps the files with the commit time) is taken for up to date and the module keeps the
+# objects of the other revision (a DalHost.h whose FHit / FCommand changed then crashes the router at run time).  The sources of the plugin are touched: the module recompiles.
+Get-ChildItem (Join-Path $Host_ 'Plugins\DalRuntime\Source') -Recurse -File | ForEach-Object { $_.LastWriteTime = Get-Date }
 if (-not $NoBuild) { & (Join-Path $PSScriptRoot 'build_host.ps1') -Project (Join-Path $Host_ 'DreamAnimTestHost.uproject') }
