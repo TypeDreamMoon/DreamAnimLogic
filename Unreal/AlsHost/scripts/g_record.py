@@ -13,7 +13,12 @@
 #     other takes are untouched, so their routes are still the ones of the original truth takes.
 # R1_ORIGINAL=1 runs the same driver against the ORIGINAL ALS (host_als.py restore; B_Als_Character is the pawn): no game mode override, the driver's
 # calls go straight to the character.  That is how the ragdoll take of the original and the original's takes with the current recorder are made.
-# Environment: as r1_record.py (R1_TAKES, R1_OUT, R1_RES, R1_SUFFIX, R1_TRUTH), and R1_ORIGINAL.
+# R1_PHASE=<json from phase_ref.py> starts each take with the animation instance at the same point of its 160-frame loop as the reference take did:
+# the pose of a run depends on how many animation updates the instance had before the first recorded frame (Anim.UpdateCounter), because the idle
+# and the locomotion loops of the graph run for 160 frames (2.67 s) -- two runs whose counters differ by a multiple of 160 give the same pose to
+# 0.00-0.15 cm, whatever else differs, and otherwise they differ by up to 2.4 cm.  The wait is added before the recorder starts.  (The counter is
+# not readable from Python; at a fixed 60 fps it is the world time in frames minus one or two, so the wait goes by the world time.)
+# Environment: as r1_record.py (R1_TAKES, R1_OUT, R1_RES, R1_SUFFIX, R1_TRUTH), and R1_ORIGINAL, R1_RENDERED, R1_PHASE, R1_PHASE_OFFSET.
 import os
 import sys
 
@@ -25,6 +30,9 @@ from harness import Wait, log
 R1 = TOOLS + "/r1_record.py"
 ORIGINAL = os.environ.get("R1_ORIGINAL", "0") == "1"
 RENDERED = os.environ.get("R1_RENDERED", "0") == "1"
+PHASE_FILE = os.environ.get("R1_PHASE", "")
+PHASE_OFFSET = int(os.environ.get("R1_PHASE_OFFSET", "0"))       # updates between the wait's check and the first recorded frame (a constant of the driver; see phase_ref.py)
+PHASE_LOOP = 160
 GAME_MODE = "/Script/DreamAnimTestHost.DalAlsHostGameMode"
 LOGIC_CLASS = "AlsCharacter"
 # what the driver calls on the character and AAlsCharacter had (the generated component has them as BlueprintCallable methods)
@@ -112,6 +120,23 @@ def add_ragdoll_take(src):
     return src
 
 
+def add_phase_alignment(src):
+    """The driver source with a wait before the recorder starts: until the animation instance's update counter is where the reference take's was."""
+    anchor = '    rec = ar.start(WATCH, entry="AB_Als", mesh=mesh,'
+    if src.count(anchor) != 1:
+        raise RuntimeError("r1_record.py has changed: anchor not found once: " + anchor)
+    return src.replace(anchor, '    yield Wait(until=lambda: _phase_aligned(mesh, name), timeout=30)' + chr(10) + anchor)
+
+
+def phase_aligned(mesh, take):
+    import json
+    ref = json.load(open(PHASE_FILE, encoding="utf-8")).get(take)
+    if ref is None:
+        return True
+    frames = int(round(unreal.GameplayStatics.get_time_seconds(mesh.get_world()) * 60.0))
+    return (frames - int(ref) + PHASE_OFFSET) % PHASE_LOOP == 0
+
+
 def load_driver():
     src = open(R1, encoding="utf-8").read()
     tail = "run(steps)"
@@ -119,7 +144,10 @@ def load_driver():
         raise RuntimeError("r1_record.py does not end with run(steps)")
     src = src.rstrip()[: -len(tail)]
     src = add_ragdoll_take(src)
+    if PHASE_FILE:
+        src = add_phase_alignment(src)
     ns = {"__name__": "r1_record_generated", "__file__": R1}
+    ns["_phase_aligned"] = phase_aligned
     exec(compile(src, R1, "exec"), ns)
     ns["unreal"] = _UnrealShim()
 

@@ -7,7 +7,9 @@ param(
     [int]$TimeoutMinutes = 40,
     [string]$Truth = '1',
     [string]$Map = '/Game/DreamVEdTest/Maps/L_DreamVEd_AlsRecord',
-    [switch]$Rendered                      # with a renderer, without a window (the original ALS needs one, see run_editor.ps1)
+    [switch]$Rendered,                     # with a renderer, without a window (the original ALS needs one, see run_editor.ps1)
+    [string]$Phase = '',                   # phase.json (phase_ref.py): start each take at the same point of the graph's 160-frame loops as the reference take
+    [int]$PhaseOffset = 0                  # the driver's constant (see g_record.py R1_PHASE_OFFSET)
 )
 # Records takes of the truth routes (G:\DCC\AlsTruth\tools\r1_record.py) with the generated ALS logic: starts the host editor without a window
 # (-nullrhi, hidden, below-normal priority) at a fixed 60 fps like launch_editor.ps1 did for the original takes.  g_record.py keeps the mesh ticking
@@ -15,6 +17,8 @@ param(
 # Takes: smoke, lane, speed_jumps, stance_changes, rotation_modes, view_yaw_sweeps, in_air, view_mode, roll, mantle, features (comma separated).
 # Files: <Out>\als_<take><Suffix>.dvrec
 $env:R1_RENDERED = if ($Rendered) { '1' } else { '0' }
+$env:R1_PHASE = $Phase
+$env:R1_PHASE_OFFSET = "$PhaseOffset"
 $env:R1_TAKES = $Takes
 $env:R1_SUFFIX = $Suffix
 $env:R1_OUT = $Out
