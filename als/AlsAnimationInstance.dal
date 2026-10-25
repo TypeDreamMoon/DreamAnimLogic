@@ -49,7 +49,6 @@ input CustomTimeDilation: float <- host.actor_time_dilation;              // AI:
 input RealDeltaTime: float <- host.real_delta_time;                       // AI:115   GetWorld()->DeltaRealTimeSeconds
 
 // ---- the pose of the previous evaluation, read by the foot lock (AI:1245-1295, :1307) ------------------------------------------------
-input MeshTransform: transform <- host.mesh_world_transform;              // AI:1307  Proxy.GetComponentTransform(): the mesh component, now
 input PelvisBoneTransform: transform <- host.bone_component_transform("pelvis");         // AI:1250  GetSocketTransform(pelvis, RTS_Component)
 input FootLeftIkBoneTransform: transform <- host.bone_world_transform("ik_foot_l");      // AI:1279  bUseFootIkBones: GetSocketTransform(ik_foot_l)
 input FootRightIkBoneTransform: transform <- host.bone_world_transform("ik_foot_r");     // AI:1288
@@ -881,8 +880,11 @@ method refresh_feet(dt: float) {                                                
     FeetState.FootPlantedAmount = clamp(CurveFootPlanted, -1.0, 1.0);                                // AI:1304
     FeetState.FeetCrossingAmount = clamp01(CurveFeetCrossing);                                       // AI:1305
 
-    var context = AlsFootUpdateContext(ComponentTransform: MeshTransform,                            // AI:1307-1313 (Proxy.GetComponentTransform())
-                                       ComponentTransformInverse: inverse(MeshTransform),
+    // The transform the proxy cached (not the mesh's of the moment: while root motion moves the character, the proxy has been re-cached after the move
+    // for the evaluation and the update sees that one -- a whole frame of travel apart).
+    let proxy_transform = host.proxy_component_transform();                                          // AI:1307
+    var context = AlsFootUpdateContext(ComponentTransform: proxy_transform,                          // AI:1307-1313 (Proxy.GetComponentTransform())
+                                       ComponentTransformInverse: inverse(proxy_transform),
                                        FrameTime: dt);
 
     context.IkAmount = clamp01(CurveFootLeftIk);                                                     // AI:1316
@@ -1019,7 +1021,7 @@ view refresh_foot_lock(foot: AlsFootState, context: AlsFootUpdateContext) -> Als
     foot_state.LockLocation = transform_position(context.ComponentTransformInverse, foot_state.LockLocationWorldSpace);   // AI:1512
     foot_state.LockRotation = transform_rotation(context.ComponentTransformInverse, foot_state.LockRotationWorldSpace);
 
-    foot_state = constrain_foot_lock(foot_state);                                                    // AI:1515
+    foot_state = constrain_foot_lock(foot_state, context.ComponentTransform);                                                  // AI:1515
 
     let final_location = lerp(foot_state.TargetLocationWorldSpace, foot_state.LockLocationWorldSpace, foot_state.LockAmount);   // AI:1517
 
@@ -1030,7 +1032,7 @@ view refresh_foot_lock(foot: AlsFootState, context: AlsFootUpdateContext) -> Als
     return foot_state;
 }
 
-view constrain_foot_lock(foot: AlsFootState) -> AlsFootState {                                       // AI:1526
+view constrain_foot_lock(foot: AlsFootState, proxy_transform: transform) -> AlsFootState {            // AI:1526  (proxy_transform: Proxy.GetComponentTransform(), AI:1542)
     var foot_state = foot;
 
     // Limit the location of the locked foot to prevent legs from twisting into a spiral when the character rotates quickly.
@@ -1044,9 +1046,8 @@ view constrain_foot_lock(foot: AlsFootState) -> AlsFootState {                  
         foot_state.LockLocation = rotate(offset_rotation, foot_state.LockLocation);                  // AI:1538
         foot_state.LockRotation = normalize(offset_rotation * foot_state.LockRotation);              // AI:1539
 
-        // The proxy's component transform of the worker thread (AI:1542) is the one of the game thread.
-        foot_state.LockLocationWorldSpace = transform_position(MeshTransform, foot_state.LockLocation);   // AI:1544
-        foot_state.LockRotationWorldSpace = transform_rotation(MeshTransform, foot_state.LockRotation);
+        foot_state.LockLocationWorldSpace = transform_position(proxy_transform, foot_state.LockLocation);   // AI:1544
+        foot_state.LockRotationWorldSpace = transform_rotation(proxy_transform, foot_state.LockRotation);
 
         // (AI:1547-1555: the lock in the space of the movement base, dead without moving bases.)
     }
