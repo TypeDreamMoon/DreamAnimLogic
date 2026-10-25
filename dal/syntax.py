@@ -218,6 +218,8 @@ class LogicDecl(Decl):
     order: list = field(default_factory=list)      # `logic X : actor before Peer, after Other;` -- (relation, peer name, position) in source order
     flush_peers: bool = False        # `logic X : actor flush_peers;` -- the commands a peer queued in the calls of a block run with the block's own, at its end
     flush_peers_pos: Pos | None = None
+    sync_events: bool = False        # `logic X : sync_events;` -- the hooks and notifies the host raises are handled when it raises them, not at the start of a slot / update
+    sync_events_pos: Pos | None = None
 
 
 @dataclass

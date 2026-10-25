@@ -480,6 +480,9 @@ def run_system(modules: dict[str, ir.Module], frames: list[dict], backend: str =
             for ev in f.get("step_events", {}).get(si, []):          # events that arrive between two steps (the movement component raised them)
                 for host_name, host in hosts.items():
                     event = tuple(ev)
+                    if modules[host_name].sync_events:                    # `sync_events`: the logic handles it now
+                        objs[host_name].receive_event(event)
+                        continue
                     host.events.append(event)
                     raised[host_name].append(event)
             if slot is None:

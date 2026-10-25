@@ -484,6 +484,10 @@ class Checker:
                 h = self.check_handler(d)
                 if h is not None:
                     m.handlers.append(h)
+        logic = logics[0] if logics else None
+        if logic is not None and logic.sync_events and not any(h.event in HOOK_EVENTS or (h.params and getattr(h.params[0][1], "is_notify", False)) for h in m.handlers):
+            self.focus(logic)
+            self.warn("DAL5097", "sync_events handles the character's hooks and the declared notifies when they arrive, and this logic has no handler for either", logic.sync_events_pos or logic.pos)
         self.source = self.main_source
         if not m.is_library and m.update is None and not m.entries and not m.handlers and m.linked is None and m.post_update is None:
             self.warn("DAL5091", "the logic has no 'update', no 'entry' and no 'on' handler; it never changes anything", Pos(1, 1, 2))
@@ -650,6 +654,7 @@ class Checker:
         m = self.module
         self.focus(logic)
         m.slot_events = logic.slot_events
+        m.sync_events = logic.sync_events
         m.flush_peers = logic.flush_peers
         if logic.flush_peers and not any(i.kind == "actor" for i in self.peer_ifaces.values()):
             self.warn("DAL5096", "flush_peers hands over the commands that the actor peers queue in the calls of a block, and this logic has no actor peer", logic.flush_peers_pos or logic.pos)

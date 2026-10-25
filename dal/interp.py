@@ -314,6 +314,8 @@ class Interpreter:
         self.unresolved: set[str] = set()                                  # peers that were used but not connected
         self._dt = 0.0
         self._pending: list[tuple] = []
+        self._now: list[tuple] = []                      # sync_events: events raised while an event was being handled
+        self._in_now = False
         self._cmds: list[tuple] = []
         self._peer_queue: list[tuple] = []
         self._begun = False
@@ -394,6 +396,25 @@ class Interpreter:
 
     def post_event(self, kind: str, name: str, *args) -> None:
         self._pending.append((kind, name) + args)
+
+    def receive_event(self, event: tuple) -> None:
+        """`sync_events`: the host raised an event (a hook, a declared notify) and the logic handles it now, in the middle of whatever the host is
+        doing: sample the inputs, run the handlers, hand the commands over.  An event raised while a handler's commands run waits for that handler."""
+        self._now.append(tuple(event))
+        if self._in_now:
+            return
+        self._in_now = True
+        try:
+            while self._now:
+                ev = self._now.pop(0)
+                self._ensure_begun()
+                if self.module.kind == "actor":                       # (an animation logic does not sample: its update may be in flight on a worker thread)
+                    self.sample_inputs("__event__")
+                self._dispatch([ev])
+                if not self.module.post_flush:
+                    self.flush()
+        finally:
+            self._in_now = False
 
     def _collect_events(self) -> list[tuple]:
         events, self._pending = self._pending, []

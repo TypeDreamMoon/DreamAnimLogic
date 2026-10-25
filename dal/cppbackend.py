@@ -808,6 +808,7 @@ class CppGen:
         self.hook_handlers = [h for h in module.handlers if h.event in HOOK_EVENTS]
         self.notify_handlers = [h for h in module.handlers if h.params and isinstance(h.params[0][1], StructType) and h.params[0][1].is_notify]
         self.hook_slots = [u.phase for u in module.updates if u.phase in ir.HOOK_SLOTS]            # slots the movement component runs itself (DalRunHook)
+        self.sync_events = bool(module.sync_events and (self.hook_handlers or self.notify_handlers))     # DalReceiveEvent handles the event at once
         self.sink = bool(self.hook_handlers or self.notify_handlers or self.hook_slots)     # the class receives events through DalHost::FEventRouter (hooks, declared notifies, hook slots)
         self.post = module.kind == "anim" and (module.post_update is not None or module.post_flush)   # a proxy hook runs post_update (and flushes the commands)
         self.post_flush = module.kind == "anim" and module.post_flush
@@ -815,7 +816,7 @@ class CppGen:
         self.begin_handlers = [k for k, h in enumerate(module.handlers) if h.event == "begin_play"]
         self.end_handlers = [k for k, h in enumerate(module.handlers) if h.event == "end_play"]
         self.phased = module.phases_explicit or len(module.updates) > 1
-        self.consume_only = module.consume_slots() if self.phased else None   # the slots that sample the consume-on-read inputs (None: all)
+        self.consume_only = module.consume_slots() if (self.phased or module.sync_events) else None   # the slots that sample the consume-on-read inputs (None: all)
         self.slots = [u.phase for u in module.updates] or [module.default_phase]
         self.queue_target = module.kind == "anim" and any(x.pub and not x.is_view for x in module.methods)
         self.has_cmds = bool(self.cmds) or module.flush_peers
@@ -1112,6 +1113,11 @@ class CppGen:
             out.append(Method("void", "DalReceiveEvent", "const DalHost::FEvent& DalEvent", def_params="const DalHost::FEvent& DalEvent",
                               body=self.receive_body(), override=True, access="public",
                               doc="Called through DalHost::FEventRouter::Post: the hooks of the character and the notify classes of the program."))
+            if self.sync_events:
+                out.append(Method("void", "DalHandleEventNow", "const DalHost::FEvent& DalEvent", def_params="const DalHost::FEvent& DalEvent",
+                                  body=self.handle_now_body(),
+                                  doc="sync_events: the event is handled now, in the middle of whatever the engine is doing (inputs sampled, handlers, commands run); "
+                                      "one raised by the commands of a handler waits for it."))
         # ---- post_update
         if self.post:
             u = m.post_update
@@ -1462,13 +1468,40 @@ class CppGen:
             out.append("}")
         return out
 
+    def handle_now_body(self) -> list[str]:
+        """DalHandleEventNow: sample, dispatch the one event, hand the commands over -- not re-entrant (an event raised meanwhile is handled after this one)."""
+        flush = ["\t\tDalFlushCommands();"] if (self.has_cmds and not self.post_flush) else []
+        sample = []                                                       # an animation logic does not sample: its update is in flight on a worker thread, or just done with the inputs
+        if self.actor:
+            sample = [("\tDalSampleInputs(MAX_int32);                // (a slot that consumes nothing: the update blocks keep what they read once)" if self.consume_only is not None
+                       else "\tDalSampleInputs();")]
+        return ["DalNowEvents.Add(DalEvent);",
+                "if (bDalInEvent)",
+                "{",
+                "\treturn;                                   // raised by the commands of the event being handled: handled right after it",
+                "}",
+                "bDalInEvent = true;",
+                "for (int32 DalIndex = 0; DalIndex < DalNowEvents.Num(); ++DalIndex)",
+                "{",
+                "\tconst DalHost::FEvent DalNext = DalNowEvents[DalIndex];",
+                *sample,
+                "\tTArray<DalHost::FEvent> DalOuter = MoveTemp(DalFrameEvents);",
+                "\tDalFrameEvents.Reset();",
+                "\tDalFrameEvents.Add(DalNext);",
+                "\tDalDispatchEvents();",
+                "\tDalFrameEvents = MoveTemp(DalOuter);",
+                *flush,
+                "}",
+                "DalNowEvents.Reset();",
+                "bDalInEvent = false;"]
+
     def receive_body(self) -> list[str]:
         """DalReceiveEvent: queue an event the router posted.  The events of a notify class carry its declared name: they are queued
         under the id this logic gave it (and dropped when the logic does not handle that notify)."""
         if not self.has_events:
             return ["static_cast<void>(DalEvent);                    // (this logic only has hook slots: nothing to queue)"]
         if not self.notify_handlers:
-            return ["DalPostEvent(DalEvent);"]
+            return ["DalHandleEventNow(DalEvent);"] if self.sync_events else ["DalPostEvent(DalEvent);"]
         return ["DalHost::FEvent DalQueued = DalEvent;",
                 "if (DalQueued.Source != nullptr)",
                 "{",
@@ -1478,7 +1511,7 @@ class CppGen:
                 "\t\treturn;",
                 "\t}",
                 "}",
-                "DalPostEvent(DalQueued);"]
+                "DalHandleEventNow(DalQueued);" if self.sync_events else "DalPostEvent(DalQueued);"]
 
     def dispatch_body(self) -> list[str]:
         m = self.m
@@ -2445,6 +2478,9 @@ class CppGen:
             if self.has_events:
                 L.append(f"{T}TArray<DalHost::FEvent> DalEventQueue;           // posted by the host callbacks")
                 L.append(f"{T}TArray<DalHost::FEvent> DalFrameEvents;          // taken for the running update")
+                if self.sync_events:
+                    L.append(f"{T}TArray<DalHost::FEvent> DalNowEvents;            // sync_events: the events being handled right now, in order")
+                    L.append(f"{T}bool bDalInEvent = false;")
             if self.has_cmds:
                 L.append(f"{T}TArray<DalHost::FCommand> DalCommandQueue;       // queued by the update, run on the game thread")
             if self.actor and self.bind_anim:
@@ -2865,6 +2901,9 @@ class CppGen:
         if self.has_events:
             reset.append(f"{T}DalEventQueue.Reset();")
             reset.append(f"{T}DalFrameEvents.Reset();")
+            if self.sync_events:
+                reset.append(f"{T}DalNowEvents.Reset();")
+                reset.append(f"{T}bDalInEvent = false;")
         if self.has_cmds:
             reset.append(f"{T}DalCommandQueue.Reset();")
         if self.queue_target:
@@ -3024,8 +3063,8 @@ class CppGen:
         if self.uses(*_CONSUME_ITEMS):
             gate = ""
             if self.consume_only is not None:                                 # tick slots that do not read it leave it to the ones that do
-                slots = " || ".join(f"Phase == {self.slots.index(s)}" for s in self.consume_only)
-                L.append(f"{T}const bool bDalConsume = Phase < 0 || {slots};")
+                slots = "".join(f" || Phase == {self.slots.index(s)}" for s in self.consume_only)
+                L.append(f"{T}const bool bDalConsume = Phase < 0{slots};")
                 gate = "bDalConsume && "
             L += [f"{T}// consume-on-read: the movement component hands the pre-penetration velocity out once (DalRuntime)",
                   f"{T}FVector DalPrePenetration = FVector::ZeroVector;",

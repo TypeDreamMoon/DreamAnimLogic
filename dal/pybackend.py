@@ -517,6 +517,8 @@ class PyGen:
             L.append(f"{INDENT}DAL_POST_FLUSH = True")
         if m.slot_events:
             L.append(f"{INDENT}DAL_SLOT_EVENTS = True")
+        if m.sync_events:
+            L.append(f"{INDENT}DAL_SYNC_EVENTS = True")
         if m.flush_peers:
             L.append(f"{INDENT}DAL_FLUSH_PEERS = True")
         if m.order:
@@ -623,6 +625,12 @@ class PyGen:
         if not bound and not peered:
             L.append(f"{INDENT*2}pass")
         L.append("")
+
+        if only is not None:
+            L.append(f"{INDENT}def _sample_event(self):")
+            L.append(f'{INDENT*2}"""sync_events: an event handled at once samples what no tick slot consumes."""')
+            L.append(f"{INDENT*2}self._sample('__event__')")
+            L.append("")
 
         # ---- the update: one block (as in every earlier version) or one block per tick slot
         def block_lines(u, first: bool, depth: int, phase_name: str | None = None) -> list[str]:

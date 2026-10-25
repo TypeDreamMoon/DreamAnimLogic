@@ -473,6 +473,7 @@ class Module:
     post_update: "UpdateDef | None" = None                      # anim logic: the block that runs after the graph update (game thread)
     post_flush: bool = False                                    # anim logic: its commands run right after the post_update of the same frame
     slot_events: bool = False                                   # actor logic: events are handled at the start of every tick slot
+    sync_events: bool = False                                   # the hooks and declared notifies the host raises are handled when it raises them (receive_event)
     flush_peers: bool = False                                   # actor logic: the commands the called peers queue run with this logic's own at the end of its block
     order: list[OrderDef] = field(default_factory=list)         # actor logic: tick slot order against peers
     methods: list[MethodDef] = field(default_factory=list)      # methods and views, in source order
@@ -534,15 +535,15 @@ class Module:
 
         slots = [u.phase for u in self.updates] or [self.default_phase]
         consume = {i.name for i in self.inputs if i.host is not None and HOST_ITEMS[i.host.item].consume}
-        if len(slots) < 2 or not consume:
+        if (len(slots) < 2 and not self.sync_events) or not consume:
             return None
         events = [h.body for h in self.handlers if h.event not in ("begin_play", "end_play")]
         reading: list[str] = []
         for k, u in enumerate(self.updates):
-            bodies = [u.body, u.pre] + (events if k == 0 or self.slot_events else [])
+            bodies = [u.body, u.pre] + (events if (k == 0 or self.slot_events) and not self.sync_events else [])      # (sync_events: the handlers run when the event arrives, with a sample that consumes nothing)
             if self.input_reads(bodies) & consume:
                 reading.append(u.phase)
-        return tuple(reading) if len(reading) < len(slots) else None
+        return tuple(reading) if (len(reading) < len(slots) or self.sync_events) else None
 
     def find_peer(self, name: str) -> "PeerDef | None":
         return next((p for p in self.peers if p.name == name), None)
@@ -761,7 +762,7 @@ def dump_stmts(stmts: list[Stmt], indent: int = 1) -> list[str]:
 
 def dump(m: Module) -> str:
     out = [f"library {m.name}" if m.is_library else f"logic {m.name}" + (f" : {m.kind}" if m.kind != "anim" else "") + (" post_flush" if m.post_flush else "")
-           + (" slot_events" if m.slot_events else "") + (" flush_peers" if m.flush_peers else "") + "".join(f" {o.relation} {o.peer}" for o in m.order)]
+           + (" slot_events" if m.slot_events else "") + (" sync_events" if m.sync_events else "") + (" flush_peers" if m.flush_peers else "") + "".join(f" {o.relation} {o.peer}" for o in m.order)]
     for lib in m.libs:
         out.append(f"use {lib.filename!r}")
     for en in m.enums:

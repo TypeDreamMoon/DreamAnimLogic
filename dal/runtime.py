@@ -1457,6 +1457,7 @@ class LogicBase:
     DAL_PHASES: tuple = ()        # tick slots of the logic (empty: one update)
     DAL_POST_FLUSH = False        # anim logic with `post_flush`: update() and the entries leave the commands queued; post_update() hands them over
     DAL_SLOT_EVENTS = False       # actor logic with `slot_events`: the events are handled at the start of every tick slot, not only the first
+    DAL_SYNC_EVENTS = False       # logic with `sync_events`: receive_event() handles an event the host raises at once
     DAL_ORDER: tuple = ()         # actor logic: (relation, peer, peer logic, slots) -- in these tick slots the block runs 'before' / 'after' the peer's
     DAL_FLUSH_PEERS = False       # actor logic with `flush_peers`: the commands a peer queued in the calls of a block run when this logic hands its own over
 
@@ -1474,6 +1475,8 @@ class LogicBase:
         self._dt = 0.0
         self._source = None           # the montage instance that raised the notify being handled (montage_stop_source)
         self._pending: list = []      # events posted by the caller
+        self._now: list = []          # sync_events: events raised while an event was being handled
+        self._in_now = False
         self._cmds: list = []         # commands queued during the update
         self._called: list = []       # `flush_peers`: the peers whose pub methods this logic called since it last handed its commands over
         known = {p[0] for p in self.DAL_PARAMS}
@@ -1553,6 +1556,31 @@ class LogicBase:
     def post_event(self, kind: str, name: str, *args) -> None:
         """Tell the logic that something happened; its ``on`` handlers run at the start of the next update."""
         self._pending.append((kind, name) + args)
+
+    def receive_event(self, event: tuple) -> None:
+        """`sync_events`: the host raised an event (a hook, a declared notify) and the logic handles it now, in the middle of whatever the host is
+        doing: sample the inputs, run the handlers, hand the commands over.  An event raised while a handler's commands run waits for that handler."""
+        self._now.append(tuple(event))
+        if self._in_now:
+            return
+        self._in_now = True
+        try:
+            while self._now:
+                ev = self._now.pop(0)
+                begin = getattr(self, "begin_play", None)
+                if begin is not None and not getattr(self, "_begun", True):
+                    begin()
+                if self.DAL_KIND == "actor":                          # (an animation logic does not sample: its update may be in flight on a worker thread)
+                    self._sample_event()
+                self._dispatch([ev])
+                if not self.DAL_POST_FLUSH:
+                    self._flush()
+        finally:
+            self._in_now = False
+
+    def _sample_event(self) -> None:
+        """Sample the inputs for an event handled at once (the generated class passes a slot that consumes nothing)."""
+        self._sample()
 
     def _collect_events(self) -> list:
         events, self._pending = self._pending, []
