@@ -297,7 +297,7 @@ class QueryCppTests(unittest.TestCase):
         self.assertIn("TArray<TEnumAsByte<ECollisionChannel>> Resp;", h)
         self.assertIn("DalResponseParams.CollisionResponse.SetResponse(DalBlocking, ECR_Block);", cpp)
         self.assertIn("FCollisionShape::MakeCapsule(DalRadius, DalHalfHeight), DalParams, DalResponseParams);", cpp)
-        self.assertIn("OverlapBlockingTestByChannel(FVector(DalCenter), FQuat::Identity, DalChannel", cpp)
+        self.assertIn("OverlapBlockingTestByChannel(DalCenter, FQuat::Identity, DalChannel", cpp)
         self.assertIn("DalResult.Primitive = DalHit.GetComponent();", cpp)
         self.assertIn("Spd = DalPrimitiveSpeed(Prim);", cpp)
         self.assertIn("FCollisionQueryParams DalParams(SCENE_QUERY_STAT(DalTrace), false, GetOwner());", cpp)

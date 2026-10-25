@@ -42,6 +42,7 @@ from .types import (
     BOOL,
     CHANNEL,
     CHANNEL_SET,
+    DOUBLE,
     FLOAT,
     HIT,
     INT,
@@ -49,13 +50,18 @@ from .types import (
     MONTAGE_ASSET,
     NAME_T,
     NONE_T,
+    QUATD,
+    ROTATORD,
     SPRING,
     SPRING3,
     TRANSFORM,
+    TRANSFORMD,
     QUAT,
     ROTATOR,
     VEC2,
+    VEC2D,
     VEC3,
+    VEC3D,
     ArrayType,
     AssetType,
     EnumType,
@@ -68,7 +74,7 @@ from .types import (
 
 _SCENE_QUERIES = ("sweep_capsule", "sweep_sphere", "line_trace", "overlap_capsule")          # the v3 queries that ask the physics scene
 _COMPONENT_QUERIES = ("primitive_valid", "primitive_speed", "primitive_can_step_up", "primitive_transform")
-_NEW_HIT_MEMBERS = ("location", "start_penetrating", "primitive", "face_normal")
+_NEW_HIT_MEMBERS = ("location", "start_penetrating", "primitive", "face_normal", "point_d", "location_d")
 
 T = "\t"
 
@@ -94,7 +100,8 @@ KIND_PARENT = {
 
 TRANSFORM_GETTER = {"location": "GetLocation", "rotation": "GetRotation", "scale": "GetScale3D"}
 HIT_MEMBER_CPP = {"blocking": "bBlocking", "point": "Point", "normal": "Normal", "distance": "Distance", "time": "Time",
-                  "location": "Location", "start_penetrating": "bStartPenetrating", "primitive": "Primitive", "face_normal": "FaceNormal"}
+                  "location": "Location", "start_penetrating": "bStartPenetrating", "primitive": "Primitive", "face_normal": "FaceNormal",
+                  "point_d": "PointD", "location_d": "LocationD"}                      # (the last two: the engine's own precision, see DalHost::FHit)
 
 
 def camel(name: str) -> str:
@@ -141,6 +148,17 @@ def fmt_float(x: float) -> str:
     return s + "f"
 
 
+def fmt_double(x: float) -> str:
+    """Shortest decimal that round-trips the double, no suffix (a C++ literal without one is a double): 0.1, 221.9, 1e-08, 3.0."""
+    x = float(x)
+    if x != x or x in (float("inf"), float("-inf")):
+        raise ValueError("non-finite double literal")
+    s = repr(x)
+    if "e" not in s and "." not in s:
+        s += ".0"
+    return s
+
+
 def unparen(s: str) -> str:
     """Drop one redundant pair of outer parentheses: '(a + b)' -> 'a + b'."""
     if not (s.startswith("(") and s.endswith(")")):
@@ -154,6 +172,14 @@ def unparen(s: str) -> str:
             if depth == 0:
                 return s[1:-1] if i == len(s) - 1 else s
     return s
+
+
+def convert_cpp(text: str, to: Type) -> str:
+    """``text`` converted to the type ``to`` of the other precision (ir.Convert, also int -> double): a scalar by ``static_cast``, the vector types
+    by the explicit constructors UE has between its float and double types (FVector3f(FVector), FVector(FVector3f) ...)."""
+    if to is FLOAT or to is DOUBLE:
+        return f"static_cast<{cpp_type(to)}>({text})"
+    return f"{cpp_type(to)}({text})"
 
 
 def cpp_type(ty: Type) -> str:
@@ -173,6 +199,18 @@ def cpp_type(ty: Type) -> str:
         return "FQuat4f"
     if ty is TRANSFORM:
         return "FTransform3f"
+    if ty is DOUBLE:
+        return "double"
+    if ty is VEC2D:
+        return "FVector2D"
+    if ty is VEC3D:
+        return "FVector"
+    if ty is ROTATORD:
+        return "FRotator"
+    if ty is QUATD:
+        return "FQuat"
+    if ty is TRANSFORMD:
+        return "FTransform"
     if ty is HIT:
         return "DalHost::FHit"
     if ty is SPRING:
@@ -329,6 +367,9 @@ def settings_member_read(text: str, owner: Type, ty: Type) -> str:
     return from_member(text, ty)
 
 
+DOUBLE_VALUES = (VEC2D, VEC3D, ROTATORD, QUATD)        # the double types whose value is the list of its components in a constructor call of its own type
+
+
 def cpp_value(ty: Type, v) -> str:
     if ty is FLOAT:
         return fmt_float(v)
@@ -346,6 +387,12 @@ def cpp_value(ty: Type, v) -> str:
         return "FQuat4f(%s)" % ", ".join(fmt_float(c) for c in v)
     if ty is TRANSFORM:
         return "FTransform3f(%s, %s, %s)" % (cpp_value(QUAT, v[1]), cpp_value(VEC3, v[0]), cpp_value(VEC3, v[2]))
+    if ty is DOUBLE:
+        return fmt_double(v)
+    if ty in DOUBLE_VALUES:
+        return "%s(%s)" % (cpp_type(ty), ", ".join(fmt_double(c) for c in v))
+    if ty is TRANSFORMD:
+        return "FTransform(%s, %s, %s)" % (cpp_value(QUATD, v[1]), cpp_value(VEC3D, v[0]), cpp_value(VEC3D, v[2]))
     if isinstance(ty, EnumType):
         return ty.cpp_members[ty.members[int(v)]]
     if isinstance(ty, StructType):
@@ -448,6 +495,8 @@ class CppExprGen:
             return e.name
         if k is ir.ToFloat:
             return f"static_cast<float>({self.x(e.x)})"
+        if k is ir.Convert:
+            return convert_cpp(unparen(self.x(e.x)), e.ty)
         if k is ir.Unary:
             return f"(!{self.x(e.x)})" if e.op == "!" else f"(-{self.x(e.x)})"
         if k is ir.Binary:
@@ -458,15 +507,12 @@ class CppExprGen:
             return self.member(e)
         if k is ir.Make:
             a = [unparen(self.x(v)) for v in e.args]
-            if e.ctor == "vec2":
-                return f"FVector2f({', '.join(a)})"
-            if e.ctor == "vec3":
-                return f"DalMath::MakeVec3({', '.join(a)})" if e.sig_index == 1 else f"FVector3f({', '.join(a)})"
-            if e.ctor == "rotator":
-                return f"FRotator3f({', '.join(a)})"
+            ctype = cpp_type(e.ty)                                  # (the precision is the type's: FVector3f or FVector ...)
+            if e.ctor == "vec3" and e.sig_index == 1:
+                return f"DalMath::MakeVec3({', '.join(a)})"
             if e.ctor == "transform":
-                return f"FTransform3f({a[1]}, {a[0]}{', ' + a[2] if len(a) > 2 else ''})"
-            return f"FQuat4f({', '.join(a)})"
+                return f"{ctype}({a[1]}, {a[0]}{', ' + a[2] if len(a) > 2 else ''})"
+            return f"{ctype}({', '.join(a)})"
         if k is ir.CallBuiltin:
             return f"DalMath::{BUILTINS[e.name].cpp}({', '.join(unparen(self.x(a)) for a in e.args)})"
         if k is ir.CallFn:
@@ -539,7 +585,7 @@ class CppExprGen:
             return f"{base}.{HIT_MEMBER_CPP[e.comps]}"
         if e.x.ty is SPRING or e.x.ty is SPRING3:
             return f"{base}.{e.comps.capitalize()}"
-        if e.x.ty is TRANSFORM:
+        if e.x.ty is TRANSFORM or e.x.ty is TRANSFORMD:
             return f"{base}.{TRANSFORM_GETTER[e.comps]}()"
         if len(e.comps) == 1 or e.comps in ("pitch", "yaw", "roll"):
             return f"{base}.{_COMP_CPP[e.comps]}"
@@ -598,10 +644,10 @@ EXEC: dict[str, tuple[list[str], list[str]]] = {
     "set_orient_rotation_to_movement": ([_G_MOVEMENT], ["DalMovement->bOrientRotationToMovement = DalCommand.B0;"]),
     "set_use_controller_desired_rotation": ([_G_MOVEMENT], ["DalMovement->bUseControllerDesiredRotation = DalCommand.B0;"]),
     "set_movement_mode": ([_G_MOVEMENT], ["DalMovement->SetMovementMode(static_cast<EMovementMode>(DalCommand.Mode));"]),        # (with a sub mode: see execute_body)
-    "root_motion_override": ([_G_MOVEMENT, _G_ALS_MOVEMENT], ["DalAlsMovement->SetRootMotionOverride(FVector(DalCommand.V), FQuat(DalCommand.Q));"]),
+    "root_motion_override": ([_G_MOVEMENT, _G_ALS_MOVEMENT], ["DalAlsMovement->SetRootMotionOverride(DalCommand.VD, DalCommand.QD);"]),
     "root_motion_clear": ([_G_MOVEMENT, _G_ALS_MOVEMENT], ["DalAlsMovement->ClearRootMotionOverride();"]),
     "set_movement_mode_locked": ([_G_MOVEMENT, _G_ALS_MOVEMENT], ["DalAlsMovement->bMovementModeLocked = DalCommand.B0;"]),
-    "set_actor_location": ([_G_PAWN], ["DalPawn->SetActorLocation(FVector(DalCommand.V), DalCommand.B0, nullptr, DalCommand.B1 ? ETeleportType::TeleportPhysics : ETeleportType::None);"]),
+    "set_actor_location": ([_G_PAWN], ["DalPawn->SetActorLocation(DalCommand.VD, DalCommand.B0, nullptr, DalCommand.B1 ? ETeleportType::TeleportPhysics : ETeleportType::None);"]),
     "set_velocity": ([_G_MOVEMENT], ["DalMovement->Velocity = FVector(DalCommand.V);"]),
     "set_anim_root_motion_translation_scale": ([_G_CHARACTER], ["DalCharacter->SetAnimRootMotionTranslationScale(DalCommand.F);"]),
     "ragdoll_begin": ([_G_PAWN, _G_RAGDOLL], ["DalRagdoll->Begin(DalCommand.B0, DalCommand.F);"]),
@@ -1595,11 +1641,11 @@ class CppGen:
         q = self.queries
         targets = [n for n in q if n.startswith("target_")]
         if "trace_line" in q:
-            out.append(Method("DalHost::FHit", "DalTraceLine", "const FVector3f& DalStart, const FVector3f& DalEnd",
+            out.append(Method("DalHost::FHit", "DalTraceLine", "const FVector& DalStart, const FVector& DalEnd",
                               doc="host.trace_line: the first blocking hit on the trace channel, the owner ignored.",
                               body=self.trace_body(False)))
         if "trace_sphere" in q:
-            out.append(Method("DalHost::FHit", "DalTraceSphere", "const FVector3f& DalStart, const FVector3f& DalEnd, const float DalRadius",
+            out.append(Method("DalHost::FHit", "DalTraceSphere", "const FVector& DalStart, const FVector& DalEnd, const float DalRadius",
                               doc="host.trace_sphere: a sphere sweep from start to end.", body=self.trace_body(True)))
         out.extend(self.new_query_methods())
         if targets:
@@ -1655,7 +1701,7 @@ class CppGen:
         q = self.queries
         chan = "const ECollisionChannel DalChannel"
         resp = "const TArray<TEnumAsByte<ECollisionChannel>>& DalResponses"
-        vec = "const FVector3f& DalStart, const FVector3f& DalEnd"
+        vec = "const FVector& DalStart, const FVector& DalEnd"
         if "sweep_capsule" in q:
             out.append(Method("DalHost::FHit", "DalSweepCapsule", f"{vec}, const float DalRadius, const float DalHalfHeight, {chan}, {resp}",
                               doc="host.sweep_capsule: a vertical capsule swept from start to end; only the listed channels block.",
@@ -1669,7 +1715,7 @@ class CppGen:
                               doc="host.line_trace: the first blocking hit on a channel, the owner ignored.", body=self.scene_body(None)))
         if "overlap_capsule" in q:
             ignore = "GetOwner()" if self.actor else "GetOwningActor()"
-            out.append(Method("bool", "DalOverlapCapsule", f"const FVector3f& DalCenter, const float DalRadius, const float DalHalfHeight, {chan}, {resp}",
+            out.append(Method("bool", "DalOverlapCapsule", f"const FVector& DalCenter, const float DalRadius, const float DalHalfHeight, {chan}, {resp}",
                               doc="host.overlap_capsule: does a vertical capsule at this center overlap anything that blocks.", body=[
                 "const UWorld* DalWorld = GetWorld();",
                 "if (DalWorld == nullptr)",
@@ -1678,7 +1724,7 @@ class CppGen:
                 "}",
                 f"FCollisionQueryParams DalParams(SCENE_QUERY_STAT(DalOverlap), false, {ignore});",
                 *self.response_lines(),
-                "return DalWorld->OverlapBlockingTestByChannel(FVector(DalCenter), FQuat::Identity, DalChannel, "
+                "return DalWorld->OverlapBlockingTestByChannel(DalCenter, FQuat::Identity, DalChannel, "
                 "FCollisionShape::MakeCapsule(DalRadius, DalHalfHeight), DalParams, DalResponseParams);"]))
         if "is_walkable" in q:
             out.append(Method("bool", "DalIsWalkable", "const DalHost::FHit& DalHit",
@@ -1779,8 +1825,7 @@ class CppGen:
         ignore = "GetOwner()" if self.actor else "GetOwningActor()"
         out = [
             "DalHost::FHit DalResult;",
-            "DalResult.Point = DalEnd;",
-            "DalResult.Location = DalEnd;",
+            *self.miss_lines(True),
             "const UWorld* DalWorld = GetWorld();",
             "if (DalWorld == nullptr)",
             "{",
@@ -1790,12 +1835,20 @@ class CppGen:
             f"FCollisionQueryParams DalParams(SCENE_QUERY_STAT(DalTrace), false, {ignore});",
         ]
         if shape is None:
-            out.append("const bool bDalBlocked = DalWorld->LineTraceSingleByChannel(DalHit, FVector(DalStart), FVector(DalEnd), DalChannel, DalParams);")
+            out.append("const bool bDalBlocked = DalWorld->LineTraceSingleByChannel(DalHit, DalStart, DalEnd, DalChannel, DalParams);")
         else:
             out += self.response_lines()
-            out.append("const bool bDalBlocked = DalWorld->SweepSingleByChannel(DalHit, FVector(DalStart), FVector(DalEnd), FQuat::Identity, "
+            out.append("const bool bDalBlocked = DalWorld->SweepSingleByChannel(DalHit, DalStart, DalEnd, FQuat::Identity, "
                        f"DalChannel, FCollisionShape::{shape}, DalParams, DalResponseParams);")
         out += ["if (bDalBlocked)", "{", "\tDalResult.bBlocking = true;"] + [f"\t{line}" for line in self.hit_lines()] + ["}", "return DalResult;"]
+        return out
+
+    def miss_lines(self, rich: bool) -> list[str]:
+        """What a trace result holds before the scene is asked (and keeps when nothing blocks): the trace end.  The positions at the precision of the
+        engine (PointD, LocationD) are filled with the rich hits (the program may read point_d / location_d)."""
+        out = ["DalResult.Point = FVector3f(DalEnd);"]
+        if rich:
+            out += ["DalResult.Location = FVector3f(DalEnd);", "DalResult.PointD = DalEnd;", "DalResult.LocationD = DalEnd;"]
         return out
 
     def hit_lines(self) -> list[str]:
@@ -1808,12 +1861,14 @@ class CppGen:
             "DalResult.bStartPenetrating = DalHit.bStartPenetrating;",
             "DalResult.Primitive = DalHit.GetComponent();",
             "DalResult.FaceNormal = FVector3f(DalHit.Normal);",
+            "DalResult.PointD = DalHit.ImpactPoint;",
+            "DalResult.LocationD = DalHit.Location;",
         ]
 
     def trace_body(self, sweep: bool) -> list[str]:
         out = [
             "DalHost::FHit DalResult;",
-            "DalResult.Point = DalEnd;",
+            *self.miss_lines(self.rich_hits),
             "const UWorld* DalWorld = GetWorld();",
             "if (DalWorld == nullptr)",
             "{",
@@ -1823,12 +1878,11 @@ class CppGen:
             "FCollisionQueryParams DalParams(SCENE_QUERY_STAT(DalTrace), false, GetOwner());",
         ]
         if sweep:
-            out.append("const bool bDalBlocked = DalWorld->SweepSingleByChannel(DalHit, FVector(DalStart), FVector(DalEnd), FQuat::Identity, "
+            out.append("const bool bDalBlocked = DalWorld->SweepSingleByChannel(DalHit, DalStart, DalEnd, FQuat::Identity, "
                        "DalTraceChannel, FCollisionShape::MakeSphere(DalRadius), DalParams);")
         else:
-            out.append("const bool bDalBlocked = DalWorld->LineTraceSingleByChannel(DalHit, FVector(DalStart), FVector(DalEnd), DalTraceChannel, DalParams);")
+            out.append("const bool bDalBlocked = DalWorld->LineTraceSingleByChannel(DalHit, DalStart, DalEnd, DalTraceChannel, DalParams);")
         if self.rich_hits:
-            out.insert(2, "DalResult.Location = DalEnd;")
             out += ["if (bDalBlocked)", "{", "\tDalResult.bBlocking = true;"] + [f"\t{line}" for line in self.hit_lines()] + ["}", "return DalResult;"]
             return out
         out += [
@@ -3119,24 +3173,31 @@ class CppGen:
             default = cpp_value(i.ty, i.default)
             name = i.name
             it = h.item
+
+            def rd(expr: str, engine_double: bool = False, ty: Type = i.ty) -> str:
+                """The engine's value ``expr`` as the type the input is declared with: the value of the engine is read as it is (no narrowing of a
+                double the program asks for, no widening of a float it asks for), the other precision gets an explicit conversion."""
+                return convert_cpp(expr, ty) if ty.is_double != engine_double else expr
+
             if it == "time":
-                L.append(f"{T}{name} = World != nullptr ? static_cast<float>(World->GetTimeSeconds()) : 0.0f;")
+                L.append(f"{T}{name} = World != nullptr ? {rd('World->GetTimeSeconds()', True)} : {cpp_value(i.ty, 0.0)};")
                 continue
             if it == "time_dilation":
-                L.append(f"{T}{name} = World != nullptr && World->GetWorldSettings() != nullptr ? World->GetWorldSettings()->GetEffectiveTimeDilation() : 1.0f;")
+                L.append(f"{T}{name} = World != nullptr && World->GetWorldSettings() != nullptr ? {rd('World->GetWorldSettings()->GetEffectiveTimeDilation()')} : {cpp_value(i.ty, 1.0)};")
                 continue
             if it == "real_delta_time":
-                L.append(f"{T}{name} = World != nullptr ? World->DeltaRealTimeSeconds : 0.0f;")
+                L.append(f"{T}{name} = World != nullptr ? {rd('World->DeltaRealTimeSeconds')} : {cpp_value(i.ty, 0.0)};")
                 continue
             if it == "mesh_scale":
-                L.append(f"{T}{name} = DalMesh != nullptr ? static_cast<float>(DalMesh->GetComponentScale().Z) : 1.0f;")
+                L.append(f"{T}{name} = DalMesh != nullptr ? {rd('DalMesh->GetComponentScale().Z', True)} : {cpp_value(i.ty, 1.0)};")
                 continue
             if it == "notify":
                 L.append(f"{T}{name} = DalNotify_{h.arg};")
                 L.append(f"{T}DalNotify_{h.arg} = false;")
                 continue
             if it == "anim_curve":
-                L.append(f"{T}{name} = DalAnim != nullptr ? DalAnim->GetCurveValue(FName(TEXT(\"{h.arg}\"))) : 0.0f;")
+                curve = rd('DalAnim->GetCurveValue(FName(TEXT("%s")))' % h.arg)
+                L.append(f"{T}{name} = DalAnim != nullptr ? {curve} : {cpp_value(i.ty, 0.0)};")
                 continue
             if it == "root_motion_mode":
                 L.append(f"{T}{name} = DalAnim != nullptr ? DalAnim->RootMotionMode.GetValue() : {default};")
@@ -3149,23 +3210,25 @@ class CppGen:
                 L.append(f"{T}}}")
                 continue
             if it in _RAGDOLL_ITEMS:                                          # the pelvis body of the ragdoll service (ALS RefreshRagdolling, StopRagdollingImplementation)
-                value = {"ragdoll_pelvis_location": "FVector3f(DalRagdoll->GetPelvisLocation())",
-                         "ragdoll_velocity": "FVector3f(DalRagdoll->GetPelvisVelocity())",
+                value = {"ragdoll_pelvis_location": rd("DalRagdoll->GetPelvisLocation()", True),
+                         "ragdoll_velocity": rd("DalRagdoll->GetPelvisVelocity()", True),
                          "ragdoll_facing_up": "DalRagdoll->IsFacingUp()"}[it]
                 L.append(f"{T}{name} = DalRagdoll != nullptr ? {value} : {default};")
                 continue
             if it == "mesh_world_transform":
-                L.append(f"{T}{name} = DalMesh != nullptr ? FTransform3f(DalMesh->GetComponentTransform()) : FTransform3f();")
+                L.append(f"{T}{name} = DalMesh != nullptr ? {rd('DalMesh->GetComponentTransform()', True)} : {cpp_type(i.ty)}();")
                 continue
             if it in ("bone_component_transform", "bone_world_transform"):
                 space = "RTS_Component" if it == "bone_component_transform" else "RTS_World"
-                L.append(f'{T}{name} = DalMesh != nullptr ? FTransform3f(DalMesh->GetSocketTransform(FName(TEXT("{h.arg}")), {space})) : FTransform3f();')
+                socket = rd('DalMesh->GetSocketTransform(FName(TEXT("%s")), %s)' % (h.arg, space), True)
+                L.append(f"{T}{name} = DalMesh != nullptr ? {socket} : {cpp_type(i.ty)}();")
                 continue
             if it == "ref_path_child_translation":
-                L.append(f'{T}{name} = DalRefPathChildTranslation(FName(TEXT("{h.arg}")), FName(TEXT("{h.arg2}")));')
+                translation = rd('DalRefPathChildTranslation(FName(TEXT("%s")), FName(TEXT("%s")))' % (h.arg, h.arg2))
+                L.append(f"{T}{name} = {translation};")
                 continue
             if it in ("pre_penetration_velocity", "pre_penetration_velocity_valid"):
-                value = f"FVector3f(DalPrePenetration)" if it == "pre_penetration_velocity" else "bDalPrePenetration"
+                value = rd("DalPrePenetration", True) if it == "pre_penetration_velocity" else "bDalPrePenetration"
                 if self.consume_only is not None:
                     L += [f"{T}if (bDalConsume)", f"{T}{{", f"{T}{T}{name} = {value};", f"{T}}}"]
                 else:
@@ -3180,7 +3243,7 @@ class CppGen:
                 elif it == "montage_active":
                     value = f"DalAnim->Montage_IsActive({slot})"
                 elif it == "montage_position":
-                    value = f"DalAnim->Montage_GetPosition({slot})"
+                    value = rd(f"DalAnim->Montage_GetPosition({slot})")
                 else:
                     cond += f" && DalAnim->Montage_IsPlaying({slot})"
                     value = f"static_cast<{i.ty.cpp_type}>(DalSectionIndex(Dal_MontageId_{h.arg}, DalAnim->Montage_GetCurrentSection({slot})))"  # type: ignore[attr-defined]
@@ -3190,29 +3253,29 @@ class CppGen:
                 L.append(f"{T}}}")
                 continue
             movement_expr = {
-                "velocity": "FVector3f(Movement->Velocity)",
-                "acceleration": "FVector3f(Movement->GetCurrentAcceleration())",
-                "max_acceleration": "Movement->GetMaxAcceleration()",
-                "max_braking_deceleration": "Movement->GetMaxBrakingDeceleration()",
-                "max_walk_speed": "Movement->MaxWalkSpeed",
+                "velocity": rd("Movement->Velocity", True),
+                "acceleration": rd("Movement->GetCurrentAcceleration()", True),
+                "max_acceleration": rd("Movement->GetMaxAcceleration()"),
+                "max_braking_deceleration": rd("Movement->GetMaxBrakingDeceleration()"),
+                "max_walk_speed": rd("Movement->MaxWalkSpeed"),
                 "movement_mode": "Movement->MovementMode",
                 "is_grounded": "Movement->IsMovingOnGround()",
                 "is_crouching": "Movement->IsCrouching()",
-                "walkable_floor_z": "Movement->GetWalkableFloorZ()",
+                "walkable_floor_z": rd("Movement->GetWalkableFloorZ()"),
                 "movement_mode_custom": "static_cast<int32>(Movement->CustomMovementMode)",
             }
             pawn_expr = {
-                "actor_location": "FVector3f(Pawn->GetActorLocation())",
-                "actor_rotation": "FQuat4f(Pawn->GetActorQuat())",
-                "control_rotation": "FRotator3f(Pawn->GetControlRotation())",
+                "actor_location": rd("Pawn->GetActorLocation()", True),
+                "actor_rotation": rd("Pawn->GetActorQuat()", True),
+                "control_rotation": rd("Pawn->GetControlRotation()", True),
                 "actor_ready": "Pawn->HasActorRegisteredAllComponents()",
-                "actor_time_dilation": "Pawn->CustomTimeDilation",
+                "actor_time_dilation": rd("Pawn->CustomTimeDilation"),
             }
             character_expr = {
                 "has_root_motion": ("Character", "Character->HasAnyRootMotion()"),
-                "capsule_radius": ("Capsule", "Capsule->GetScaledCapsuleRadius()"),
-                "capsule_half_height": ("Capsule", "Capsule->GetScaledCapsuleHalfHeight()"),
-                "actor_scale": ("Capsule", "static_cast<float>(Capsule->GetComponentScale().Z)"),
+                "capsule_radius": ("Capsule", rd("Capsule->GetScaledCapsuleRadius()")),
+                "capsule_half_height": ("Capsule", rd("Capsule->GetScaledCapsuleHalfHeight()")),
+                "actor_scale": ("Capsule", rd("Capsule->GetComponentScale().Z", True)),
             }
             if it in character_expr:
                 guard, value = character_expr[it]

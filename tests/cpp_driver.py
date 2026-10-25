@@ -23,8 +23,9 @@ import subprocess
 import tempfile
 
 from dal import ir
-from dal.cppbackend import CppGen, CppOptions, generate_cpp, generation_scope, object_settings
-from dal.types import BOOL, FLOAT, INT, MOVEMENT_MODE, QUAT, ROTATOR, TRANSFORM, VEC2, VEC3, ArrayType, AssetType, EnumType, MapType, StructType, TagType
+from dal.cppbackend import CppGen, CppOptions, generate_cpp, generation_scope, object_settings, to_member
+from dal.types import (BOOL, DOUBLE, FLOAT, INT, MOVEMENT_MODE, QUAT, QUATD, ROTATOR, ROTATORD, TRANSFORM, TRANSFORMD, VEC2, VEC2D, VEC3, VEC3D, ArrayType, AssetType,
+                       EnumType, MapType, StructType, TagType)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STUB = os.path.join(HERE, "cpp_stub")
@@ -82,9 +83,21 @@ def _num(x):
 
 
 def _lit(ty, v):
-    """C++ literal for a harness value of DAL type ``ty`` (floats as double expressions)."""
+    """C++ literal for a harness value of DAL type ``ty`` (floats as double expressions; the double types as their full double value)."""
     if ty is FLOAT:
         return f"{_num(v)}f"
+    if ty is DOUBLE:
+        return _num(v)
+    if ty is VEC2D:
+        return f"FVector2D({_num(v[0])}, {_num(v[1])})"
+    if ty is VEC3D:
+        return f"FVector({_num(v[0])}, {_num(v[1])}, {_num(v[2])})"
+    if ty is ROTATORD:
+        return f"FRotator({_num(v[0])}, {_num(v[1])}, {_num(v[2])})"
+    if ty is QUATD:
+        return f"FQuat({_num(v[0])}, {_num(v[1])}, {_num(v[2])}, {_num(v[3])})"
+    if ty is TRANSFORMD:
+        return f"FTransform({_lit(QUATD, v[1])}, {_lit(VEC3D, v[0])}, {_lit(VEC3D, v[2])})"
     if ty is INT:
         return str(int(v))
     if ty is BOOL:
@@ -123,7 +136,8 @@ class SettingsInit:
         self.n += 1
         return f"Dal_E{self.n}"
 
-    def fill(self, ty, v, target: str) -> None:
+    def fill(self, ty, v, target: str, member: bool = False) -> None:
+        """``member``: ``target`` is a member of a struct (with CppOptions.double_members its float types are the engine's double ones)."""
         if isinstance(ty, StructType):
             for f in ty.fields:
                 if f.derived:
@@ -134,7 +148,7 @@ class SettingsInit:
                     self.fill(f.ty, getattr(v, f.name), f"(*{e})")
                     self.lines.append(f"{target}.{f.name} = {e}; }}")
                 else:
-                    self.fill(f.ty, getattr(v, f.name), f"{target}.{f.name}")
+                    self.fill(f.ty, getattr(v, f.name), f"{target}.{f.name}", True)
         elif isinstance(ty, MapType):
             for k, x in v.items():
                 e = self.fresh()
@@ -157,7 +171,8 @@ class SettingsInit:
             else:
                 self.lines.append(f'{target} = Dal{"Sequence" if ty.name == "sequence" else "Montage"}("{v}");')
         else:
-            self.lines.append(f"{target} = {_lit(ty, v)};")
+            text = _lit(ty, v)
+            self.lines.append(f"{target} = {to_member(text, ty) if member else text};")
 
 
 def cpp_type(ty):
@@ -226,19 +241,19 @@ def _print_value(name, ty, obj="Obj"):
         return f'PvS("{name}", {ref} != nullptr ? {ref}->StubName : std::string());'
     if isinstance(ty, TagType):
         return f'PvS("{name}", {ref}.ToString());'
-    if ty is FLOAT:
+    if ty is FLOAT or ty is DOUBLE:
         comps = [ref]
     elif ty is INT or ty is BOOL:
         comps = [ref]
-    elif ty is VEC2:
+    elif ty is VEC2 or ty is VEC2D:
         comps = [f"{ref}.X", f"{ref}.Y"]
-    elif ty is VEC3:
+    elif ty is VEC3 or ty is VEC3D:
         comps = [f"{ref}.X", f"{ref}.Y", f"{ref}.Z"]
-    elif ty is ROTATOR:
+    elif ty is ROTATOR or ty is ROTATORD:
         comps = [f"{ref}.Pitch", f"{ref}.Yaw", f"{ref}.Roll"]
-    elif ty is QUAT:
+    elif ty is QUAT or ty is QUATD:
         comps = [f"{ref}.X", f"{ref}.Y", f"{ref}.Z", f"{ref}.W"]
-    elif ty is TRANSFORM:
+    elif ty is TRANSFORM or ty is TRANSFORMD:
         comps = [f"{ref}.GetLocation().{c}" for c in "XYZ"] + [f"{ref}.GetRotation().{c}" for c in "XYZW"] + [f"{ref}.GetScale3D().{c}" for c in "XYZ"]
     elif ty is MOVEMENT_MODE:
         comps = [f"static_cast<int>(static_cast<EMovementMode>({ref}))"]
@@ -360,11 +375,14 @@ def hook_event(ev, owner: str = "Pawn") -> str:
     elif kind == "physics_rotation" and len(ev) > 1:
         parts.append(f"E.Value = FVector3f({_num(ev[1])}f, 0.0f, 0.0f);")
     elif kind == "landed" and len(ev) > 1:
-        h = list(ev[1]) + [None] * (9 - len(ev[1]))
+        h = list(ev[1]) + [None] * (11 - len(ev[1]))
         v3 = lambda v: f"FVector3f({_num(v[0])}f, {_num(v[1])}f, {_num(v[2])}f)"
+        v3d = lambda v: f"FVector({_num(v[0])}, {_num(v[1])}, {_num(v[2])})"
         parts.append(f"E.Hit.bBlocking = {'true' if h[0] else 'false'}; E.Hit.Point = {v3(h[1])}; E.Hit.Normal = {v3(h[2])}; "
                      f"E.Hit.Distance = {_num(h[3])}f; E.Hit.Time = {_num(h[4])}f; E.Hit.Location = {v3(h[5] if h[5] is not None else h[1])}; "
                      f"E.Hit.bStartPenetrating = {'true' if h[6] else 'false'}; E.Hit.FaceNormal = {v3(h[8] if h[8] is not None else h[2])};")
+        # the positions at the precision of the engine (point_d / location_d): the ones the event gave, or the float ones when it did not say
+        parts.append(f"E.Hit.PointD = {v3d(h[9] if h[9] is not None else h[1])}; E.Hit.LocationD = {v3d(h[10] if h[10] is not None else (h[5] if h[5] is not None else h[1]))};")
     parts.append(f"DalHost::FEventRouter::Post(&{owner}, E);")
     return "{ " + " ".join(parts) + " }"
 
@@ -741,13 +759,13 @@ def parse_value(ty, vals):
         return "" if vals[0] == "-" else vals[0]
     if isinstance(ty, AssetType):
         return None if vals[0] == "-" else vals[0]
-    if ty is FLOAT:
+    if ty is FLOAT or ty is DOUBLE:
         return float(vals[0])
     if ty is INT or isinstance(ty, EnumType):
         return int(vals[0])
     if ty is BOOL:
         return bool(int(vals[0]))
-    if ty is TRANSFORM:
+    if ty is TRANSFORM or ty is TRANSFORMD:
         f = [float(v) for v in vals]
         return (tuple(f[0:3]), tuple(f[3:7]), tuple(f[7:10]))
     return tuple(float(v) for v in vals)

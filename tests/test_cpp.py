@@ -14,9 +14,10 @@ from _bootstrap import EXAMPLES, TESTS
 
 import dal
 from dal.builtins import BUILTINS
-from dal.cppbackend import CppOptions, cpp_value, fmt_float, generate_cpp
+from dal.cppbackend import CppOptions, cpp_value, fmt_double, fmt_float, generate_cpp
 from builtin_programs import PRELUDE, arg, input_decl, outputs
-from dal.types import BLEND_OPTION, BOOL, CURVE, FLOAT, INT, QUAT, ROTATOR, SPRING, SPRING3, TRANSFORM, VEC2, VEC3
+from dal.types import (BLEND_OPTION, BOOL, CURVE, DOUBLE, FLOAT, INT, QUAT, QUATD, ROTATOR, ROTATORD, SPRING, SPRING3, TRANSFORM, TRANSFORMD, VEC2, VEC2D, VEC3,
+                       VEC3D)
 
 GOLDEN = os.path.join(TESTS, "golden")
 UPDATE = os.environ.get("UPDATE_GOLDEN") == "1"
@@ -203,6 +204,11 @@ class LiteralTests(unittest.TestCase):
                             (-0.5, "-0.5f"), (0.0, "0.0f"), (1e7, "1e7f"), (123456.789, "123456.79f"), (0.0001, "0.0001f")):
             self.assertEqual(fmt_float(value), text)
 
+    def test_double_literals_are_the_shortest_round_trip_without_a_suffix(self):
+        for value, text in ((0.2, "0.2"), (221.9, "221.9"), (1e-8, "1e-08"), (3.0, "3.0"), (-0.5, "-0.5"), (0.0, "0.0"), (0.30000000000000004, "0.30000000000000004")):
+            self.assertEqual(fmt_double(value), text)
+            self.assertEqual(float(fmt_double(value)), value)
+
     def test_value_literals(self):
         from dal import runtime as rt
 
@@ -212,9 +218,18 @@ class LiteralTests(unittest.TestCase):
         self.assertEqual(cpp_value(VEC3, rt.Vec3(0, 0, -1)), "FVector3f(0.0f, 0.0f, -1.0f)")
         self.assertEqual(cpp_value(ROTATOR, rt.Rotator(0, 90, 0)), "FRotator3f(0.0f, 90.0f, 0.0f)")
         self.assertEqual(cpp_value(QUAT, rt.QUAT_IDENTITY), "FQuat4f(0.0f, 0.0f, 0.0f, 1.0f)")
+        self.assertEqual(cpp_value(DOUBLE, 0.1), "0.1")
+        self.assertEqual(cpp_value(VEC2D, rt.Vec2(1, 2)), "FVector2D(1.0, 2.0)")
+        self.assertEqual(cpp_value(VEC3D, rt.Vec3(0, 0, -1)), "FVector(0.0, 0.0, -1.0)")
+        self.assertEqual(cpp_value(ROTATORD, rt.Rotator(0, 90, 0)), "FRotator(0.0, 90.0, 0.0)")
+        self.assertEqual(cpp_value(QUATD, rt.QUAT_IDENTITY), "FQuat(0.0, 0.0, 0.0, 1.0)")
+        self.assertEqual(cpp_value(TRANSFORMD, rt.Transform((1.0, 2.0, 3.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0))),
+                         "FTransform(FQuat(0.0, 0.0, 0.0, 1.0), FVector(1.0, 2.0, 3.0), FVector(1.0, 1.0, 1.0))")
 
 
-CPP_TO_DAL = {"FTransform3f": TRANSFORM, "EAlphaBlendOption": BLEND_OPTION, "UCurveFloat*": CURVE, "FSpring": SPRING, "FSpring3": SPRING3, "float": FLOAT, "int32": INT, "bool": BOOL, "FVector2f": VEC2, "FVector3f": VEC3, "FRotator3f": ROTATOR, "FQuat4f": QUAT}
+CPP_TO_DAL = {"FTransform3f": TRANSFORM, "EAlphaBlendOption": BLEND_OPTION, "UCurveFloat*": CURVE, "FSpring": SPRING, "FSpring3": SPRING3, "float": FLOAT, "int32": INT, "bool": BOOL, "FVector2f": VEC2, "FVector3f": VEC3, "FRotator3f": ROTATOR, "FQuat4f": QUAT,
+              # the double types are the engine's own
+              "double": DOUBLE, "FVector2D": VEC2D, "FVector": VEC3D, "FRotator": ROTATORD, "FQuat": QUATD, "FTransform": TRANSFORMD}
 
 
 def parse_dalmath_header():

@@ -206,10 +206,10 @@ void ULockOnCamera::DalOnInput_LockOn_Started(const FInputActionValue& DalValue)
 	DalPostInput(Dal_ActionId_LockOn, DalHost::EInputPhase::Started, DalValue);
 }
 
-DalHost::FHit ULockOnCamera::DalTraceLine(const FVector3f& DalStart, const FVector3f& DalEnd)
+DalHost::FHit ULockOnCamera::DalTraceLine(const FVector& DalStart, const FVector& DalEnd)
 {
 	DalHost::FHit DalResult;
-	DalResult.Point = DalEnd;
+	DalResult.Point = FVector3f(DalEnd);
 	const UWorld* DalWorld = GetWorld();
 	if (DalWorld == nullptr)
 	{
@@ -217,7 +217,7 @@ DalHost::FHit ULockOnCamera::DalTraceLine(const FVector3f& DalStart, const FVect
 	}
 	FHitResult DalHit;
 	FCollisionQueryParams DalParams(SCENE_QUERY_STAT(DalTrace), false, GetOwner());
-	const bool bDalBlocked = DalWorld->LineTraceSingleByChannel(DalHit, FVector(DalStart), FVector(DalEnd), DalTraceChannel, DalParams);
+	const bool bDalBlocked = DalWorld->LineTraceSingleByChannel(DalHit, DalStart, DalEnd, DalTraceChannel, DalParams);
 	if (bDalBlocked)
 	{
 		DalResult.bBlocking = true;
@@ -361,7 +361,7 @@ void ULockOnCamera::DalUpdate([[maybe_unused]] const float dt)
 			const FVector3f eye = Location + FVector3f(0.0f, 0.0f, EyeHeight);
 			TargetLocation = DalTargetLocation(index);
 			Distance = DalMath::Distance(Location, TargetLocation);
-			const DalHost::FHit sight = DalTraceLine(eye, TargetLocation);
+			const DalHost::FHit sight = DalTraceLine(FVector(eye), FVector(TargetLocation));
 			Visible = !sight.bBlocking;
 			if (Visible)
 			{

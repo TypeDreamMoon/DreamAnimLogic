@@ -29,8 +29,8 @@ namespace StubLog
 	struct Tok
 	{
 		std::string S;
-		Tok(double D) { char B[64]; std::snprintf(B, sizeof(B), "%.9g", D); S = B; }
-		Tok(float D) : Tok(static_cast<double>(D)) {}
+		Tok(double D) { char B[64]; std::snprintf(B, sizeof(B), "%.17g", D); S = B; }      // (a double is logged in full: the double commands are checked to the last digit)
+		Tok(float D) { char B[64]; std::snprintf(B, sizeof(B), "%.9g", static_cast<double>(D)); S = B; }
 		Tok(int D) : S(std::to_string(D)) {}
 		Tok(bool D) : S(D ? "1" : "0") {}
 		Tok(const char* D) : S(D) {}

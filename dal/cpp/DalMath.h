@@ -3,7 +3,12 @@
 // Part of the dal compiler package; copied next to the generated sources by `python -m dal compile --cpp`.
 // Every function maps a DAL built-in to Unreal Engine math (FMath, FRotator, FQuat, TVector) with the
 // behaviour the Python runtime (dal/runtime.py) reproduces.  Where UE has no float overload the
-// function is written out here following the documented UE semantics.  Target: UE 5.8, float precision.
+// function is written out here following the documented UE semantics.  Target: UE 5.8.
+//
+// Every function exists for the float types (float, FVector2f, FVector3f, FRotator3f, FQuat4f, FTransform3f) and, except the
+// interpolation and spring functions (the engine has them for float only), for the double types of the engine (double,
+// FVector2D, FVector, FRotator, FQuat, FTransform): a call picks the overload by the types of its arguments, which are
+// always of one precision.
 //
 // Do not edit; regenerate with the compiler.
 #pragma once
@@ -59,6 +64,22 @@ namespace DalMath
 		return S != 0.0f ? V / S : FVector3f(0.0f, 0.0f, 0.0f);
 	}
 
+	/** double division: x / 0 is 0 (never inf or NaN from the operator). */
+	[[nodiscard]] inline double Div(double A, double B)
+	{
+		return B != 0.0 ? A / B : 0.0;
+	}
+
+	[[nodiscard]] inline FVector2D Div(const FVector2D& V, double S)
+	{
+		return S != 0.0 ? V / S : FVector2D(0.0, 0.0);
+	}
+
+	[[nodiscard]] inline FVector Div(const FVector& V, double S)
+	{
+		return S != 0.0 ? V / S : FVector(0.0, 0.0, 0.0);
+	}
+
 	// ---- scalar -----------------------------------------------------------------------------
 
 	[[nodiscard]] inline int32 Abs(int32 X) { return X < 0 ? static_cast<int32>(0u - static_cast<uint32>(X)) : X; }
@@ -75,15 +96,33 @@ namespace DalMath
 	[[nodiscard]] inline int32 Square(int32 X) { return static_cast<int32>(static_cast<uint32>(X) * static_cast<uint32>(X)); }
 	[[nodiscard]] inline float Square(float X) { return FMath::Square(X); }
 
+	[[nodiscard]] inline double Abs(double X) { return FMath::Abs(X); }
+	[[nodiscard]] inline double Sign(double X) { return FMath::Sign(X); }
+	[[nodiscard]] inline double Min(double A, double B) { return FMath::Min(A, B); }
+	[[nodiscard]] inline double Max(double A, double B) { return FMath::Max(A, B); }
+	[[nodiscard]] inline double Clamp(double X, double Lo, double Hi) { return FMath::Clamp(X, Lo, Hi); }
+	[[nodiscard]] inline double Saturate(double X) { return FMath::Clamp(X, 0.0, 1.0); }
+	[[nodiscard]] inline double Square(double X) { return FMath::Square(X); }
+
 	[[nodiscard]] inline float Lerp(float A, float B, float T) { return FMath::Lerp(A, B, T); }
 	[[nodiscard]] inline FVector2f Lerp(const FVector2f& A, const FVector2f& B, float T) { return A + (B - A) * T; }
 	[[nodiscard]] inline FVector3f Lerp(const FVector3f& A, const FVector3f& B, float T) { return A + (B - A) * T; }
+
+	[[nodiscard]] inline double Lerp(double A, double B, double T) { return FMath::Lerp(A, B, T); }
+	[[nodiscard]] inline FVector2D Lerp(const FVector2D& A, const FVector2D& B, double T) { return A + (B - A) * T; }
+	[[nodiscard]] inline FVector Lerp(const FVector& A, const FVector& B, double T) { return A + (B - A) * T; }
 
 	[[nodiscard]] inline float Floor(float X) { return FMath::FloorToFloat(X); }
 	[[nodiscard]] inline float Ceil(float X) { return FMath::CeilToFloat(X); }
 	[[nodiscard]] inline float Round(float X) { return FMath::RoundToFloat(X); }
 	[[nodiscard]] inline float Trunc(float X) { return FMath::TruncToFloat(X); }
 	[[nodiscard]] inline float Frac(float X) { return FMath::Frac(X); }
+
+	[[nodiscard]] inline double Floor(double X) { return FMath::FloorToDouble(X); }
+	[[nodiscard]] inline double Ceil(double X) { return FMath::CeilToDouble(X); }
+	[[nodiscard]] inline double Round(double X) { return FMath::RoundToDouble(X); }
+	[[nodiscard]] inline double Trunc(double X) { return FMath::TruncToDouble(X); }
+	[[nodiscard]] inline double Frac(double X) { return FMath::Frac(X); }
 
 	/** float -> int32 conversions saturate and map NaN to 0 (a plain C++ cast would be undefined). */
 	[[nodiscard]] inline int32 SaturateToInt(float X)
@@ -103,10 +142,32 @@ namespace DalMath
 		return static_cast<int32>(X);
 	}
 
+	[[nodiscard]] inline int32 SaturateToInt(double X)
+	{
+		if (X != X)
+		{
+			return 0;
+		}
+		if (X >= 2147483648.0)
+		{
+			return MAX_int32;
+		}
+		if (X <= -2147483648.0)
+		{
+			return MIN_int32;
+		}
+		return static_cast<int32>(X);
+	}
+
 	[[nodiscard]] inline int32 ToInt(float X) { return SaturateToInt(FMath::TruncToFloat(X)); }
 	[[nodiscard]] inline int32 FloorToInt(float X) { return SaturateToInt(FMath::FloorToFloat(X)); }
 	[[nodiscard]] inline int32 CeilToInt(float X) { return SaturateToInt(FMath::CeilToFloat(X)); }
 	[[nodiscard]] inline int32 RoundToInt(float X) { return SaturateToInt(FMath::FloorToFloat(X + 0.5f)); }
+
+	[[nodiscard]] inline int32 ToInt(double X) { return SaturateToInt(FMath::TruncToDouble(X)); }
+	[[nodiscard]] inline int32 FloorToInt(double X) { return SaturateToInt(FMath::FloorToDouble(X)); }
+	[[nodiscard]] inline int32 CeilToInt(double X) { return SaturateToInt(FMath::CeilToDouble(X)); }
+	[[nodiscard]] inline int32 RoundToInt(double X) { return SaturateToInt(FMath::FloorToDouble(X + 0.5)); }
 
 	[[nodiscard]] inline float Fmod(float X, float Y) { return FMath::Fmod(X, Y); }
 	[[nodiscard]] inline float Sqrt(float X) { return FMath::Sqrt(X); }
@@ -130,6 +191,27 @@ namespace DalMath
 	[[nodiscard]] inline bool IsNearlyEqual(float A, float B) { return FMath::IsNearlyEqual(A, B); }
 	[[nodiscard]] inline bool IsNearlyEqual(float A, float B, float Tolerance) { return FMath::IsNearlyEqual(A, B, Tolerance); }
 
+	[[nodiscard]] inline double Fmod(double X, double Y) { return FMath::Fmod(X, Y); }
+	[[nodiscard]] inline double Sqrt(double X) { return FMath::Sqrt(X); }
+	[[nodiscard]] inline double InvSqrt(double X) { return FMath::InvSqrt(X); }
+	[[nodiscard]] inline double Pow(double A, double B) { return FMath::Pow(A, B); }
+	[[nodiscard]] inline double Exp(double X) { return FMath::Exp(X); }
+	[[nodiscard]] inline double Log(double X) { return FMath::Loge(X); }
+	[[nodiscard]] inline double Sin(double X) { return FMath::Sin(X); }
+	[[nodiscard]] inline double Cos(double X) { return FMath::Cos(X); }
+	[[nodiscard]] inline double Tan(double X) { return FMath::Tan(X); }
+	[[nodiscard]] inline double Asin(double X) { return FMath::Asin(X); }
+	[[nodiscard]] inline double Acos(double X) { return FMath::Acos(X); }
+	[[nodiscard]] inline double Atan(double X) { return FMath::Atan(X); }
+	[[nodiscard]] inline double Atan2(double Y, double X) { return FMath::Atan2(Y, X); }
+	[[nodiscard]] inline double DegToRad(double X) { return FMath::DegreesToRadians(X); }
+	[[nodiscard]] inline double RadToDeg(double X) { return FMath::RadiansToDegrees(X); }
+
+	[[nodiscard]] inline bool IsNearlyZero(double X) { return FMath::IsNearlyZero(X); }
+	[[nodiscard]] inline bool IsNearlyZero(double X, double Tolerance) { return FMath::IsNearlyZero(X, Tolerance); }
+	[[nodiscard]] inline bool IsNearlyEqual(double A, double B) { return FMath::IsNearlyEqual(A, B); }
+	[[nodiscard]] inline bool IsNearlyEqual(double A, double B, double Tolerance) { return FMath::IsNearlyEqual(A, B, Tolerance); }
+
 	// ---- angles and ranges -------------------------------------------------------------------
 
 	[[nodiscard]] inline float UnwindDegrees(float A) { return FMath::UnwindDegrees(A); }
@@ -146,6 +228,24 @@ namespace DalMath
 	}
 
 	[[nodiscard]] inline float MapRange(float InLo, float InHi, float OutLo, float OutHi, float X)
+	{
+		return FMath::Lerp(OutLo, OutHi, FMath::GetRangePct(InLo, InHi, X));
+	}
+
+	[[nodiscard]] inline double UnwindDegrees(double A) { return FMath::UnwindDegrees(A); }
+	[[nodiscard]] inline double NormalizeAxis(double A) { return FRotator::NormalizeAxis(A); }
+	[[nodiscard]] inline double ClampAxis(double A) { return FRotator::ClampAxis(A); }
+	[[nodiscard]] inline double DeltaAngle(double From, double To) { return FMath::FindDeltaAngleDegrees(From, To); }
+	[[nodiscard]] inline double ClampAngle(double Angle, double Lo, double Hi) { return FMath::ClampAngle(Angle, Lo, Hi); }
+	[[nodiscard]] inline double RangePct(double Lo, double Hi, double X) { return FMath::GetRangePct(Lo, Hi, X); }
+
+	[[nodiscard]] inline double MapRangeClamped(double InLo, double InHi, double OutLo, double OutHi, double X)
+	{
+		const double Pct = FMath::Clamp(FMath::GetRangePct(InLo, InHi, X), 0.0, 1.0);
+		return FMath::Lerp(OutLo, OutHi, Pct);
+	}
+
+	[[nodiscard]] inline double MapRange(double InLo, double InHi, double OutLo, double OutHi, double X)
 	{
 		return FMath::Lerp(OutLo, OutHi, FMath::GetRangePct(InLo, InHi, X));
 	}
@@ -167,7 +267,23 @@ namespace DalMath
 	[[nodiscard]] inline FVector2f ClampLength(const FVector2f& V, float MaxSize) { return V.GetClampedToMaxSize(MaxSize); }
 	[[nodiscard]] inline FVector3f ClampLength(const FVector3f& V, float MaxSize) { return V.GetClampedToMaxSize(MaxSize); }
 
+	[[nodiscard]] inline double Length(const FVector2D& V) { return V.Size(); }
+	[[nodiscard]] inline double Length(const FVector& V) { return V.Size(); }
+	[[nodiscard]] inline double LengthSq(const FVector2D& V) { return V.SizeSquared(); }
+	[[nodiscard]] inline double LengthSq(const FVector& V) { return V.SizeSquared(); }
+	[[nodiscard]] inline FVector2D Normalize(const FVector2D& V) { return V.GetSafeNormal(); }
+	[[nodiscard]] inline FVector Normalize(const FVector& V) { return V.GetSafeNormal(); }
+	[[nodiscard]] inline FQuat Normalize(const FQuat& Q) { return Q.GetNormalized(); }
+	[[nodiscard]] inline double Dot(const FVector2D& A, const FVector2D& B) { return FVector2D::DotProduct(A, B); }
+	[[nodiscard]] inline double Dot(const FVector& A, const FVector& B) { return FVector::DotProduct(A, B); }
+	[[nodiscard]] inline FVector Cross(const FVector& A, const FVector& B) { return FVector::CrossProduct(A, B); }
+	[[nodiscard]] inline double Distance(const FVector2D& A, const FVector2D& B) { return (A - B).Size(); }
+	[[nodiscard]] inline double Distance(const FVector& A, const FVector& B) { return FVector::Dist(A, B); }
+	[[nodiscard]] inline FVector2D ClampLength(const FVector2D& V, double MaxSize) { return V.GetClampedToMaxSize(MaxSize); }
+	[[nodiscard]] inline FVector ClampLength(const FVector& V, double MaxSize) { return V.GetClampedToMaxSize(MaxSize); }
+
 	[[nodiscard]] inline FVector3f MakeVec3(const FVector2f& XY, float Z) { return FVector3f(XY.X, XY.Y, Z); }
+	[[nodiscard]] inline FVector MakeVec3(const FVector2D& XY, double Z) { return FVector(XY.X, XY.Y, Z); }
 
 	/** v.xy, v.zx ... : component picks by index (0 = x, 1 = y, 2 = z). */
 	template <int A, int B>
@@ -178,6 +294,14 @@ namespace DalMath
 	[[nodiscard]] inline FVector3f Swizzle3(const FVector2f& V) { return FVector3f(V[A], V[B], V[C]); }
 	template <int A, int B, int C>
 	[[nodiscard]] inline FVector3f Swizzle3(const FVector3f& V) { return FVector3f(V[A], V[B], V[C]); }
+	template <int A, int B>
+	[[nodiscard]] inline FVector2D Swizzle2(const FVector2D& V) { return FVector2D(V[A], V[B]); }
+	template <int A, int B>
+	[[nodiscard]] inline FVector2D Swizzle2(const FVector& V) { return FVector2D(V[A], V[B]); }
+	template <int A, int B, int C>
+	[[nodiscard]] inline FVector Swizzle3(const FVector2D& V) { return FVector(V[A], V[B], V[C]); }
+	template <int A, int B, int C>
+	[[nodiscard]] inline FVector Swizzle3(const FVector& V) { return FVector(V[A], V[B], V[C]); }
 
 	// ---- rotations ---------------------------------------------------------------------------
 
@@ -215,6 +339,40 @@ namespace DalMath
 	}
 	[[nodiscard]] inline float TwistAngle(const FQuat4f& Q, const FVector3f& Axis) { return Q.GetTwistAngle(Axis); }
 
+	[[nodiscard]] inline FQuat ToQuat(const FRotator& R) { return R.Quaternion(); }
+	[[nodiscard]] inline FRotator ToRotator(const FQuat& Q) { return Q.Rotator(); }
+	[[nodiscard]] inline FQuat QuatInverse(const FQuat& Q) { return Q.Inverse(); }
+	[[nodiscard]] inline FQuat Slerp(const FQuat& A, const FQuat& B, double T) { return FQuat::Slerp(A, B, T); }
+	[[nodiscard]] inline FVector Rotate(const FQuat& Q, const FVector& V) { return Q.RotateVector(V); }
+	[[nodiscard]] inline FVector Rotate(const FRotator& R, const FVector& V) { return R.Quaternion().RotateVector(V); }
+	[[nodiscard]] inline FVector Unrotate(const FQuat& Q, const FVector& V) { return Q.UnrotateVector(V); }
+	[[nodiscard]] inline FVector Unrotate(const FRotator& R, const FVector& V) { return R.Quaternion().UnrotateVector(V); }
+	[[nodiscard]] inline FRotator NormalizeRotator(const FRotator& R) { return R.GetNormalized(); }
+	[[nodiscard]] inline FRotator LookAt(const FVector& From, const FVector& To) { return (To - From).ToOrientationRotator(); }
+
+	[[nodiscard]] inline double AngleBetween(const FVector& A, const FVector& B)
+	{
+		const FVector NA = A.GetSafeNormal();
+		const FVector NB = B.GetSafeNormal();
+		if (NA.IsZero() || NB.IsZero())
+		{
+			return 0.0;
+		}
+		return FMath::RadiansToDegrees(FMath::Acos(FVector::DotProduct(NA, NB)));
+	}
+
+	[[nodiscard]] inline FQuat FastLerp(const FQuat& A, const FQuat& B, double Alpha) { return FQuat::FastLerp(A, B, Alpha); }
+	[[nodiscard]] inline FQuat QuatFromAxisAngle(const FVector& Axis, double Rad) { return FQuat(Axis, Rad); }
+	[[nodiscard]] inline FQuat QuatFromRotationVector(const FVector& V) { return FQuat::MakeFromRotationVector(V); }
+	[[nodiscard]] inline FQuat ToOrientationQuat(const FVector& V) { return V.ToOrientationQuat(); }
+	[[nodiscard]] inline FQuat GetTwist(const FQuat& Q, const FVector& Axis)
+	{
+		FQuat Swing, Twist;
+		Q.ToSwingTwist(Axis, Swing, Twist);
+		return Twist;
+	}
+	[[nodiscard]] inline double TwistAngle(const FQuat& Q, const FVector& Axis) { return Q.GetTwistAngle(Axis); }
+
 	// ---- transforms ------------------------------------------------------------------------------
 
 	[[nodiscard]] inline FVector3f TransformPosition(const FTransform3f& T, const FVector3f& V) { return T.TransformPosition(V); }
@@ -231,6 +389,21 @@ namespace DalMath
 	[[nodiscard]] inline FVector3f ProjectOnNormal(const FVector3f& V, const FVector3f& N) { return V.ProjectOnToNormal(N); }
 	[[nodiscard]] inline FVector3f SafeNormal2D(const FVector3f& V) { return V.GetSafeNormal2D(); }
 	[[nodiscard]] inline float Size2D(const FVector3f& V) { return V.Size2D(); }
+
+	[[nodiscard]] inline FVector TransformPosition(const FTransform& T, const FVector& V) { return T.TransformPosition(V); }
+	[[nodiscard]] inline FVector InverseTransformPosition(const FTransform& T, const FVector& V) { return T.InverseTransformPosition(V); }
+	[[nodiscard]] inline FQuat TransformRotation(const FTransform& T, const FQuat& Q) { return T.TransformRotation(Q); }
+	[[nodiscard]] inline FQuat InverseTransformRotation(const FTransform& T, const FQuat& Q) { return T.InverseTransformRotation(Q); }
+	[[nodiscard]] inline FVector TransformVectorNoScale(const FTransform& T, const FVector& V) { return T.TransformVectorNoScale(V); }
+	[[nodiscard]] inline FTransform RelativeTransform(const FTransform& A, const FTransform& B) { return A.GetRelativeTransform(B); }
+	[[nodiscard]] inline FTransform RelativeTransformReverse(const FTransform& A, const FTransform& B) { return A.GetRelativeTransformReverse(B); }
+	[[nodiscard]] inline FTransform InverseTransform(const FTransform& T) { return T.Inverse(); }
+	[[nodiscard]] inline FTransform Compose(const FTransform& A, const FTransform& B) { return A * B; }
+	[[nodiscard]] inline FTransform WithScale(FTransform T, const FVector& Scale) { T.SetScale3D(Scale); return T; }
+
+	[[nodiscard]] inline FVector ProjectOnNormal(const FVector& V, const FVector& N) { return V.ProjectOnToNormal(N); }
+	[[nodiscard]] inline FVector SafeNormal2D(const FVector& V) { return V.GetSafeNormal2D(); }
+	[[nodiscard]] inline double Size2D(const FVector& V) { return V.Size2D(); }
 	[[nodiscard]] inline float HalfLifeToSmoothingTime(float HalfLife) { return SpringMath::HalfLifeToSmoothingTime(HalfLife); }
 
 	/** FAlphaBlend::AlphaToBlendOption: the eased alpha; EAlphaBlendOption::Custom reads the curve over its time range. */
@@ -267,6 +440,12 @@ namespace DalMath
 	[[nodiscard]] inline FRotator3f DeltaRotator(const FRotator3f& A, const FRotator3f& B)
 	{
 		const FRotator3f Delta = A - B;
+		return Delta.GetNormalized();
+	}
+
+	[[nodiscard]] inline FRotator DeltaRotator(const FRotator& A, const FRotator& B)
+	{
+		const FRotator Delta = A - B;
 		return Delta.GetNormalized();
 	}
 

@@ -22,7 +22,7 @@ import dal
 from dal import harness
 from dal.builtins import BUILTINS
 from dal.cppbackend import CppOptions
-from dal.types import BOOL, FLOAT, INT, QUAT, ROTATOR, VEC2, VEC3
+from dal.types import (BOOL, DOUBLE, DOUBLE_TO_SINGLE, FLOAT, INT, QUAT, QUATD, ROTATOR, ROTATORD, TRANSFORMD, VEC2, VEC2D, VEC3, VEC3D)
 from test_als_lean import make_sequence
 from v1_sources import ALL_COMMANDS, ANIM_V1, PROBE
 
@@ -272,16 +272,22 @@ class CppCompileTests(unittest.TestCase):
 from builtin_programs import CURVE_ARGS, PRELUDE, outputs  # noqa: E402
 from dal.types import BLEND_OPTION, TRANSFORM  # noqa: E402
 
-POOL = {FLOAT: ("F", 5), INT: ("I", 3), VEC2: ("U", 2), VEC3: ("V", 3), ROTATOR: ("R", 2), QUAT: ("Q", 2), BLEND_OPTION: ("B", 1), TRANSFORM: ("T", 2)}
+POOL = {FLOAT: ("F", 5), INT: ("I", 3), VEC2: ("U", 2), VEC3: ("V", 3), ROTATOR: ("R", 2), QUAT: ("Q", 2), BLEND_OPTION: ("B", 1), TRANSFORM: ("T", 2),
+        # the versions for the double types (test_cpp_double.py)
+        DOUBLE: ("DF", 5), VEC2D: ("DU", 2), VEC3D: ("DV", 3), ROTATORD: ("DR", 2), QUATD: ("DQ", 2), TRANSFORMD: ("DT", 2)}
 
 
-def everything_source():
+def everything_source(derived=False):
+    """One program that calls every signature of every built-in; ``derived``: the versions for the double types instead of the ones for the float types."""
     lines = [PRELUDE.rstrip(), "logic Everything;", "param Cfg: BuiltinCfg;"]
     for ty, (prefix, n) in POOL.items():
-        lines += [f"input {prefix}{k}: {ty.name};" for k in range(n)]
+        if ty.is_double == derived or ty in (INT, BLEND_OPTION):          # (the versions for the double types read double inputs)
+            lines += [f"input {prefix}{k}: {ty.name};" for k in range(n)]
     states, body, count = [], [], 0
     for name, b in sorted(BUILTINS.items()):
         for idx, sig in enumerate(b.sigs):
+            if (idx >= b.n_single) != derived:
+                continue
             used = {}
             args = []
             for p in sig.params:
@@ -300,6 +306,7 @@ def everything_source():
 
 
 def rand_input(rng, ty):
+    ty = DOUBLE_TO_SINGLE.get(ty, ty)                       # the data of a double type is made like the data of its float counterpart
     pool = [0.0, 1.0, -1.0, 0.5, -0.5, 2.5, 180.0, -180.0, 360.0, 3.14159, 0.25, 100.0]
 
     def fl():

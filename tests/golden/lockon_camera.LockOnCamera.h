@@ -159,7 +159,7 @@ private:
 	void DalOnInput_LockOn_Started(const FInputActionValue& DalValue);
 
 	/** host.trace_line: the first blocking hit on the trace channel, the owner ignored. */
-	DalHost::FHit DalTraceLine(const FVector3f& DalStart, const FVector3f& DalEnd);
+	DalHost::FHit DalTraceLine(const FVector& DalStart, const FVector& DalEnd);
 
 	/** Collect the actors tagged DalTargetTag, once per tick. */
 	void DalRefreshTargets();

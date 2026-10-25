@@ -223,7 +223,7 @@ class MoreCommandsTests(unittest.TestCase):
         files = generate_cpp(compile_ok(MORE_PROGRAM))
         cpp, h = files["Cl.cpp"], files["Cl.h"]
         self.assertIn("DalAlsMovement->bMovementModeLocked = DalCommand.B0;", cpp)
-        self.assertIn("DalPawn->SetActorLocation(FVector(DalCommand.V), DalCommand.B0, nullptr, DalCommand.B1 ? ETeleportType::TeleportPhysics : ETeleportType::None);", cpp)
+        self.assertIn("DalPawn->SetActorLocation(DalCommand.VD, DalCommand.B0, nullptr, DalCommand.B1 ? ETeleportType::TeleportPhysics : ETeleportType::None);", cpp)
         self.assertIn("DalMovement->Velocity = FVector(DalCommand.V);", cpp)
         self.assertIn("DalCharacter->SetAnimRootMotionTranslationScale(DalCommand.F);", cpp)
         self.assertIn("UDalRagdollService* DalRagdoll = DalPawn->FindComponentByClass<UDalRagdollService>()", cpp)

@@ -209,9 +209,9 @@ class CppStructureTests(unittest.TestCase):
 
     def test_the_commands(self):
         cpp = self.cpp
-        self.assertIn("DalHost::Cmd::RootMotionOverride(FVector3f(Go, 0.0f, Go * 2.0f), FQuat4f(0.0f, 0.0f, 0.0f, 1.0f))", cpp)
+        self.assertIn("DalHost::Cmd::RootMotionOverride(FVector(FVector3f(Go, 0.0f, Go * 2.0f)), FQuat(FQuat4f(0.0f, 0.0f, 0.0f, 1.0f)))", cpp)
         self.assertIn("DalHost::Cmd::RootMotionClear()", cpp)
-        self.assertIn("DalAlsMovement->SetRootMotionOverride(FVector(DalCommand.V), FQuat(DalCommand.Q));", cpp)
+        self.assertIn("DalAlsMovement->SetRootMotionOverride(DalCommand.VD, DalCommand.QD);", cpp)
         self.assertIn("DalAlsMovement->ClearRootMotionOverride();", cpp)
         self.assertIn("// Module dependencies: Core, CoreUObject, Engine, DalRuntime", self.h)
 

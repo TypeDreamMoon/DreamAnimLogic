@@ -168,13 +168,13 @@ class ActorComponentTests(unittest.TestCase):
 
     def test_traces_and_targets_are_game_thread_world_queries(self):
         trace = body(self.lc, "DalHost::FHit ULockOnCamera::DalTraceLine")
-        self.assertIn("DalWorld->LineTraceSingleByChannel(DalHit, FVector(DalStart), FVector(DalEnd), DalTraceChannel, DalParams);", trace)
+        self.assertIn("DalWorld->LineTraceSingleByChannel(DalHit, DalStart, DalEnd, DalTraceChannel, DalParams);", trace)        # (the query takes the engine's own FVector)
         self.assertIn("SCENE_QUERY_STAT(DalTrace), false, GetOwner()", trace)         # the owner never blocks its own trace
-        self.assertIn("DalResult.Point = DalEnd;", trace)                              # a miss ends at the trace end
+        self.assertIn("DalResult.Point = FVector3f(DalEnd);", trace)                   # a miss ends at the trace end
         self.assertIn("UGameplayStatics::GetAllActorsWithTag(DalWorld, DalTargetTag, DalFound);", self.lc)
         self.assertIn("FName DalTargetTag = FName(TEXT(\"DalTarget\"));", self.lh)
         self.assertIn("TEnumAsByte<ECollisionChannel> DalTraceChannel = ECC_Visibility;", self.lh)
-        self.assertIn("const DalHost::FHit sight = DalTraceLine(eye, TargetLocation);", self.lc)
+        self.assertIn("const DalHost::FHit sight = DalTraceLine(FVector(eye), FVector(TargetLocation));", self.lc)       # (the positions of a trace are double: the floats are widened)
         self.assertIn("Visible = !sight.bBlocking;", self.lc)
 
     def test_loops_become_counted_for_statements(self):
@@ -268,7 +268,7 @@ class CoverageTests(unittest.TestCase):
         c = files["Probe.cpp"]
         for fn in ("DalTraceLine", "DalTraceSphere", "DalTargetCount", "DalTargetId", "DalTargetLocation", "DalTargetIndex"):
             self.assertIn(f"::{fn}(", c)
-        self.assertIn("SweepSingleByChannel(DalHit, FVector(DalStart), FVector(DalEnd), FQuat::Identity, DalTraceChannel, FCollisionShape::MakeSphere(DalRadius), DalParams)", c)
+        self.assertIn("SweepSingleByChannel(DalHit, DalStart, DalEnd, FQuat::Identity, DalTraceChannel, FCollisionShape::MakeSphere(DalRadius), DalParams)", c)
 
     def test_the_host_header_reserves_the_pieces_the_backend_emits(self):
         host_h = read(os.path.join(os.path.dirname(dal.__file__), "cpp", "DalHost.h"))

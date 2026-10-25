@@ -2,7 +2,9 @@
 //
 // This is not Unreal code. It re-implements, in plain float/double C++, the small part of the UE 5 math API
 // that dal's generated sources and DalMath.h use, with the signatures and behaviours of the UE 5.8 headers
-// (UnrealMathUtility.h, Vector.h, Vector2D.h, Rotator.h, Quat.h) as read from the engine source. It lets
+// (UnrealMathUtility.h, Vector.h, Vector2D.h, Rotator.h, Quat.h) as read from the engine source: FMath has a float and a
+// double overload of every function that DalMath.h calls, and the types are the templates over both precisions (FVector3f
+// and FVector, FQuat4f and FQuat ...), as in the engine. It lets
 // tests/test_cpp_compile.py check that the generated C++ is well-formed and computes what the Python
 // backend computes. It cannot prove the code builds inside the real engine.
 #pragma once
@@ -33,6 +35,10 @@ using int64 = std::int64_t;
 #define UE_LN2 (0.69314718056f)
 #define UE_SMALL_NUMBER (1.e-8f)
 #define UE_KINDA_SMALL_NUMBER (1.e-4f)
+#define UE_DOUBLE_PI (3.141592653589793238462643383279502884197169399375105820974944592307)
+#define UE_DOUBLE_TWO_PI (2.0 * UE_DOUBLE_PI)
+#define UE_DOUBLE_SMALL_NUMBER (1.e-8)
+#define UE_DOUBLE_KINDA_SMALL_NUMBER (1.e-4)
 #define UE_ARRAY_COUNT(array) (sizeof(array) / sizeof((array)[0]))
 
 #define TEXT(x) x
@@ -244,6 +250,28 @@ struct FMath
 	static float DegreesToRadians(float D) { return D * (UE_PI / 180.f); }
 	static float RadiansToDegrees(float R) { return R * (180.f / UE_PI); }
 
+	// the double overloads (GenericPlatformMath.h: the C library functions; Fmod guards a divisor of at most UE_DOUBLE_SMALL_NUMBER)
+	static double FloorToDouble(double F) { return floor(F); }
+	static double CeilToDouble(double F) { return ceil(F); }
+	static double TruncToDouble(double F) { return trunc(F); }
+	static double RoundToDouble(double F) { return FloorToDouble(F + 0.5); }
+	static double Frac(double F) { return F - FloorToDouble(F); }
+	static double Fmod(double X, double Y) { return FMath::Abs(Y) <= UE_DOUBLE_SMALL_NUMBER ? 0.0 : fmod(X, Y); }
+	static double Sqrt(double F) { return sqrt(F); }
+	static double InvSqrt(double F) { return 1.0 / sqrt(F); }
+	static double Pow(double A, double B) { return pow(A, B); }
+	static double Exp(double F) { return exp(F); }
+	static double Loge(double F) { return log(F); }
+	static double Sin(double F) { return sin(F); }
+	static double Cos(double F) { return cos(F); }
+	static double Tan(double F) { return tan(F); }
+	static double Asin(double F) { return asin((F < -1.0) ? -1.0 : ((F < 1.0) ? F : 1.0)); }
+	static double Acos(double F) { return acos((F < -1.0) ? -1.0 : ((F < 1.0) ? F : 1.0)); }
+	static double Atan(double F) { return atan(F); }
+	static double Atan2(double Y, double X) { return (X == 0.0 && Y == 0.0) ? 0.0 : atan2(Y, X); }
+	static double DegreesToRadians(double D) { return D * (UE_DOUBLE_PI / 180.0); }
+	static double RadiansToDegrees(double R) { return R * (180.0 / UE_DOUBLE_PI); }
+
 	static int32 TruncToInt(float F) { return (int32)F; }
 	static int32 FloorToInt(float F) { int32 I = (int32)F; I -= ((float)I > F); return I; }
 
@@ -257,45 +285,47 @@ struct FMath
 
 	static bool IsNearlyZero(float V, float Tol = UE_SMALL_NUMBER) { return Abs(V) <= Tol; }
 	static bool IsNearlyEqual(float A, float B, float Tol = UE_SMALL_NUMBER) { return Abs(A - B) <= Tol; }
+	static bool IsNearlyZero(double V, double Tol = UE_DOUBLE_SMALL_NUMBER) { return Abs(V) <= Tol; }
+	static bool IsNearlyEqual(double A, double B, double Tol = UE_DOUBLE_SMALL_NUMBER) { return Abs(A - B) <= Tol; }
 
-	static float UnwindRadians(float A)
+	template <class T> static T UnwindRadians(T A)
 	{
 		while (A > UE_PI) { A -= UE_TWO_PI; }
 		while (A < -UE_PI) { A += UE_TWO_PI; }
 		return A;
 	}
 
-	static float UnwindDegrees(float A)
+	template <class T> static T UnwindDegrees(T A)
 	{
 		while (A > 180.f) { A -= 360.f; }
 		while (A < -180.f) { A += 360.f; }
 		return A;
 	}
 
-	static float Wrap(float X, float Min_, float Max_)
+	template <class T> static T Wrap(T X, T Min_, T Max_)
 	{
-		float Size = Max_ - Min_;
+		T Size = Max_ - Min_;
 		if (Size == 0) { return Max_; }
-		float EndVal = X;
+		T EndVal = X;
 		if (EndVal < Min_)
 		{
-			float Mod = Fmod(Min_ - EndVal, Size);
-			EndVal = (Mod != 0.0f) ? Max_ - Mod : Min_;
+			T Mod = Fmod(Min_ - EndVal, Size);
+			EndVal = (Mod != (T)0) ? Max_ - Mod : Min_;
 		}
 		else if (EndVal > Max_)
 		{
-			float Mod = Fmod(EndVal - Max_, Size);
-			EndVal = (Mod != 0.0f) ? Min_ + Mod : Max_;
+			T Mod = Fmod(EndVal - Max_, Size);
+			EndVal = (Mod != (T)0) ? Min_ + Mod : Max_;
 		}
 		return EndVal;
 	}
 
-	static float FindDeltaAngleDegrees(float A1, float A2) { return Wrap(A2 - A1, -180.f, 180.f); }
-	static float ClampAngle(float Angle, float Lo, float Hi);
-	static float GetRangePct(float Lo, float Hi, float V)
+	template <class T> static T FindDeltaAngleDegrees(T A1, T A2) { return Wrap<T>(A2 - A1, (T)-180, (T)180); }
+	template <class T> static T ClampAngle(T Angle, T Lo, T Hi);
+	template <class T, class T2> static auto GetRangePct(T Lo, T Hi, T2 V)
 	{
-		const float Divisor = Hi - Lo;
-		if (IsNearlyZero(Divisor)) { return (V >= Hi) ? 1.0f : 0.0f; }
+		const T Divisor = Hi - Lo;
+		if (IsNearlyZero(Divisor)) { using RetType = decltype(T() / T2()); return (V >= Hi) ? (RetType)1 : (RetType)0; }
 		return (V - Lo) / Divisor;
 	}
 
@@ -605,8 +635,8 @@ namespace UE::Math
 			const T SingularityTest = Z * X - W * Y;
 			const T YawY = 2.f * (W * Z + X * Y);
 			const T YawX = (1.f - 2.f * (FMath::Square(Y) + FMath::Square(Z)));
-			const T Threshold = 0.4999995f;
-			const T RadToDeg = (180.f / UE_PI);
+			const T Threshold = std::is_same_v<T, double> ? (T)0.4999995 : (T)0.4999995f;
+			const T RadToDeg = std::is_same_v<T, double> ? (T)(180.0 / UE_DOUBLE_PI) : (T)(180.f / UE_PI);
 			T Pitch, Yaw, Roll;
 			if (SingularityTest < -Threshold)
 			{
@@ -703,7 +733,7 @@ namespace UE::Math
 	template <class T>
 	TQuat<T> TRotator<T>::Quaternion() const
 	{
-		const T Half = (T)(UE_PI / 360.0);
+		const T Half = std::is_same_v<T, double> ? (T)(UE_DOUBLE_PI / 360.0) : (T)(UE_PI / 360.0);
 		const T SP = std::sin(std::fmod(Pitch, (T)360) * Half), CP = std::cos(std::fmod(Pitch, (T)360) * Half);
 		const T SY = std::sin(std::fmod(Yaw, (T)360) * Half), CY = std::cos(std::fmod(Yaw, (T)360) * Half);
 		const T SR = std::sin(std::fmod(Roll, (T)360) * Half), CR = std::cos(std::fmod(Roll, (T)360) * Half);
@@ -711,14 +741,15 @@ namespace UE::Math
 	}
 }
 
-inline float FMath::ClampAngle(float Angle, float Lo, float Hi)
+template <class T>
+T FMath::ClampAngle(T Angle, T Lo, T Hi)
 {
-	const float MaxDelta = FRotator3f::ClampAxis(Hi - Lo) * 0.5f;
-	const float RangeCenter = FRotator3f::ClampAxis(Lo + MaxDelta);
-	const float DeltaFromCenter = FRotator3f::NormalizeAxis(Angle - RangeCenter);
-	if (DeltaFromCenter > MaxDelta) { return FRotator3f::NormalizeAxis(RangeCenter + MaxDelta); }
-	else if (DeltaFromCenter < -MaxDelta) { return FRotator3f::NormalizeAxis(RangeCenter - MaxDelta); }
-	return FRotator3f::NormalizeAxis(Angle);
+	const T MaxDelta = UE::Math::TRotator<T>::ClampAxis(Hi - Lo) * (T)0.5;
+	const T RangeCenter = UE::Math::TRotator<T>::ClampAxis(Lo + MaxDelta);
+	const T DeltaFromCenter = UE::Math::TRotator<T>::NormalizeAxis(Angle - RangeCenter);
+	if (DeltaFromCenter > MaxDelta) { return UE::Math::TRotator<T>::NormalizeAxis(RangeCenter + MaxDelta); }
+	else if (DeltaFromCenter < -MaxDelta) { return UE::Math::TRotator<T>::NormalizeAxis(RangeCenter - MaxDelta); }
+	return UE::Math::TRotator<T>::NormalizeAxis(Angle);
 }
 
 template <class T>

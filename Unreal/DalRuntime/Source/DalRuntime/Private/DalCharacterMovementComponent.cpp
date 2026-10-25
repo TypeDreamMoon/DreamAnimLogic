@@ -27,6 +27,8 @@ namespace
 		Result.bStartPenetrating = Hit.bStartPenetrating;
 		Result.Primitive = Hit.GetComponent();
 		Result.FaceNormal = FVector3f(Hit.Normal);
+		Result.PointD = Hit.ImpactPoint;                         // (the engine's own precision: hit.point_d / hit.location_d)
+		Result.LocationD = Hit.Location;
 		return Result;
 	}
 

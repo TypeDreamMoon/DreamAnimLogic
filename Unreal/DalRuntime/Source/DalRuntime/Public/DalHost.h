@@ -7,7 +7,7 @@
 //            queued on the game thread, handled at the start of the logic's next update;
 // * FCommand something the logic asks the host to do (play a montage, change the walk speed ...);
 //            queued by the update (any thread), executed on the game thread after it;
-// * FHit     the result of a host trace (a reduced FHitResult);
+// * FHit     the result of a host trace (a reduced FHitResult: positions as float and, for point_d / location_d, as the double the engine has);
 // * IEventSink / FEventRouter   how events that do not come from an animation delegate reach the logics of an actor:
 //            the hooks of the character (the movement component of DalRuntime posts them) and the notifies of the
 //            classes a program declares (the generated notify classes post them).  A logic that handles such an
@@ -26,13 +26,14 @@ class UPrimitiveComponent;
 class UAnimMontage;
 class UAnimSequenceBase;
 
-#define DAL_HOST_VERSION 2
+#define DAL_HOST_VERSION 3
 
 namespace DalHost
 {
 	/** Result of a trace; a miss has bBlocking == false, Point == Location == the trace end, Distance == 0 and Time == 1.
 	 *  Point / Normal are the ImpactPoint / ImpactNormal of the FHitResult, FaceNormal its Normal, Location the swept shape's
-	 *  center at the hit; Primitive is the component that was hit. */
+	 *  center at the hit; Primitive is the component that was hit.  PointD and LocationD are Point and Location as the engine has
+	 *  them (double, not narrowed): `hit.point_d` and `hit.location_d` of the language. */
 	struct FHit
 	{
 		bool bBlocking = false;
@@ -44,6 +45,8 @@ namespace DalHost
 		bool bStartPenetrating = false;
 		UPrimitiveComponent* Primitive = nullptr;
 		FVector3f FaceNormal = FVector3f(0.0f, 0.0f, 0.0f);
+		FVector PointD = FVector(0.0, 0.0, 0.0);
+		FVector LocationD = FVector(0.0, 0.0, 0.0);
 	};
 
 	enum class EEventKind : uint8
@@ -272,7 +275,8 @@ namespace DalHost
 		FVector3f V = FVector3f(0.0f, 0.0f, 0.0f);
 		FRotator3f R = FRotator3f(0.0f, 0.0f, 0.0f);
 		// v4
-		FQuat4f Q = FQuat4f(0.0f, 0.0f, 0.0f, 1.0f);         // root_motion_override: the rotation delta
+		FVector VD = FVector(0.0, 0.0, 0.0);                 // the commands that take a vec3d: root_motion_override (the velocity), set_actor_location (the location)
+		FQuat QD = FQuat(0.0, 0.0, 0.0, 1.0);                // root_motion_override: the rotation delta (double, as the engine takes it)
 		FName Name;                            // slot name, or the dotted path of the snapshot state
 		int32 Count = 0;                       // play_slot_animation: loops
 		int32 Instance = INDEX_NONE;           // montage_stop_source: the montage instance that raised the notify
@@ -359,11 +363,11 @@ namespace DalHost
 			return C;
 		}
 
-		inline FCommand RootMotionOverride(const FVector3f& Velocity, const FQuat4f& RotationDelta)
+		inline FCommand RootMotionOverride(const FVector& Velocity, const FQuat& RotationDelta)
 		{
 			FCommand C = Make(ECommand::RootMotionOverride);
-			C.V = Velocity;
-			C.Q = RotationDelta;
+			C.VD = Velocity;
+			C.QD = RotationDelta;
 			return C;
 		}
 
@@ -375,10 +379,10 @@ namespace DalHost
 		inline FCommand RagdollSetMotorStrength(float V) { return WithFloat(ECommand::RagdollSetMotorStrength, V); }
 		inline FCommand RagdollEnd() { return Make(ECommand::RagdollEnd); }
 
-		inline FCommand SetActorLocation(const FVector3f& Location, bool bSweep, bool bTeleport)
+		inline FCommand SetActorLocation(const FVector& Location, bool bSweep, bool bTeleport)
 		{
 			FCommand C = Make(ECommand::SetActorLocation);
-			C.V = Location;
+			C.VD = Location;
 			C.B0 = bSweep;
 			C.B1 = bTeleport;
 			return C;
