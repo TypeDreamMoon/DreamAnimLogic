@@ -78,6 +78,7 @@ class CppOptions:
     parent_class: str = ""                         # "" = UAnimInstance for anim logic, UActorComponent for actor logic
     parent_include: str = ""                       # "" = Animation/AnimInstance.h resp. Components/ActorComponent.h
     property_bag: bool = False                     # anim logic: also emit U<Logic>Bag, the same UPROPERTYs without the logic (DalLive)
+    double_members: bool = False                   # vector / rotator / quat / transform members of structs are the double-precision engine types (MEMBER_TYPES)
 
 
 KIND_PARENT = {
@@ -265,6 +266,33 @@ def cpp_prop_type(ty: Type) -> str:
     return ty.cpp_prop_type if isinstance(ty, EnumType) else cpp_type(ty)
 
 
+# The members of structs (state structs, settings, notify payloads) are what Blueprint pins, Control Rig variables and data assets see.  ALS's own
+# structs have the double-precision types there (FVector, FQuat, ...), and a Control Rig does not convert a pin of FVector3f to one of FVector, so
+# with CppOptions.double_members the members have the engine's default types while the logic keeps computing in the single-precision ones: every
+# read of such a member converts to the logic's type, every write converts back.  Top-level states, inputs and params keep the logic's types.
+MEMBER_TYPES: dict = {}                              # filled below, after the types are known
+_DOUBLE_MEMBERS = False                              # set by generate_cpp for the duration of one generation
+
+
+def double_member(ty: Type) -> bool:
+    return _DOUBLE_MEMBERS and ty in MEMBER_TYPES
+
+
+def member_type(ty: Type) -> str:
+    """C++ type of a member of a struct."""
+    return MEMBER_TYPES[ty] if double_member(ty) else cpp_prop_type(ty)
+
+
+def to_member(text: str, ty: Type) -> str:
+    """An expression of the logic's type, stored into a member of a struct."""
+    return f"{MEMBER_TYPES[ty]}({text})" if double_member(ty) else text
+
+
+def from_member(text: str, ty: Type) -> str:
+    """A member of a struct, as the logic's type."""
+    return f"{cpp_type(ty)}({text})" if double_member(ty) else text
+
+
 def cpp_value(ty: Type, v) -> str:
     if ty is FLOAT:
         return fmt_float(v)
@@ -297,6 +325,18 @@ def cpp_value(ty: Type, v) -> str:
     raise ValueError(ty)
 
 
+MEMBER_TYPES.update({VEC2: "FVector2D", VEC3: "FVector", ROTATOR: "FRotator", QUAT: "FQuat", TRANSFORM: "FTransform"})
+
+
+def member_value(ty: Type, v) -> str:
+    """The default value of a member of a struct."""
+    if not double_member(ty):
+        return cpp_value(ty, v)
+    if ty is TRANSFORM:
+        return "FTransform(%s, %s, %s)" % (member_value(QUAT, v[1]), member_value(VEC3, v[0]), member_value(VEC3, v[2]))
+    return "%s(%s)" % (MEMBER_TYPES[ty], ", ".join(fmt_float(c) for c in v))
+
+
 def cpp_tag_value(ty: TagType, v) -> str:
     member = ty.member_of(str(v))
     if member == "None":
@@ -323,14 +363,15 @@ def cpp_struct_value(ty: StructType, v, var: str = "Dal_S") -> str:
              if not f.derived and not isinstance(f.ty, (AssetType, MapType, ArrayType)) and not _plain_equal(getattr(v, f.name), values.member_default(f))]
     if not diffs:
         return f"{ty.cpp_type}()"
-    sets = " ".join(f"{var}.{f.name} = {cpp_value(f.ty, getattr(v, f.name))};" for f in diffs)
+    sets = " ".join(f"{var}.{f.name} = {member_value(f.ty, getattr(v, f.name))};" for f in diffs)
     return f"[]() {{ {ty.cpp_type} {var}; {sets} return {var}; }}()"
 
 
-def member_init(ty: Type, v) -> tuple[str, str | None]:
+def member_init(ty: Type, v, in_struct: bool = False) -> tuple[str, str | None]:
     """A default member initializer for a UPROPERTY: ``(" = value", None)``, or ``("", "value")`` when the value is an immediately-invoked
-    lambda (a struct with non-default members): UHT cannot parse those inside a USTRUCT / UCLASS, so the value goes into a constructor."""
-    text = cpp_value(ty, v)
+    lambda (a struct with non-default members): UHT cannot parse those inside a USTRUCT / UCLASS, so the value goes into a constructor.
+    in_struct: a member of a struct (with CppOptions.double_members it has the engine's own types)."""
+    text = member_value(ty, v) if in_struct else cpp_value(ty, v)
     if "[]()" in text:
         return "", text
     return f" = {text}", None
@@ -449,7 +490,7 @@ class CppExprGen:
     def make_struct(self, e: ir.MakeStruct) -> str:
         var = f"Dal_S{self.struct_depth}"
         self.struct_depth += 1
-        sets = " ".join(f"{var}.{n} = {unparen(self.x(v))};" for n, v in e.fields)
+        sets = " ".join(f"{var}.{n} = {to_member(unparen(self.x(v)), v.ty)};" for n, v in e.fields)
         self.struct_depth -= 1
         return f"([&]() {{ {cpp_type(e.ty)} {var}; {sets} return {var}; }})()" if sets else f"{cpp_type(e.ty)}()"
 
@@ -457,7 +498,7 @@ class CppExprGen:
         base = self.x(e.x)
         if isinstance(e.x.ty, StructType):
             text = f"{base}->{e.comps}" if e.x.ty.is_notify else f"{base}.{e.comps}"
-            return f"static_cast<{enum_cast(e.ty)}>({text})" if enum_cast(e.ty) else text
+            return f"static_cast<{enum_cast(e.ty)}>({text})" if enum_cast(e.ty) else from_member(text, e.ty)
         if e.x.ty is HIT:
             return f"{base}.{HIT_MEMBER_CPP[e.comps]}"
         if e.x.ty is SPRING or e.x.ty is SPRING3:
@@ -808,7 +849,7 @@ class CppGen:
                 else:
                     out.append(f"{pad}{unparen(self.ex.x(s.expr))};")
             elif isinstance(s, ir.AssignField):
-                out.append(f"{pad}{s.name}{''.join('.' + m for m in s.path)} = {unparen(self.ex.x(s.value))};")
+                out.append(f"{pad}{s.name}{''.join('.' + m for m in s.path)} = {to_member(unparen(self.ex.x(s.value)), s.value.ty)};")
             elif isinstance(s, ir.If):
                 out.extend(self.if_chain(s, depth))
             elif isinstance(s, ir.Return):
@@ -1811,8 +1852,8 @@ class CppGen:
         for f in st.fields:
             out.append("")
             out.append(f'{T}UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "DAL")')
-            init, late = member_init(f.ty, f.default)
-            out.append(f"{T}{cpp_prop_type(f.ty)} {f.name}{init};")
+            init, late = member_init(f.ty, f.default, True)
+            out.append(f"{T}{member_type(f.ty)} {f.name}{init};")
             if late is not None:
                 ctor.append(f"{T}{T}{f.name} = {late};")
         if ctor:
@@ -1834,11 +1875,11 @@ class CppGen:
                 members.append("")
             if f.derived:
                 members.append(f'{T}UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "DAL", Transient)')
-                init, late = member_init(f.ty, getattr(inst, f.name))
+                init, late = member_init(f.ty, getattr(inst, f.name), True)
             else:
                 members.append(f'{T}UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "DAL")')
-                init, late = ("", None) if isinstance(f.ty, (MapType, ArrayType, AssetType)) else member_init(f.ty, f.default)
-            members.append(f"{T}{cpp_prop_type(f.ty)} {f.name}{init};")
+                init, late = ("", None) if isinstance(f.ty, (MapType, ArrayType, AssetType)) else member_init(f.ty, f.default, True)
+            members.append(f"{T}{member_type(f.ty)} {f.name}{init};")
             if late is not None:
                 ctor.append(f"{T}{T}{f.name} = {late};")
         if root:
@@ -1865,7 +1906,7 @@ class CppGen:
                         out += [f"{T}{T}for (auto& Item : {f.name})", f"{T}{T}{{", f"{T}{T}{T}Item.DalRecomputeDerived();", f"{T}{T}}}"]
             for f in st.fields:
                 if f.derived:
-                    out.append(f"{T}{T}{f.name} = {unparen(self.ex.x(f.expr))};")
+                    out.append(f"{T}{T}{f.name} = {to_member(unparen(self.ex.x(f.expr)), f.ty)};")
             out.append(f"{T}}}")
             if root:
                 out += ["",
@@ -2838,6 +2879,8 @@ class CppGen:
                 value = f"{pu.peer}->" + ".".join(pu.path)
             if enum_cast(i.ty):
                 value = f"static_cast<{enum_cast(i.ty)}>({value})"
+            elif len(pu.path) > 1:                                    # a member of a struct (or of a settings asset): see double_member
+                value = from_member(value, i.ty)
             L.append(f"{T}{i.name} = {pu.peer} != nullptr ? {value} : {cpp_value(i.ty, i.default)};")
         L.append("}")
         return L
@@ -3020,7 +3063,16 @@ class CppGen:
 
 def generate_cpp(module: ir.Module, options: CppOptions | None = None) -> dict[str, str]:
     """Return ``{filename: text}`` for the generated header, source, the math header and (v1 host traffic) DalHost.h."""
+    global _DOUBLE_MEMBERS
     options = options or CppOptions()
+    _DOUBLE_MEMBERS = options.double_members
+    try:
+        return _generate_cpp(module, options)
+    finally:
+        _DOUBLE_MEMBERS = False
+
+
+def _generate_cpp(module: ir.Module, options: CppOptions) -> dict[str, str]:
     g = CppGen(module, options)
     here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cpp")
 

@@ -57,7 +57,7 @@ def cmd_compile(args) -> int:
         changed = _write_if_changed(path, generate_python(module))
         print(f"{'wrote' if changed else 'up to date'} {path}")
     if args.cpp:
-        opts = CppOptions(args.module, args.parent_class, args.parent_include, property_bag=args.bag)
+        opts = CppOptions(args.module, args.parent_class, args.parent_include, property_bag=args.bag, double_members=args.double_members)
         for name, text in generate_cpp(module, opts).items():
             path = os.path.join(args.cpp, name)
             changed = _write_if_changed(path, text)
@@ -135,6 +135,9 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--parent-include", default="", help="header that declares the base class")
     c.add_argument("--bag", action="store_true",
                    help="anim logic: also write U<Logic>Bag, the same UPROPERTYs without the logic (the AnimInstance parent for the DalLive interpreter)")
+    c.add_argument("--double-members", action="store_true",
+                   help="vector / rotator / quat / transform members of structs get the double-precision engine types (FVector, FRotator, FQuat, FTransform) "
+                        "instead of FVector3f ...: what a Control Rig or a Blueprint pin that was made for ALS's own structs expects; the logic still computes in single precision")
     c.set_defaults(func=cmd_compile)
 
     k = sub.add_parser("check", help="parse and type-check only")

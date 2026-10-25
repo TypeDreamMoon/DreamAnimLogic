@@ -7,7 +7,7 @@ import _bootstrap  # noqa: F401
 import dal
 import test_cpp_compile as tcc
 from dal import harness, ir
-from dal.cppbackend import generate_cpp
+from dal.cppbackend import CppOptions, generate_cpp
 from dal.interp import Interpreter
 from dal.pybackend import generate_python, load_class
 from struct_sources import PROGRAM, STRUCTS
@@ -238,6 +238,23 @@ class StructCppTests(unittest.TestCase):
         m = compile_ok(PROGRAM).module
         for seed in (1, 2, 3):
             tcc.CppCompileTests.run_case(self, m, harness.random_frames(m, 100, seed), warnings_as_errors=True)
+
+    def test_double_members_match_python(self):
+        # the members of structs have the double-precision engine types, the logic still computes in single precision
+        m = compile_ok(PROGRAM).module
+        opts = CppOptions(double_members=True)
+        for seed in (1, 2):
+            tcc.CppCompileTests.run_case(self, m, harness.random_frames(m, 100, seed), options=opts, warnings_as_errors=True)
+
+    def test_double_members_text(self):
+        h = generate_cpp(compile_ok(PROGRAM).module, CppOptions(double_members=True))["Sketch.h"]
+        self.assertIn("	FVector Axis = FVector(0.0f, 0.0f, -1.0f);", h)           # a member of a struct
+        self.assertIn("	FVector2D Lean = FVector2D(0.0f, 0.0f);", h)
+        self.assertIn("	FRotator Look = FRotator(0.0f, 0.0f, 0.0f);", h)
+        self.assertIn("	FQuat Turn = FQuat(0.0f, 0.0f, 0.0f, 1.0f);", h)
+        self.assertIn("	FVector3f Velocity = FVector3f(0.0f, 0.0f, 0.0f);", h)      # an input of the logic keeps the single-precision type
+        plain = generate_cpp(compile_ok(PROGRAM).module)["Sketch.h"]
+        self.assertIn("	FVector3f Axis = FVector3f(0.0f, 0.0f, -1.0f);", plain)     # off by default
 
     def test_actor_logic_with_a_library_struct(self):
         files = StructLibraryTests.FILES
