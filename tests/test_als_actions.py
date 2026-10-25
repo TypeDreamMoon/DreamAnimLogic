@@ -611,7 +611,10 @@ class RagdollTests(Case):
                 self.assertEqual(rig.command("montage_play"), (montage, 1.0, None))                   # SelectGetUpMontage(bRagdollFacingUpward)  CA:1159, :1169
                 self.assertEqual(rig.commands("set_input_blocked"), [(False,), (True,)])              # the empty action unblocks (C:1095), then CA:1161 blocks for the get up
                 self.assertEqual(rig.s["LocomotionAction"], GETTING_UP)                               # CA:1163
-                for first, second in (("ragdoll_end", "set_actor_location"), ("set_movement_mode_locked", "set_movement_mode"), ("set_movement_mode", "montage_play")):
+                # (ragdoll_end is the second half of the C++ function -- the mesh is attached back and the offsets restored -- so it comes after the actor was moved:
+                # the service shifts the pose by the move.  The simulation is off before the actor moves in the C++ and after it here; the move is NoPhysics either way.)
+                for first, second in (("set_actor_location", "ragdoll_end"), ("set_actor_rotation", "ragdoll_end"),
+                                      ("set_movement_mode_locked", "set_movement_mode"), ("set_movement_mode", "montage_play")):
                     self.assertLess(names.index(first), names.index(second), (roll, first, second))   # the order of the C++ calls
                 self.assertEqual(rig.s["LocomotionMode"], base.GROUNDED)                              # (OnMovementModeChanged inside SetMovementMode)
                 self.assertEqual(upward, roll <= 0.0)

@@ -1525,9 +1525,8 @@ method stop_ragdolling_implementation() {                                       
 
     let pelvis_rotation = to_rotator(PelvisTransform.rotation);                  // :1078-1079 (its yaw turns the actor; whether it lies face up the ragdoll service says)
 
-    // Disable mesh physics simulation and enable capsule collision.   :1081
-    host.ragdoll_end();                                                          // :1083-1092 (and the network smoothing :1091-1092)
-
+    // Disable mesh physics simulation and enable capsule collision.   :1081 (host.ragdoll_end below: the actor is moved first, the service then
+    // attaches the mesh to the capsule where it is and puts the pelvis of the final pose where it was, :1100-1138)
     let ground = ragdoll_trace_ground();                                         // :1094-1095
 
     // Determine whether the ragdoll is facing upward or downward and set the actor rotation accordingly.   :1097
@@ -1539,8 +1538,9 @@ method stop_ragdolling_implementation() {                                       
     host.set_actor_location(ground.Location, false, true);                       // :1104 SetActorLocationAndRotation(.., false, nullptr, ETeleportType::TeleportPhysics)
     set_actor_rotation_now(new_actor_rotation, true);
 
-    // Attach the mesh back and restore its default relative location (:1106-1126), restore the pelvis transform of the final pose (:1128-1138):
-    // the host's ragdoll service.
+    // Mesh physics simulation off, capsule collision on (:1081-1092), the mesh attached back to the moved capsule at its default relative
+    // location (:1106-1126), the pelvis transform of the final pose restored (:1128-1138): the host's ragdoll service.
+    host.ragdoll_end();
 
     // If the ragdoll is on the ground, set the movement mode to walking and play a get up montage. If not, set the movement mode to
     // falling and update the character movement velocity to match the last ragdoll velocity.   :1140
