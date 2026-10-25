@@ -1,13 +1,14 @@
 param(
     [string]$Rev = 'worktree',                                   # the .dal sources: HEAD, another revision, or worktree (what is in als/ now)
     [string]$Out = 'G:\DCC\scratch\h5\cycle',                    # takes, comparison files and logs go here
-    [string]$Takes = 'lane,speed_jumps,stance_changes,rotation_modes,view_yaw_sweeps,in_air,view_mode,roll,mantle,features',
+    [string]$Takes = 'lane,speed_jumps,stance_changes,rotation_modes,view_yaw_sweeps,in_air,view_mode,roll,mantle,features,ragdoll',
     [switch]$NoRefresh,                                          # the host already has the generated code of this revision, built
     [switch]$NoChecks,
-    [switch]$WithC3
+    [switch]$WithC3,
+    [switch]$Windowless                                          # record without a renderer (-nullrhi): faster, but the mesh does not count as rendered and the notifies of montages differ
 )
-# The whole PIE cycle for the generated ALS (about 12 minutes, no window): generate + swap into the host + build, the 14 DalRuntime checks, the truth
-# takes recorded and compared with G:\DCC\AlsTruth, a table with one row per take.  -WithC3 also runs the c3 scenarios of the Blender side.
+# The whole PIE cycle for the generated ALS (about 20 minutes; the takes render offscreen at 1024x576 like the original ones, -Windowless: no renderer at all): generate + swap into the host + build, the 14 DalRuntime checks, the truth
+# takes recorded and compared with G:\DCC\AlsTruth, a table with one row per take.  No window is ever shown (the takes render offscreen).  -WithC3 also runs the c3 scenarios of the Blender side.
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 $truth = 'G:\DCC\AlsTruth'
@@ -19,8 +20,13 @@ if (-not $NoChecks) {
     & (Join-Path $PSScriptRoot 'run_editor.ps1') -Script (Join-Path $PSScriptRoot 'runtime_checks.py') -Log (Join-Path $Out 'editor_checks.log') -Fixed60
     python -c "import json,sys; d=json.load(open(sys.argv[1])); print(len(d), 'checks, failed:', [k for k,v in d.items() if not v.get('ok')])" $env:DALCHK_OUT
 }
-& (Join-Path $PSScriptRoot 'record_takes.ps1') -Takes $Takes -Out (Join-Path $Out 'takes') -Res (Join-Path $Out 'res') -Tag cycle
+& (Join-Path $PSScriptRoot 'record_takes.ps1') -Takes $Takes -Out (Join-Path $Out 'takes') -Res (Join-Path $Out 'res') -Tag cycle -Rendered:(-not $Windowless)
 foreach ($t in $Takes.Split(',')) {
+    if ($t -eq 'ragdoll') {                                      # a ragdoll cannot be compared frame by frame: the state machine, the timings, the get up
+        python -I (Join-Path $PSScriptRoot 'compare_ragdoll.py') (Join-Path $Out 'takes\als_ragdoll.dvrec') (Join-Path $truth 'als_ragdoll.dvrec') `
+               --json (Join-Path $Out 'ragdoll_cmp.json') --md (Join-Path $Out 'ragdoll_cmp.md') | Out-Null
+        continue
+    }
     $seg = Join-Path $Out "res\r1_info_$t.json"                  # the route segments the recorder driver wrote
     $args_ = @((Join-Path $PSScriptRoot 'compare_takes.py'), (Join-Path $Out "takes\als_$t.dvrec"), (Join-Path $truth "als_$t.dvrec"),
                '--json', (Join-Path $Out "cmp_$t.json"), '--md', (Join-Path $Out "cmp_$t.md"))

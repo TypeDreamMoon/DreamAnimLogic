@@ -16,3 +16,4 @@ $p.WaitForExit()
 if (Test-Path $err) { Get-Content $err | Add-Content $Log }
 "exit=$($p.ExitCode)" | Add-Content $Log
 Get-Content $Log | Select-String -Pattern 'error|Error:|warning C|Result:|Total execution|exit=' | Select-Object -First 60
+if ($p.ExitCode -ne 0) { throw "the build of the sandbox host failed (exit $($p.ExitCode)), see $Log" }       # (a cycle must not record takes with the binaries of an earlier build)

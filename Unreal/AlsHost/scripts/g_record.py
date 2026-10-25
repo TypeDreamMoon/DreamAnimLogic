@@ -9,7 +9,11 @@
 #   * the calls the driver makes on the character that were methods of AAlsCharacter (set_desired_gait, jump, start_rolling_grounded ...) go to
 #     the UAlsCharacter component of the pawn, everything else to the pawn itself;
 #   * the Animation Blueprints of the camera are not compiled (their parent class lives in ALSCamera, which is switched off).
-# Environment: as r1_record.py (R1_TAKES, R1_OUT, R1_RES, R1_SUFFIX, R1_TRUTH).
+#   * it adds the "ragdoll" take (start_ragdolling / stop_ragdolling in a run, at rest and in the air) and the two driver commands it needs; the
+#     other takes are untouched, so their routes are still the ones of the original truth takes.
+# R1_ORIGINAL=1 runs the same driver against the ORIGINAL ALS (host_als.py restore; B_Als_Character is the pawn): no game mode override, the driver's
+# calls go straight to the character.  That is how the ragdoll take of the original and the original's takes with the current recorder are made.
+# Environment: as r1_record.py (R1_TAKES, R1_OUT, R1_RES, R1_SUFFIX, R1_TRUTH), and R1_ORIGINAL.
 import os
 import sys
 
@@ -19,6 +23,8 @@ import unreal
 from harness import Wait, log
 
 R1 = TOOLS + "/r1_record.py"
+ORIGINAL = os.environ.get("R1_ORIGINAL", "0") == "1"
+RENDERED = os.environ.get("R1_RENDERED", "0") == "1"
 GAME_MODE = "/Script/DreamAnimTestHost.DalAlsHostGameMode"
 LOGIC_CLASS = "AlsCharacter"
 # what the driver calls on the character and AAlsCharacter had (the generated component has them as BlueprintCallable methods)
@@ -32,16 +38,18 @@ class AlsPawn:
     def __init__(self, actor):
         object.__setattr__(self, "_actor", actor)
         comps = [c for c in actor.get_components_by_class(unreal.ActorComponent) if c.get_class().get_name() == LOGIC_CLASS]
-        if not comps:
+        if not comps and not ORIGINAL:
             raise RuntimeError("the pawn %s has no %s component" % (actor.get_name(), LOGIC_CLASS))
-        object.__setattr__(self, "_logic", comps[0])
+        object.__setattr__(self, "_logic", comps[0] if comps else None)
         # the host editor runs without a renderer (-nullrhi, no window), where a mesh counts as not rendered and ticks only its montages: the original
         # takes were made with a rendered mesh, whose animation ticks fully
-        for mesh in actor.get_components_by_class(unreal.SkeletalMeshComponent):
-            mesh.set_editor_property("visibility_based_anim_tick_option", unreal.VisibilityBasedAnimTickOption.ALWAYS_TICK_POSE_AND_REFRESH_BONES)
+        # (a rendered run has a renderer, the mesh counts as rendered and ticks like it did in the original takes: leave the options alone)
+        if not RENDERED:
+            for mesh in actor.get_components_by_class(unreal.SkeletalMeshComponent):
+                mesh.set_editor_property("visibility_based_anim_tick_option", unreal.VisibilityBasedAnimTickOption.ALWAYS_TICK_POSE_AND_REFRESH_BONES)
 
     def __getattr__(self, name):
-        if name in LOGIC_METHODS:
+        if name in LOGIC_METHODS and self._logic is not None:
             return getattr(self._logic, name)
         return getattr(self._actor, name)
 
@@ -64,12 +72,53 @@ class _UnrealShim:
         return getattr(unreal, name)
 
 
+# The ragdoll route: a ragdoll from a run, from standing and from a jump, each followed by the get up.  step(...) keys: ragdoll -> start_ragdolling,
+# get_up -> stop_ragdolling (which plays the get up montage when the ragdoll lies on the ground).
+RAGDOLL_STEPS = """
+RAGDOLL = [
+    step("idle", 1.5),
+    step("run", 2.0, gait="Running", move=(1, 0)),
+    step("ragdoll_run", 4.0, ragdoll=True, move=(0, 0)),
+    step("get_up", 4.5, get_up=True),
+    step("run_again", 2.0, move=(1, 0)),
+    step("stop", 1.5, move=(0, 0)),
+    step("ragdoll_idle", 3.5, ragdoll=True),
+    step("get_up_2", 4.5, get_up=True),
+    step("jump_ragdoll", 5.0, jump=True, at=[(0.5, {"ragdoll": True})]),
+    step("get_up_3", 4.5, get_up=True),
+    step("end", 1.5),
+]
+
+"""
+
+
+def add_ragdoll_take(src):
+    """The driver source with the ragdoll take and its two commands added (each anchor must be there once)."""
+    nl = chr(10)
+    edits = [
+        ("SCRIPTED = {" + nl, RAGDOLL_STEPS + "SCRIPTED = {" + nl),
+        ('    "mantle": (MANTLE, "mantling over a 130 cm box"),' + nl + "}",
+         '    "mantle": (MANTLE, "mantling over a 130 cm box"),' + nl
+         + '    "ragdoll": (RAGDOLL, "ragdolling from a run, at rest and in the air, with the get up"),' + nl + "}"),
+        ('        if c.get("roll"):' + nl + "            ch.start_rolling_grounded(1.0)" + nl + '            cmd("start_rolling_grounded", play_rate=1.0)' + nl,
+         '        if c.get("roll"):' + nl + "            ch.start_rolling_grounded(1.0)" + nl + '            cmd("start_rolling_grounded", play_rate=1.0)' + nl
+         + '        if c.get("ragdoll"):' + nl + "            ch.start_ragdolling()" + nl + '            cmd("start_ragdolling")' + nl
+         + '        if c.get("get_up"):' + nl + "            ch.stop_ragdolling()" + nl + '            cmd("stop_ragdolling")' + nl),
+    ]
+    for old, new in edits:
+        if src.count(old) != 1:
+            raise RuntimeError("r1_record.py has changed: anchor not found once: " + old[:50])
+        src = src.replace(old, new)
+    return src
+
+
 def load_driver():
     src = open(R1, encoding="utf-8").read()
     tail = "run(steps)"
     if not src.rstrip().endswith(tail):
         raise RuntimeError("r1_record.py does not end with run(steps)")
     src = src.rstrip()[: -len(tail)]
+    src = add_ragdoll_take(src)
     ns = {"__name__": "r1_record_generated", "__file__": R1}
     exec(compile(src, R1, "exec"), ns)
     ns["unreal"] = _UnrealShim()
@@ -83,7 +132,8 @@ def load_driver():
         @staticmethod
         def compile_blueprints(folder):
             paths = ns["ar_real"].asset_paths_from_dab(folder)
-            paths = [p for p in paths if "ALSCamera" not in p and "PostProcessing" not in p]
+            if not ORIGINAL:
+                paths = [p for p in paths if "ALSCamera" not in p and "PostProcessing" not in p]
             return real_compile(paths)
 
     ns["ar_real"] = ns["ar"]
@@ -94,12 +144,13 @@ def load_driver():
 def main():
     ns = load_driver()
     yield Wait(6.0)
-    world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
-    mode = unreal.load_class(None, GAME_MODE)
-    if mode is None:
-        raise RuntimeError("cannot load " + GAME_MODE)
-    world.get_world_settings().set_editor_property("default_game_mode", mode)
-    log("game mode override: %s" % mode.get_path_name())
+    if not ORIGINAL:
+        world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+        mode = unreal.load_class(None, GAME_MODE)
+        if mode is None:
+            raise RuntimeError("cannot load " + GAME_MODE)
+        world.get_world_settings().set_editor_property("default_game_mode", mode)
+        log("game mode override: %s" % mode.get_path_name())
     for w in ns["steps"]():
         yield w
 
