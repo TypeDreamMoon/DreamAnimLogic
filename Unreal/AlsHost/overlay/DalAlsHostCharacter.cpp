@@ -75,6 +75,17 @@ ADalAlsHostCharacter::ADalAlsHostCharacter(const FObjectInitializer& ObjectIniti
 	AlsInputLogic->DalAction_SwitchShoulder = FindAsset<UInputAction>(TEXT("/ALS/ALS/Data/Input/IA_Als_SwitchShoulder.IA_Als_SwitchShoulder"));
 	InputMappingContext = FindAsset<UInputMappingContext>(TEXT("/ALS/ALS/Data/Input/IMC_Als_Default.IMC_Als_Default"));
 
+	// B_Als_Character.OverlayAnimationInstanceClasses (the 13 overlay modes of AlsOverlayMode, each with the instance AB_Als_<Mode>)
+	for (const TCHAR* Mode : {TEXT("Default"), TEXT("Masculine"), TEXT("Feminine"), TEXT("Injured"), TEXT("HandsTied"), TEXT("Rifle"), TEXT("PistolOneHanded"),
+	                          TEXT("PistolTwoHanded"), TEXT("Bow"), TEXT("Torch"), TEXT("Binoculars"), TEXT("Box"), TEXT("Barrel")})
+	{
+		const FString Path = FString::Printf(TEXT("/ALS/ALS/Character/AnimationInstances/Overlays/AB_Als_%s.AB_Als_%s_C"), Mode, Mode);
+		if (UClass* OverlayClass = ConstructorHelpersInternal::FindOrLoadClass(const_cast<FString&>(Path), UAnimInstance::StaticClass()))
+		{
+			OverlayAnimationInstanceClasses.Add(FName(*FString::Printf(TEXT("Als.OverlayMode.%s"), Mode)), OverlayClass);
+		}
+	}
+
 	RagdollService = CreateDefaultSubobject<UDalRagdollService>(TEXT("RagdollService"));
 	HookProbe = CreateDefaultSubobject<UDalHookProbe>(TEXT("HookProbe"));
 
@@ -85,6 +96,49 @@ ADalAlsHostCharacter::ADalAlsHostCharacter(const FObjectInitializer& ObjectIniti
 	CameraArm->bUsePawnControlRotation = true;
 	Camera = CreateDefaultSubobject<UCameraComponent>(TEXT("Camera"));
 	Camera->SetupAttachment(CameraArm);
+}
+
+void ADalAlsHostCharacter::PostInitializeComponents()
+{
+	Super::PostInitializeComponents();
+
+	// The overlay layer is linked in this actor's tick (RefreshOverlayLinkedAnimationLayer): the mesh updates its animation after it, like the
+	// original, where the Blueprint event ran inside SetOverlayMode before the frame's animation update.
+	if (USkeletalMeshComponent* MeshComponent = GetMesh())
+	{
+		MeshComponent->PrimaryComponentTick.AddPrerequisite(this, PrimaryActorTick);
+	}
+}
+
+void ADalAlsHostCharacter::BeginPlay()
+{
+	Super::BeginPlay();
+
+	RefreshOverlayLinkedAnimationLayer();                    // AAlsCharacter::BeginPlay: OnOverlayModeChanged(OverlayMode)
+}
+
+void ADalAlsHostCharacter::Tick(const float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+
+	if (AlsLogic != nullptr && AlsLogic->OverlayMode != LinkedOverlayMode)
+	{
+		RefreshOverlayLinkedAnimationLayer();
+	}
+}
+
+void ADalAlsHostCharacter::RefreshOverlayLinkedAnimationLayer()
+{
+	if (AlsLogic == nullptr)
+	{
+		return;
+	}
+	LinkedOverlayMode = AlsLogic->OverlayMode;
+	const TSubclassOf<UAnimInstance>* OverlayClass = OverlayAnimationInstanceClasses.Find(LinkedOverlayMode.GetTagName());
+	if (OverlayClass != nullptr && *OverlayClass != nullptr && GetMesh() != nullptr)
+	{
+		GetMesh()->LinkAnimClassLayers(*OverlayClass);
+	}
 }
 
 void ADalAlsHostCharacter::NotifyControllerChanged()

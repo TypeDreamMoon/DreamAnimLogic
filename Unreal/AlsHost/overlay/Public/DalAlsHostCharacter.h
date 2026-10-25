@@ -10,10 +10,12 @@
 
 #include "CoreMinimal.h"
 #include "DalTestCharacter.h"
+#include "GameplayTagContainer.h"
 #include "DalAlsHostCharacter.generated.h"
 
 class UAlsCharacter;
 class UAlsInput;
+class UAnimInstance;
 class UCameraComponent;
 class UDalHookProbe;
 class UDalRagdollService;
@@ -50,8 +52,25 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ALS")
 	TObjectPtr<UInputMappingContext> InputMappingContext;
 
+	/** B_Als_Character.OverlayAnimationInstanceClasses: the animation instance class that implements the Overlay layer of AB_Als for each overlay mode. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ALS")
+	TMap<FName, TSubclassOf<UAnimInstance>> OverlayAnimationInstanceClasses;     // by tag name, Als.OverlayMode.<Mode>
+
 public:
 	explicit ADalAlsHostCharacter(const FObjectInitializer& ObjectInitializer);
 
 	virtual void NotifyControllerChanged() override;
+	virtual void PostInitializeComponents() override;
+	virtual void BeginPlay() override;
+	virtual void Tick(float DeltaSeconds) override;
+
+private:
+	/**
+	 * B_Als_Character's OnOverlayModeChanged -> RefreshOverlayLinkedAnimationLayer: link the layers of the overlay mode's animation instance class
+	 * into the mesh's animation instance.  The Blueprint event is called by SetOverlayMode in the original; a generated logic has no such event (the
+	 * Blueprint events of AAlsCharacter are dropped, als/AlsCharacter.dal), so the host character watches the logic's OverlayMode instead.
+	 */
+	void RefreshOverlayLinkedAnimationLayer();
+
+	FGameplayTag LinkedOverlayMode;
 };
