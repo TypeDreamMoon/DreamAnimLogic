@@ -177,9 +177,9 @@ mock hosts implement them.
 | | what | in the language | when it takes effect |
 |---|---|---|---|
 | reads | CMC values, actor transform, capsule, input actions, notify flags, montage state, animation curves, bone and mesh transforms, reference skeleton, the ragdoll's pelvis body (location, velocity, facing up), the consumed pre-penetration velocity, time dilation, mesh scale | `input X: type <- host.item`; the name of a bone or curve may have single spaces: `host.bone_world_transform("VB foot_l")` | sampled once at the start of an update |
-| events | notify / notify window begin+end (declared ones with a payload), montage ended / blending out, input action phases, the character's hooks (mode changed, jumped, landed, crouch, teleported, physics rotation), timers | `on notify Hit { ... }`, `on landed(h) { ... }` | handlers run at the start of the next update, oldest first (`slot_events`: at the start of every tick slot) |
+| events | notify / notify window begin+end (declared ones with a payload), montage ended / blending out, input action phases, the character's hooks (mode changed, jumped, landed, crouch, teleported, physics rotation), timers | `on notify Hit { ... }`, `on landed(h) { ... }` | handlers run at the start of the next update, oldest first (`slot_events`: at the start of every tick slot; `sync_events`: when the host raises the hook or the declared notify, in the middle of what the engine is doing) |
 | commands | CMC writes, jump / crouch / launch, montage play / stop / jump to section ... (a montage value works too), dynamic montages in slots, pose snapshots, root motion override, ragdoll, control rotation, spring arm, FOV | `host.set_max_walk_speed(v);` | **queued**; the host runs them in order after the update |
-| queries | line / sphere / capsule traces on a channel, overlap, walkable test, component reads, target list | `let h = host.trace_line(a, b);`, `host.sweep_capsule(a, b, r, hh, ch, blocking)` | answered immediately; the scene queries (marked in `python -m dal host`) also from an anim instance's worker thread, the rest game thread only |
+| queries | line / sphere / capsule traces on a channel, overlap, walkable test, component reads, target list | `let h = host.trace_line(a, b);`, `host.sweep_capsule(a, b, r, hh, ch, blocking)` | answered immediately; the scene queries (marked in `python -m dal host`) also from an anim instance's worker thread, the rest game thread only. `host.is_game_thread()` and `host.proxy_component_transform()` (what `Proxy.GetComponentTransform()` returns while the graph updates) are asked from the animation instance; a host without threads answers false and the mesh's transform |
 
 Python hosts subclass `dal.hostapi.HostV1` (every method documents the DreamVEd call it maps to:
 `MontageManager.play / stop / jump_to_section / set_next_section`, `CharacterMovement.jump / add_movement_input /
@@ -295,7 +295,7 @@ value-returning method call inside an expression (it was DAL4042 everywhere but 
 python -I -m unittest discover -s tests
 ```
 
-1161 tests (about 10 minutes; the C++ compile tests are most of it): 608 at 0.3.0, 379 when DalLive was added, 184 of them from v0 unchanged. Python 3.11+ syntax; also run under Blender 5.2's embedded Python 3.13.
+1195 tests (about 15 minutes; the C++ compile tests are most of it): 608 at 0.3.0, 379 when DalLive was added, 184 of them from v0 unchanged. Python 3.11+ syntax; also run under Blender 5.2's embedded Python 3.13.
 
 | File | What it checks |
 |---|---|
@@ -333,6 +333,9 @@ python -I -m unittest discover -s tests
 | `test_loops.py` (19), `test_root_motion.py` (19), `test_slot_order.py` (17), `test_consume_slots.py` (8), `test_small_additions.py` (14), `test_method_calls_in_expressions.py` (11) | 0.4.0: `break` / `while`, root motion override and montage asset queries, `slot_events` and `before` / `after` (system runs against the C++), consume-on-read sampling per slot, rotator arithmetic / `valid(Peer)` / settings member initialisers, method calls inside expressions |
 | `test_host_names.py` | host names with spaces (`"VB foot_l"`) for bones and curves in the checker, both Python implementations and C++; a `notify` or action name stays an identifier |
 | `test_ragdoll_reads.py` | the ragdoll reads `ragdoll_pelvis_location`, `ragdoll_velocity`, `ragdoll_facing_up` (what ALS reads off the pelvis body): checker, both Python implementations, C++ against the stand-in engine, and the `UDalRagdollService` getters the generated code calls |
+| `test_hook_slots.py` (13) | hook slots (`update(dt) in physics_walking`): the movement component runs the block itself at the start of its walking physics (`DalHost::FEventRouter::RunHook`); the checker, the order against peers, the three implementations (C++ against the stand-in engine) |
+| `test_sync_events.py` (11) | `logic X : actor sync_events` (also `anim`): the character's hooks and the declared notifies are handled when the host raises them, the inputs sampled then and the commands handed over before the call returns; an event raised by a handler waits for it; `DAL5097` |
+| `test_thread_queries.py` (13) | `host.is_game_thread()` / `host.proxy_component_transform()`: the protocol, the defaults of a host without threads, the interpreter and Python against the generated C++ (stand-in engine) with a scripted thread and proxy transform; an anim logic with `post_flush` that asks the thread runs the commands of its update, its entries and the calls other logics queued for it at once on the game thread |
 | `test_flush_peers.py` | `logic X : actor flush_peers`: the host commands a peer queued in the calls of a block run with the caller's own at the end of its block, in the caller's tick slot (interpreter, Python and C++ against the stand-in engine agree); without the option a peer's commands wait for its own block |
 | `test_live_session.py` | DalLive's pure-Python half with the mock hosts: which state survives a swap, compile errors keep the last good program, debounce, runtime faults, anim commands one update late, param overrides, compiler lookup |
 
@@ -353,8 +356,13 @@ Regenerate golden files with `UPDATE_GOLDEN=1 python -I -m unittest discover -s 
   `FVector3f` members (`--double-members`) and a linked animation instance whose parent stayed null (the engine updates it through its proxy, so the
   parent is looked up again in the thread-safe update).  Comparing the settings assets as the engine loads them (original vs generated classes) found
   three more: the turn-in-place settings are objects, the mantling / ground prediction channels are constructor defaults, `FFloatInterval` is the
-  engine's (the three options above).  `dal-syntax-v3.md` section 32 has the numbers.  Not covered: a cooked / packaged build, several logics with
-  same-named enums in one module, the ragdoll against the original (no ragdoll in the truth takes).
+  engine's (the three options above).  `dal-syntax-v3.md` section 32 has the numbers.  A second round (`dal-syntax-v3.md` section 34) closed the
+  open differences: the overlay layers the Blueprint linked, the crouch / landing frame (hook slot `physics_walking`, `sync_events`), the foot lock
+  (`host.proxy_component_transform()`, `host.is_game_thread()`, the teleport mark), the Control Rig input of the feet in the recorder, and the ragdoll
+  against a ragdoll take of the original.  Position, velocity, yaw, the state of the character and of the animation instance, the curves and the foot
+  lock amounts are equal to the original in every take; the poses are equal to 0.00-0.15 cm when the animation loop phase of the two runs is the same
+  (it is a property of how long the instance ran before the recording started, not of the logic).  Left: two places that need a `double` (34.7).
+  Not covered: a cooked / packaged build, several logics with same-named enums in one module.
 * Settings in C++ are filled by the engine's property system (`.uasset`); the JSON loader is Python only. A response container
   (`FCollisionResponseContainer`) in exported data is read as the list of channels that block; curves are `UCurveFloat` /
   `UCurveVector` objects.

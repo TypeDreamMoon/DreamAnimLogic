@@ -26,7 +26,14 @@ ALS（Sixze，MIT）的 `AlsCharacterMovementComponent.cpp` 里有两个函数�
 | 记下穿插调整之前走的速度 `PrePenetrationAdjustmentVelocity` | 覆写 `CalcVelocity`，`PhysWalking` 里每个子步记下它之后的 `Velocity`（最后一个胜出），`PhysWalking` 结束时若没瞬移、没根运动再提交 |
 | 地板由线追踪给出时保留扫描的 `Normal` / `PenetrationDepth` / `bStartPenetrating` / `HitObjectHandle` | 覆写 `ComputeFloorDist`：调基类；若结果是线追踪，再用 `LineDistance = 0` 调一次基类，只做扫描，把那四项抄回 |
 
-ALS 在 `PhysWalking` 开头刷新移动设置（走速、加速度、制动、摩擦），`.dal` 版本在 `after_movement` 槽末尾推。差一帧的情形：加速度。引擎在 `ControlledCharacterMove` 里用 `GetMaxAcceleration()` 缩放输入向量，在 `PhysWalking` **之前**，所以原版用的是上一步 `PhysWalking` 开头刷出来的加速度，不是当前速度对应的。推过来的值如果立刻生效，会早一步。所以 `MaxAccelerationWalking` 是“最近推的值”，`MaxAccelerationWalkingApplied` 是 `GetMaxAcceleration()` 在地面上返回的值，`PhysWalking` 开头才把前者抄给后者（冲刺起步的 3.14 cm 轨迹误差因此变成 0）。走速 / 制动 / 摩擦是 `PhysWalking` 里才读的，早写没有差别。剩下的差一帧：蹲 / 站起——原版在 CMC 的 `UpdateCharacterStateBeforeMovement` 里调 `OnStartCrouch`，角色立刻改姿态、同一步的 `PhysWalking` 用新姿态的走速；`.dal` 版本在角色 tick 里才看到（`is_crouching` 轮询或钩子事件，都在 CMC 之后）。录像里 1651 / 1951 两帧的推送值差一帧就是它（最大位置误差 0.69 cm）。
+ALS 在 `PhysWalking` 开头刷新移动设置（走速、加速度、制动、摩擦），`.dal` 版本在 `after_movement` 槽末尾推。差一帧的情形：加速度。引擎在 `ControlledCharacterMove` 里用 `GetMaxAcceleration()` 缩放输入向量，在 `PhysWalking` **之前**，所以原版用的是上一步 `PhysWalking` 开头刷出来的加速度，不是当前速度对应的。推过来的值如果立刻生效，会早一步。所以 `MaxAccelerationWalking` 是“最近推的值”，`MaxAccelerationWalkingApplied` 是 `GetMaxAcceleration()` 在地面上返回的值，`PhysWalking` 开头才把前者抄给后者（冲刺起步的 3.14 cm 轨迹误差因此变成 0）。走速 / 制动 / 摩擦是 `PhysWalking` 里才读的，早写没有差别。
+
+蹲 / 站起和落地曾经差一帧：原版在 CMC 的 `UpdateCharacterStateBeforeMovement` 里调 `OnStartCrouch`、角色立刻改姿态，同一步的 `PhysWalking` 用新姿态的走速；`.dal` 版本以前在角色 tick 里才看到。现在两处接上了：
+
+- **钩子槽 `physics_walking`**：`PhysWalking` 一开头（刷新 `MaxAccelerationWalkingApplied` 之前）调 `DalHost::FEventRouter::RunHook(CharacterOwner, "physics_walking", DeltaTime)`，`update(dt) in physics_walking` 的块就在这个点上跑（`AlsCharacter.dal` 在这里推 `push_grounded_movement_settings`，和原版 `PhysWalking` 开头的 `RefreshGroundedMovementSettings` 同一处；这一步没走 `PhysWalking` 时，`after_movement` 的块照旧推）。
+- **`sync_events`**：CMC 的钩子（模式变化、起跳、落地、蹲 / 站起、瞬移）投递给逻辑时，逻辑当场采样、跑处理器、交出命令，不等到下一个槽。蹲 / 站起的事件在 `UpdateCharacterStateBeforeMovement` 里发出，所以 `PhysWalking` 看到的已经是新姿态。
+
+两处接上后，蹲站、落地、悬崖边的位置 / 速度误差全是 0（录像里原来 7.5 cm / 41.7 cm/s、10.85 cm / 539 cm/s 的几帧）。
 
 ## 构建
 
@@ -35,5 +42,5 @@ ALS 在 `PhysWalking` 开头刷新移动设置（走速、加速度、制动、�
 ## 没验证的
 
 - 网络：整个插件按单机写，没有预测数据、`FSavedMove`、复制。
-- `UDalRagdollService::Begin` 的限速帧数、`End` 里恢复网格相对位置的做法照 ALS 写，没有和原版 ALS 的布娃娃录像对过（真值录像里没有布娃娃）；PIE 里只确认了开 / 停 / 下落 / 加力。
+- 布娃娃：和原版 ALS 的一条布娃娃录像对过（`Unreal/AlsHost/scripts/compare_ragdoll.py`：状态机、起止帧、起身蒙太奇的选择、`FinalRagdollPose` 握手一致；物理模拟不逐位一致，结束时胶囊相距几 cm）。`End()` 必须在逻辑把角色挪到地面之后才调，并且要把网格贴回胶囊后的组件空间姿势按网格这次的位移平移回去（原版是 `SetActorLocationAndRotation` → 网格 `SetWorldLocationAndRotationNoPhysics` → 重新附着 → 骨盆变换在快照里改回去，一步一步），不然起身后第一帧的最终姿势是错的。
 - 移动基座（`UpdateBasedRotation`、`ConsumeInputVector` 里的基座旋转补偿）没有移植。
