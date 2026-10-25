@@ -283,6 +283,9 @@ _SIMPLE = {
     "movement_mode_custom": lambda v: f"Move.CustomMovementMode = {int(v)};",
     "pre_penetration_velocity": lambda v: f"Move.StubPrePenetration = FVector({_num(v[0])}, {_num(v[1])}, {_num(v[2])});",
     "pre_penetration_velocity_valid": lambda v: f"Move.StubPrePenetrationValid = {'true' if v else 'false'};",
+    "ragdoll_pelvis_location": lambda v: f"Ragdoll.StubPelvisLocation = FVector({_num(v[0])}, {_num(v[1])}, {_num(v[2])});",
+    "ragdoll_velocity": lambda v: f"Ragdoll.StubPelvisVelocity = FVector({_num(v[0])}, {_num(v[1])}, {_num(v[2])});",
+    "ragdoll_facing_up": lambda v: f"Ragdoll.bStubFacingUp = {'true' if v else 'false'};",
 }
 _TRIGGER = {"started": "Started", "triggered": "Triggered", "ongoing": "Ongoing", "completed": "Completed", "canceled": "Canceled"}
 
@@ -491,6 +494,7 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
             "\tObj.StubPawn = &Pawn;",
             "\tObj.StubWorld = &World;",
             "\tObj.StubSkelMesh = &Mesh;",
+            "\tPawn.StubComponents = {&Ragdoll};",          # the reads of the ragdoll service look it up on the pawn
         ]
     L.append("\tMesh.StubPhysics = &Phys; Mesh.StubAsset = &MeshAsset; Mesh.StubOwner = &Pawn;")
     for k in range(8):

@@ -103,6 +103,13 @@ HOST_ITEMS: dict[str, HostItem] = {
                  ue="AnimInstance->RootMotionMode"),
         HostItem("ragdoll_supported", BOOL, doc="the mesh has a physics asset with the pelvis and spine_03 bodies (ragdolling can start)",
                  ue="Mesh->GetPhysicsAsset() has bodies pelvis and spine_03"),
+        # v4: what the ragdoll service knows while the character ragdolls (ALS reads the pelvis body, not a bone: the bones lag behind the simulation)
+        HostItem("ragdoll_pelvis_location", VEC3, unit="cm", doc="world location of the pelvis body of the ragdoll (zero without a ragdoll service or a pelvis body)",
+                 ue="UDalRagdollService::GetPelvisLocation() (DalRuntime): FBodyInstance::GetUnrealWorldTransform() of the pelvis body"),
+        HostItem("ragdoll_velocity", VEC3, unit="cm/s", doc="linear velocity of the pelvis body of the ragdoll (zero without a ragdoll service or a pelvis body)",
+                 ue="UDalRagdollService::GetPelvisVelocity() (DalRuntime): FBodyInstance::GetUnrealWorldVelocity() of the pelvis body"),
+        HostItem("ragdoll_facing_up", BOOL, doc="the ragdoll lies face up: the roll of the pelvis unwound to -180..180 degrees is <= 0 (how ALS decides the get up montage); false without a ragdoll service",
+                 ue="UDalRagdollService::IsFacingUp() (DalRuntime): FMath::UnwindDegrees(Mesh->GetSocketTransform(pelvis).Rotator().Roll) <= 0"),
         HostItem("mesh_world_transform", TRANSFORM, doc="world transform of the character mesh", ue="Mesh->GetComponentTransform()"),
         HostItem("bone_component_transform", TRANSFORM, arg=True, arg_kind="string", free_name=True,
                  doc='transform of a bone in component space, from the pose evaluated last: host.bone_component_transform("pelvis")',
@@ -392,6 +399,9 @@ class HostV0:
     pre_penetration_velocity_valid = False
     root_motion_mode = rt.RootMotionMode.RootMotionFromMontagesOnly
     ragdoll_supported = False
+    ragdoll_pelvis_location = rt.VEC3_ZERO
+    ragdoll_velocity = rt.VEC3_ZERO
+    ragdoll_facing_up = False
     mesh_world_transform = rt.Transform()
 
     def action(self, name: str, ty: str):

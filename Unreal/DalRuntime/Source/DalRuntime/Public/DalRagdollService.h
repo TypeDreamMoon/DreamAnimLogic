@@ -69,6 +69,20 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "DAL|Ragdoll")
 	void AddForce(const FVector& Force, bool bSpine);
 
+	/** World location of the pelvis body.  ALS (RefreshRagdolling) reads the physics body, not the bone: the bones lag behind the simulation.
+	 *  Zero when the mesh has no pelvis body.  The host read `ragdoll_pelvis_location`. */
+	UFUNCTION(BlueprintPure, Category = "DAL|Ragdoll")
+	FVector GetPelvisLocation() const;
+
+	/** Linear velocity of the pelvis body (zero without one).  The host read `ragdoll_velocity`. */
+	UFUNCTION(BlueprintPure, Category = "DAL|Ragdoll")
+	FVector GetPelvisVelocity() const;
+
+	/** The ragdoll lies face up: the roll of the pelvis bone unwound to -180..180 degrees is <= 0 (StopRagdollingImplementation decides the get up
+	 *  montage and the facing of the actor with it).  The host read `ragdoll_facing_up`. */
+	UFUNCTION(BlueprintPure, Category = "DAL|Ragdoll")
+	bool IsFacingUp() const;
+
 private:
 	ACharacter* GetCharacter() const;
 	USkeletalMeshComponent* GetMesh() const;

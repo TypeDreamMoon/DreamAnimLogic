@@ -167,6 +167,33 @@ void UDalRagdollService::AddForce(const FVector& Force, const bool bSpine)
 	}
 }
 
+FVector UDalRagdollService::GetPelvisLocation() const
+{
+	const USkeletalMeshComponent* Mesh = GetMesh();
+	const FBodyInstance* Body = Mesh != nullptr ? Mesh->GetBodyInstance(PelvisBoneName) : nullptr;
+	return Body != nullptr ? Body->GetUnrealWorldTransform().GetLocation() : FVector::ZeroVector;
+}
+
+FVector UDalRagdollService::GetPelvisVelocity() const
+{
+	const USkeletalMeshComponent* Mesh = GetMesh();
+	const FBodyInstance* Body = Mesh != nullptr ? Mesh->GetBodyInstance(PelvisBoneName) : nullptr;
+	return Body != nullptr ? Body->GetUnrealWorldVelocity() : FVector::ZeroVector;
+}
+
+bool UDalRagdollService::IsFacingUp() const
+{
+	const USkeletalMeshComponent* Mesh = GetMesh();
+	if (Mesh == nullptr)
+	{
+		return false;
+	}
+
+	// AlsCharacter_Actions.cpp: bRagdollFacingUpward{FMath::UnwindDegrees(PelvisRotation.Roll) <= 0.0f}, the rotation of the pelvis bone in world space
+	const FRotator PelvisRotation = Mesh->GetSocketTransform(PelvisBoneName).Rotator();
+	return FMath::UnwindDegrees(PelvisRotation.Roll) <= 0.0f;
+}
+
 void UDalRagdollService::TickComponent(const float DeltaTime, const ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);

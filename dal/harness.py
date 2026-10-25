@@ -156,6 +156,7 @@ def random_frames(module: ir.Module, count: int, seed: int = 1) -> list[dict]:
     rng = random.Random(seed)
     rng_v2 = random.Random(seed * 7919 + 13)               # the later host items draw from their own stream (earlier sequences stay as they were)
     rng_v4 = random.Random(seed * 104729 + 29)             # (and the ones of v4 from another)
+    rng_ragdoll = random.Random(seed * 15485863 + 31)      # (and the ragdoll reads from a third)
     asks_world = module.kind != "actor" and any(isinstance(e, ir.HostQuery) for _label, body in module.bodies() for e in ir.walk_stmt_exprs(body))
     frames: list[dict] = []
     t = 0.0
@@ -192,6 +193,9 @@ def random_frames(module: ir.Module, count: int, seed: int = 1) -> list[dict]:
         f["mesh_world_transform"] = _rand_value(rng_v2, TRANSFORM, 100.0)
         f["root_motion_mode"] = rng_v2.randrange(4)
         f["ragdoll_supported"] = rng_v2.random() < 0.5
+        f["ragdoll_pelvis_location"] = tuple(rng_ragdoll.uniform(-300, 300) for _ in range(3))
+        f["ragdoll_velocity"] = tuple(rng_ragdoll.uniform(-900, 900) for _ in range(3))
+        f["ragdoll_facing_up"] = rng_ragdoll.random() < 0.5
         f["bones"] = {i.host.arg: {"component": _rand_value(rng_v2, TRANSFORM, 50.0), "world": _rand_value(rng_v2, TRANSFORM, 100.0)}
                       for i in module.inputs if i.host is not None and i.host.item in ("bone_component_transform", "bone_world_transform")}
         f["skeleton"] = {}

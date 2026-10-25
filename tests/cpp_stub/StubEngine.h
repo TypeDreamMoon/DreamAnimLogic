@@ -651,6 +651,14 @@ public:
 	void LimitSpeed(float Speed) { StubLog::Emit("ragdoll_limit_speed", {Speed}); }
 	void SetMotorStrength(float Strength) { StubLog::Emit("ragdoll_set_motor_strength", {Strength}); }
 	void AddForce(const FVector& Force, bool bSpine) { StubLog::Emit("ragdoll_add_force", {Force.X, Force.Y, Force.Z, bSpine}); }
+
+	// the reads of the pelvis body (what the test driver scripts per frame)
+	FVector StubPelvisLocation = FVector(0.0, 0.0, 0.0);
+	FVector StubPelvisVelocity = FVector(0.0, 0.0, 0.0);
+	bool bStubFacingUp = false;
+	FVector GetPelvisLocation() const { return StubPelvisLocation; }
+	FVector GetPelvisVelocity() const { return StubPelvisVelocity; }
+	bool IsFacingUp() const { return bStubFacingUp; }
 };
 
 // ---- enhanced input ------------------------------------------------------------------------------------------------------

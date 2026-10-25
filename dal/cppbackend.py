@@ -666,6 +666,7 @@ _CHARACTER_ITEMS = ("capsule_radius", "capsule_half_height", "actor_scale", "has
 _CAPSULE_ITEMS = ("capsule_radius", "capsule_half_height", "actor_scale")
 _CONSUME_ITEMS = ("pre_penetration_velocity", "pre_penetration_velocity_valid")                    # DalRuntime's movement component
 _MESH_ITEMS = ("ragdoll_supported", "mesh_world_transform", "bone_component_transform", "bone_world_transform", "ref_path_child_translation", "mesh_scale")
+_RAGDOLL_ITEMS = ("ragdoll_pelvis_location", "ragdoll_velocity", "ragdoll_facing_up")             # read from the UDalRagdollService (DalRuntime) of the actor
 _WORLD_ITEMS = ("time", "time_dilation", "real_delta_time")                                          # read from the UWorld
 _MOVEMENT_ITEMS = ("velocity", "acceleration", "max_acceleration", "max_braking_deceleration", "walkable_floor_z", "movement_mode_custom",
                    "max_walk_speed", "movement_mode", "is_grounded", "is_crouching")
@@ -951,7 +952,7 @@ class CppGen:
             mods += ["EnhancedInput"]
         if self.uses_tags(any_origin=True) or any(isinstance(d.ty, TagType) for d in [*self.m.params, *self.m.inputs, *self.m.states]):
             mods += ["GameplayTags"]
-        if self.uses(*_CONSUME_ITEMS) or self.als_movement_cmds or self.ragdoll_cmds:
+        if self.uses(*_CONSUME_ITEMS, *_RAGDOLL_ITEMS) or self.als_movement_cmds or self.ragdoll_cmds:
             mods += ["DalRuntime"]
         return mods
 
@@ -2389,11 +2390,11 @@ class CppGen:
             add("PhysicsEngine/PhysicsAsset.h")
         if self.uses(*_CONSUME_ITEMS) or self.als_movement_cmds:
             add("DalCharacterMovementComponent.h")
-        if self.ragdoll_cmds:
+        if self.ragdoll_cmds or self.uses(*_RAGDOLL_ITEMS):
             add("DalRagdollService.h")
         if "set_actor_rotation" in self.cmds:
             add("Engine/EngineTypes.h")
-        if self.uses(*_PAWN_ITEMS) or self.needs_pawn_helper or self.controller or self.arm or self.camera:
+        if self.uses(*_PAWN_ITEMS, *_RAGDOLL_ITEMS) or self.needs_pawn_helper or self.controller or self.arm or self.camera:
             add("GameFramework/Pawn.h")
         if self.action_names():
             for x in ("Engine/LocalPlayer.h", "GameFramework/PlayerController.h", "EnhancedInputSubsystems.h",
@@ -2900,7 +2901,7 @@ class CppGen:
             return L
         needs_movement = self.needs_movement_read
         needs_character = self.needs_character_read
-        needs_pawn = needs_character or self.uses(*_PAWN_ITEMS)
+        needs_pawn = needs_character or self.uses(*_PAWN_ITEMS, *_RAGDOLL_ITEMS)
         if needs_pawn:
             L.append(f"{T}const APawn* Pawn = " + ("Cast<APawn>(GetOwner());" if self.actor else "TryGetPawnOwner();"))
         if needs_character:
@@ -2930,6 +2931,8 @@ class CppGen:
             L.append(f"{T}const UAnimInstance* DalAnim = DalGetAnimInstance();")
         if self.uses(*_MESH_ITEMS):
             L.append(f"{T}const USkeletalMeshComponent* DalMesh = DalGetMesh();")
+        if self.uses(*_RAGDOLL_ITEMS):
+            L.append(f"{T}const UDalRagdollService* DalRagdoll = Pawn != nullptr ? Pawn->FindComponentByClass<UDalRagdollService>() : nullptr;")
         L.append("")
         for i, h in host:
             default = cpp_value(i.ty, i.default)
@@ -2963,6 +2966,12 @@ class CppGen:
                 L.append(f"{T}{{")
                 L.append(f'{T}{T}{name} = DalPhysics->FindBodyIndex(FName(TEXT("pelvis"))) != INDEX_NONE && DalPhysics->FindBodyIndex(FName(TEXT("spine_03"))) != INDEX_NONE;')
                 L.append(f"{T}}}")
+                continue
+            if it in _RAGDOLL_ITEMS:                                          # the pelvis body of the ragdoll service (ALS RefreshRagdolling, StopRagdollingImplementation)
+                value = {"ragdoll_pelvis_location": "FVector3f(DalRagdoll->GetPelvisLocation())",
+                         "ragdoll_velocity": "FVector3f(DalRagdoll->GetPelvisVelocity())",
+                         "ragdoll_facing_up": "DalRagdoll->IsFacingUp()"}[it]
+                L.append(f"{T}{name} = DalRagdoll != nullptr ? {value} : {default};")
                 continue
             if it == "mesh_world_transform":
                 L.append(f"{T}{name} = DalMesh != nullptr ? FTransform3f(DalMesh->GetComponentTransform()) : FTransform3f();")
