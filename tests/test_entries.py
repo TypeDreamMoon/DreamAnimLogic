@@ -321,6 +321,10 @@ class EntryCppTests(unittest.TestCase):
         self.assertIn("void USub::SetHips([[maybe_unused]] const EHips NewHips)\n{\n\tif (Parent.IsValid())\n\t{\n\t\tParent->SetHips(NewHips);", sc)
         self.assertIn("bUseMainInstanceMontageEvaluationData = true;", sc)
         self.assertIn("Cast<UMain>(DalMesh->GetAnimInstance())", sc)
+        # the engine updates a linked graph instance through its proxy, which runs the thread-safe update, not NativeUpdateAnimation: the parent is
+        # looked up there too (at initialization the mesh does not always know the main instance yet)
+        worker = sc[sc.index("void USub::NativeThreadSafeUpdateAnimation"):]
+        self.assertIn("if (!Parent.IsValid())\n\t{\n\t\tDalResolveParent();", worker[:400])
 
 
 if __name__ == "__main__":

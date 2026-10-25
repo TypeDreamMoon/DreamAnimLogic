@@ -2713,10 +2713,15 @@ class CppGen:
                     upd.append(f"{T}DalDrainPeerCalls();")
             upd.append("}")
             blocks.append(upd)
-            blocks.append([f"void {cls}::NativeThreadSafeUpdateAnimation(const float DeltaSeconds)", "{",
-                           f"{T}Super::NativeThreadSafeUpdateAnimation(DeltaSeconds);", "",
-                           f"{T}Dal_DeltaSeconds = DeltaSeconds;",
-                           f"{T}DalUpdate(DeltaSeconds);", "}"])
+            tsu = [f"void {cls}::NativeThreadSafeUpdateAnimation(const float DeltaSeconds)", "{",
+                   f"{T}Super::NativeThreadSafeUpdateAnimation(DeltaSeconds);", ""]
+            if m.linked is not None:
+                # The engine calls NativeUpdateAnimation (the game thread update) for the main instance only; a linked graph instance is updated through
+                # its proxy, which runs this one.  At NativeInitializeAnimation the mesh does not always know the main instance yet (a graph that links
+                # instances while it is being initialised), so the parent is looked up again here until it is found.
+                tsu += [f"{T}if (!Parent.IsValid())", f"{T}{{", f"{T}{T}DalResolveParent();", f"{T}}}", ""]
+            tsu += [f"{T}Dal_DeltaSeconds = DeltaSeconds;", f"{T}DalUpdate(DeltaSeconds);", "}"]
+            blocks.append(tsu)
             if self.post:
                 blocks.append([f"F{m.name}Proxy::F{m.name}Proxy(UAnimInstance* AnimationInstance) : FAnimInstanceProxy(AnimationInstance)", "{", "}"])
                 blocks.append([f"void F{m.name}Proxy::PostUpdate(UAnimInstance* AnimationInstance) const", "{",
