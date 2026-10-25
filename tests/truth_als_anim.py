@@ -347,7 +347,7 @@ def host_frame(take: Take, f: int, post_char: dict, curves: dict, module_dt: flo
     pelvis = take.bone["pelvis"]
     previous = take.pose[f - 1]
     bones["pelvis"] = {"component": pose_row(previous[pelvis])}
-    for name, bone in (("ik_foot_l", "ik_foot_l"), ("ik_foot_r", "ik_foot_r"), ("VB_foot_l", "VB foot_l"), ("VB_foot_r", "VB foot_r")):
+    for name, bone in (("ik_foot_l", "ik_foot_l"), ("ik_foot_r", "ik_foot_r"), ("VB foot_l", "VB foot_l"), ("VB foot_r", "VB foot_r")):
         bones[name] = {"world": transform_compose(pose_row(previous[take.bone[bone]]), mesh)}
     return {
         "dt": module_dt, "time": num(post_char.get("Time.Seconds")),

@@ -420,7 +420,7 @@ def make_sequence(seed, count, calls_per_frame=3, graph=None):
                 "time_dilation": time_dilation, "actor_time_dilation": actor_dilation, "real_delta_time": real_delta_time,
                 "mesh_world_transform": mesh_transform,
                 "bones": {"pelvis": {"component": pelvis}, **{name: {"world": tr} for name, tr in
-                                                              (("ik_foot_l", feet["ik_l"]), ("ik_foot_r", feet["ik_r"]), ("VB_foot_l", feet["vb_l"]), ("VB_foot_r", feet["vb_r"]))}},
+                                                              (("ik_foot_l", feet["ik_l"]), ("ik_foot_r", feet["ik_r"]), ("VB foot_l", feet["vb_l"]), ("VB foot_r", feet["vb_r"]))}},
                 "skeleton": skeleton(options), "world": {"ground_z": ground_z}, "events": events}
         frames.append({**host, "free": {CHARACTER: free}, "calls": {INSTANCE: [(entry, kw) for _, entry, kw in calls]}})
         oframes.append({"dt": dt, "time": t, "location": host["actor_location"], "rotation": quat, "scale": scale, "capsule_radius": 30.0,
@@ -609,7 +609,7 @@ def add_random_pose(frames, seed):
 
     for f in frames:
         f["bones"] = {name: {"component": transform(), "world": transform()}
-                      for name in ("pelvis", "ik_foot_l", "ik_foot_r", "VB_foot_l", "VB_foot_r")}
+                      for name in ("pelvis", "ik_foot_l", "ik_foot_r", "VB foot_l", "VB foot_r")}
         f["skeleton"] = skeleton(sequence_options(seed))
     return frames
 

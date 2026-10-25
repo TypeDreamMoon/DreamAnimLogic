@@ -208,6 +208,22 @@ class Rig:
                 begin()
                 self.hosts[n].calls.clear()
 
+    def _ragdoll_reads(self):
+        """The stand-in of the host's ragdoll service: the pelvis body is where the scripted pelvis bone is (``bones={"pelvis": ...}``), it moves
+        by the displacement of the pelvis since the last frame, and it lies face up when the roll of the bone is <= 0 (what the host reads
+        ``ragdoll_pelvis_location`` / ``ragdoll_velocity`` / ``ragdoll_facing_up`` answer)."""
+        pelvis = (self.host.get("bones") or {}).get("pelvis")
+        if pelvis is None:
+            return
+        world = pelvis.get("world", pelvis.get("component"))
+        location = tuple(float(x) for x in world[0])
+        before = getattr(self, "_pelvis_before", None)
+        dt = self.host.get("dt", DT)
+        self.host["ragdoll_pelvis_location"] = location
+        self.host["ragdoll_velocity"] = tuple((a - b) / dt for a, b in zip(location, before)) if before is not None and dt > 1e-9 else (0.0, 0.0, 0.0)
+        self.host["ragdoll_facing_up"] = unwind(rt.to_rotator(rt.Quat(*world[1])).roll) <= 0.0
+        self._pelvis_before = location
+
     def _frame(self, events=(), curves=None):
         f = dict(self.host)
         f["events"] = list(events)
@@ -244,6 +260,7 @@ class Rig:
             host["dt"] = dt
         previous = (self.host.get("movement_mode"), self.host.get("is_crouching"))
         self.host.update(host)
+        self._ragdoll_reads()
         raised = list(hooks)
         if auto_hooks:
             if self.host.get("movement_mode") != previous[0]:
@@ -271,13 +288,14 @@ class Rig:
                     h.pre_penetration_velocity_valid = f.get("pre_penetration_velocity_valid", False)  # scripted one, so arm it again
                 for h in self.hosts.values():             # and the hooks it raised while it moved reach every logic that listens
                     h.events.extend(tuple(e) for e in raised)
-            before = len(self.hosts[n].calls)
+            before = {k: len(h.calls) for k, h in self.hosts.items()}
             if slot is None:
                 self.objs[n].update(f["dt"])
             else:
                 self.objs[n].update_phase(slot, f["dt"])
-            self.trace.append((n, slot, [c[0] for c in self.hosts[n].calls[before:]]))        # which block handed which commands to the host
-            self.blocks.append((n, slot, list(self.hosts[n].calls[before:])))
+            handed = [c for k, h in self.hosts.items() for c in h.calls[before[k]:]]           # (a logic with flush_peers hands over its peers' commands too)
+            self.trace.append((n, slot, [c[0] for c in handed]))                                # which block handed which commands to the host
+            self.blocks.append((n, slot, handed))
         self.cmds = {n: list(h.calls) for n, h in self.hosts.items()}
         for h in self.hosts.values():
             h.calls.clear()
@@ -364,7 +382,8 @@ class FilesTests(Case):
         self.assertEqual([(p.name, p.logic) for p in char.peers], [("Anim", "AlsAnimationInstance")])
         self.assertEqual([(p.name, p.logic) for p in inp.peers], [("Character", "AlsCharacter")])
         self.assertTrue(char.slot_events)                                                           # the hooks of the movement component reach the Tick of the same tick
-        self.assertEqual([(o.relation, o.peer, o.slots) for o in inp.order], [("before", "Character", ("pre_movement",))])      # its calls are flushed by the character's block
+        self.assertEqual([(o.relation, o.peer, o.slots) for o in inp.order], [("before", "Character", ("pre_movement",))])
+        self.assertTrue(inp.flush_peers)                                                            # its calls are flushed by its own block
         self.assertEqual(sorted(h.event for h in char.handlers if h.event in ("movement_mode_changed", "jumped", "crouch_started", "crouch_ended", "physics_rotation")),
                          ["crouch_ended", "crouch_started", "jumped", "movement_mode_changed", "physics_rotation"])
         self.assertEqual(sorted(n.name for n in char.notifies),
@@ -1105,16 +1124,16 @@ class LandingAndJumpTests(Case):
             self.assertNotIn("jump", rig.names())
 
     def test_the_command_of_the_jump_reaches_the_host_before_the_movement_component(self):
-        # AlsInput (pre_movement) calls Jump(); the command is the character's: its pre_movement block hands it to the host
+        # AlsInput (pre_movement) calls Jump(); the command is the character's: AlsInput (`flush_peers`) hands it to the host at the end of its block
         for rig in rigs():
             rig.step(events=[("Jump", "triggered", True)])
             handed = {(n, slot): names for n, slot, names in rig.trace}
-            self.assertIn("jump", handed[("AlsCharacter", "pre_movement")])
+            self.assertIn("jump", handed[("AlsInput", "pre_movement")])
+            self.assertNotIn("jump", handed[("AlsCharacter", "pre_movement")])
             self.assertNotIn("jump", handed[("AlsCharacter", "after_movement")])
-            self.assertEqual(handed[("AlsInput", "pre_movement")], [])
             rig.step(events=[("Crouch", "triggered", True)])                                                   # the same for the crouch of a desired stance
             handed = {(n, slot): names for n, slot, names in rig.trace}
-            self.assertIn("crouch", handed[("AlsCharacter", "pre_movement")])
+            self.assertIn("crouch", handed[("AlsInput", "pre_movement")])
 
 
 class InputMappingTests(Case):
@@ -1368,19 +1387,24 @@ def run_system(mods, frames, backend, params, schedule=None):
     for f in frames:
         for n in mods:
             hosts[n].load(f)
+        handed = {n: [] for n in mods}                              # the commands each logic's step handed to the host: a logic with flush_peers hands over its peers' too
         for si, (n, slot) in enumerate(steps):
             for ev in f.get("step_events", {}).get(si, []):          # the hooks the movement component raised between the slots
                 for h in hosts.values():
                     h.events.append(tuple(ev))
+            marks = {k: len(h.calls) for k, h in hosts.items()}
             if slot is None:
                 objs[n].update(f["dt"])
             else:
                 objs[n].update_phase(slot, f["dt"])
+            for k in [n] + [k for k in hosts if k != n]:
+                handed[n].extend(hosts[k].calls[marks[k]:])
         snap = {}
         for n in mods:
             snap[n] = objs[n].snapshot()
-            snap[n]["__cmds__"] = tuple(hosts[n].calls)
-            hosts[n].calls.clear()
+            snap[n]["__cmds__"] = tuple(handed[n])
+        for h in hosts.values():
+            h.calls.clear()
         out.append(snap)
     return out
 

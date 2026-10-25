@@ -877,7 +877,7 @@ def pose(left=(100.0, -10.0, 0.0), right=(100.0, 10.0, 0.0), left_yaw=0.0, right
     pelvis = tr((0.0, 0.0, 90.0)) if pelvis is None else pelvis
     return {"pelvis": {"component": pelvis},
             "ik_foot_l": {"world": tr(left, left_yaw)}, "ik_foot_r": {"world": tr(right, right_yaw)},
-            "VB_foot_l": {"world": tr((left[0], left[1], left[2] + 5.0), left_yaw)}, "VB_foot_r": {"world": tr((right[0], right[1], right[2] + 5.0), right_yaw)}}
+            "VB foot_l": {"world": tr((left[0], left[1], left[2] + 5.0), left_yaw)}, "VB foot_r": {"world": tr((right[0], right[1], right[2] + 5.0), right_yaw)}}
 
 
 def near(test, got, want, places=6, msg=""):

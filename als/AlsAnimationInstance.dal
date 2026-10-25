@@ -53,10 +53,9 @@ input MeshTransform: transform <- host.mesh_world_transform;              // AI:
 input PelvisBoneTransform: transform <- host.bone_component_transform("pelvis");         // AI:1250  GetSocketTransform(pelvis, RTS_Component)
 input FootLeftIkBoneTransform: transform <- host.bone_world_transform("ik_foot_l");      // AI:1279  bUseFootIkBones: GetSocketTransform(ik_foot_l)
 input FootRightIkBoneTransform: transform <- host.bone_world_transform("ik_foot_r");     // AI:1288
-// The virtual bones are called "VB foot_l" / "VB foot_r" in UE; a host argument of the language is an identifier (no space), so the
-// reads spell them VB_foot_l / VB_foot_r and the host maps the underscore back (als-dal-rewrite.md section 7, A5).
-input FootLeftVirtualBoneTransform: transform <- host.bone_world_transform("VB_foot_l"); // AI:1281  !bUseFootIkBones
-input FootRightVirtualBoneTransform: transform <- host.bone_world_transform("VB_foot_r"); // AI:1290
+// The virtual bones of the skeleton are called "VB foot_l" / "VB foot_r": a host name may have single spaces in it.
+input FootLeftVirtualBoneTransform: transform <- host.bone_world_transform("VB foot_l"); // AI:1281  !bUseFootIkBones
+input FootRightVirtualBoneTransform: transform <- host.bone_world_transform("VB foot_r"); // AI:1290
 
 // ---- animation curves of the previous evaluation (GetCurveValue; AI:288-375 read the same map, 0 when a curve is missing) ----------
 input CurveLayerHead: float <- host.anim_curve("LayerHead");                                          // UAlsConstants::Layer*CurveName

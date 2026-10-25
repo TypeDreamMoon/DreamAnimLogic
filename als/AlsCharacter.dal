@@ -72,7 +72,10 @@ input CapsuleHalfHeight: float <- host.capsule_half_height;                     
 input CapsuleScale: float <- host.actor_scale;                                   // GetCapsuleComponent()->GetComponentScale().Z         CA:208
 input MeshWorldTransform: transform <- host.mesh_world_transform;                // GetMesh()->GetComponentTransform(): GetBaseRotationOffset() is the actor's rotation to it   CA:517
 input RagdollSupported: bool <- host.ragdoll_supported;                          // the mesh has the pelvis and spine_03 bodies  CA:720-722
-input PelvisTransform: transform <- host.bone_world_transform("pelvis");         // GetMesh()->GetSocketTransform(PelvisBoneName)  CA:1078 (AlsConstants.h: "pelvis")
+input PelvisTransform: transform <- host.bone_world_transform("pelvis");         // GetMesh()->GetSocketTransform(PelvisBoneName)  CA:1078 (AlsConstants.h: "pelvis"): where the ragdoll starts, and its yaw when it stops
+input RagdollPelvisLocation: vec3 <- host.ragdoll_pelvis_location;               // the pelvis body of the ragdoll: FPhysicsInterface::GetTransform_AssumesLocked(..).GetLocation()  CA:883
+input RagdollVelocity: vec3 <- host.ragdoll_velocity;                            // the pelvis body: FPhysicsInterface::GetLinearVelocity_AssumesLocked(..)  CA:884
+input RagdollFacingUp: bool <- host.ragdoll_facing_up;                           // FMath::UnwindDegrees(PelvisRotation.Roll) <= 0.0f of the pelvis bone  CA:1099
 input RotationYawSpeedCurve: float <- host.anim_curve("RotationYawSpeed");       // GetCurveValue(RotationYawSpeedCurveName) C:1814 (AlsConstants.h:81)
 input RotationYawOffsetCurve: float <- host.anim_curve("RotationYawOffset");     // GetCurveValue(RotationYawOffsetCurveName) C:1650
 
@@ -109,8 +112,6 @@ state MovementModeNow: MovementMode;                                            
 state MantlingSource: AlsMantlingRootMotionSource;                               // the FAlsRootMotionSource_Mantling the movement component would hold (RMS.h)
 state MantlingSourceCount: int;                                                  // the ids ApplyRootMotionSource hands out (MantlingState.RootMotionSourceId)
 state AnimRootMotionTranslationScale: float = 1.0;                               // Character->GetAnimRootMotionTranslationScale(), as the SetRootMotionScale notify state left it
-state PelvisLocationPrevious: vec3;                                              // RefreshRagdolling: the pelvis location of the last tick (the velocity is its difference)
-state bPelvisLocationPreviousValid: bool;
 timer BrakingFrictionFactorResetTimer = 0.5;                                     // C:538-544 (ResetDelay)
 
 // ---- types of the actions --------------------------------------------------------------------------------------------------------
@@ -197,8 +198,8 @@ on timer BrakingFrictionFactorResetTimer {                                      
 // ================================================================================================================================
 
 // Before the movement component: the root motion source of the mantling is prepared where the movement component would call it (RMS:37).
-// AlsInput runs before this logic in the slot (`before Character`), so the commands of its calls (Jump, SetDesiredStance, StartMantling ...)
-// are handed to the host by this block, before the movement component runs.
+// (AlsInput runs before this logic in the slot and declares `flush_peers`: the commands of its calls on this logic - Jump, SetDesiredStance,
+// StartMantling ... - are handed to the host at the end of its own block, before the movement component runs; this block is not needed for that.)
 update(dt) in pre_movement {
     prepare_mantling_root_motion(dt);                                            // FAlsRootMotionSource_Mantling::PrepareRootMotion, inside CharacterMovement->PerformMovement
 }
@@ -1408,10 +1409,9 @@ method start_ragdolling_implementation() {                                      
     // Stop any active montages.   :773
     host.montage_stop_all(0.2);                                                  // :775-777 BlendOutDuration = 0.2
 
-    // The pelvis body's location and velocity (:800-807): the character's own until the first refresh, which reads the pelvis.
+    // The pelvis body's location and velocity (:800-807): the ragdoll has not begun (the command runs after this block), so the pelvis bone
+    // and the character's own velocity stand in for them until the first refresh, which reads the body.
     RagdollingState.Velocity = LocomotionState.Velocity;                         // :806
-    PelvisLocationPrevious = PelvisTransform.location;
-    bPelvisLocationPreviousValid = true;
     RagdollingState.PullForce = 0.0;                                             // :809
 
     if (Settings.Ragdolling.bLimitInitialRagdollSpeed) {                         // :811
@@ -1439,15 +1439,9 @@ method start_ragdolling_implementation() {                                      
 method refresh_ragdolling(dt: float) {                                           // CA:868-961
     if (LocomotionAction != AlsLocomotionAction.Ragdolling) { return; }          // :870-873
 
-    // The pelvis body (:875-885).  The host serves the simulated pose of the last tick through the pelvis bone, which is what the physics
-    // handle returns in ALS at this point of the frame.  The velocity is the pelvis' displacement over the tick: the ragdoll service has a
-    // velocity read (RagdollHost.ragdoll_velocity) that the host protocol of the compiler does not list yet.
-    let pelvis_location = PelvisTransform.location;                              // :883
-    if (bPelvisLocationPreviousValid && dt > SMALL_NUMBER) {
-        RagdollingState.Velocity = (pelvis_location - PelvisLocationPrevious) / dt;     // :884
-    }
-    PelvisLocationPrevious = pelvis_location;
-    bPelvisLocationPreviousValid = true;
+    // The pelvis body (:875-885): its location and linear velocity, read off the physics body (not the bone: the bones lag behind the simulation).
+    let pelvis_location = RagdollPelvisLocation;                                 // :883
+    RagdollingState.Velocity = RagdollVelocity;                                  // :884
 
     // bLocallyControlled is always true (:887)
     RagdollTargetLocation = pelvis_location;                                     // :889-892 SetRagdollTargetLocation(PelvisLocation)
@@ -1507,7 +1501,7 @@ method stop_ragdolling_implementation() {                                       
     // The host keeps the pose of the ragdoll that ragdoll_end ends until then (the pelvis fix of :1128-1138 is its part).
     Anim.SnapshotFinalRagdollPose();                                             // :1076
 
-    let pelvis_rotation = to_rotator(PelvisTransform.rotation);                  // :1078-1079
+    let pelvis_rotation = to_rotator(PelvisTransform.rotation);                  // :1078-1079 (its yaw turns the actor; whether it lies face up the ragdoll service says)
 
     // Disable mesh physics simulation and enable capsule collision.   :1081
     host.ragdoll_end();                                                          // :1083-1092 (and the network smoothing :1091-1092)
@@ -1515,7 +1509,7 @@ method stop_ragdolling_implementation() {                                       
     let ground = ragdoll_trace_ground();                                         // :1094-1095
 
     // Determine whether the ragdoll is facing upward or downward and set the actor rotation accordingly.   :1097
-    let ragdoll_facing_upward = unwind_degrees(pelvis_rotation.roll) <= 0.0;     // :1099
+    let ragdoll_facing_upward = RagdollFacingUp;                                 // :1099 UnwindDegrees(PelvisRotation.Roll) <= 0.0f
 
     var new_actor_rotation = ActorRotationNow;                                   // :1101
     new_actor_rotation.yaw = ragdoll_facing_upward ? pelvis_rotation.yaw - 180.0 : pelvis_rotation.yaw;       // :1102
