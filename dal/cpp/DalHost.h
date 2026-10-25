@@ -100,7 +100,21 @@ namespace DalHost
 	};
 
 	/** The sinks of the running logics.  Post() is called by the movement component and the notify classes (game thread);
-	 *  a sink registers when play begins and unregisters when it ends. */
+	 *  a sink registers when play begins and unregisters when it ends.
+	 *
+	 *  The registry must exist once per process.  Built with DalRuntime (DAL_ROUTER_EXTERNAL, defined by its Build.cs for every module that
+	 *  depends on it) the class is exported by that module and its statics live in DalEventRouter.cpp; otherwise (the test stand-ins, a
+	 *  project that does not use the hooks of the movement component) the whole thing is inline in this header. */
+#if defined(DAL_ROUTER_EXTERNAL) && DAL_ROUTER_EXTERNAL
+	class DALRUNTIME_API FEventRouter
+	{
+	public:
+		static void Register(IEventSink* Sink);
+		static void Unregister(IEventSink* Sink);
+		static void Post(const AActor* Owner, const FEvent& Event);
+		static void PostNotify(const AActor* Owner, const EEventKind Kind, const FName& Name, const UObject* Source, const int32 MontageInstance);
+	};
+#else
 	class FEventRouter
 	{
 	public:
@@ -164,6 +178,7 @@ namespace DalHost
 			return Lock;
 		}
 	};
+#endif
 
 	enum class ECommand : uint8
 	{

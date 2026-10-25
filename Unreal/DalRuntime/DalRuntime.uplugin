@@ -1,0 +1,19 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "DAL Runtime",
+	"Description": "The native half of the code the DAL (.dal) compiler generates: the character movement component with the ALS extensions, the root motion override source, the ragdoll service, the hook events and a test character.",
+	"Category": "Animation",
+	"CreatedBy": "TypeDreamMoon",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "DalRuntime",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}
