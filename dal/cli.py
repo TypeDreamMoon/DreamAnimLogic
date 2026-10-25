@@ -57,7 +57,9 @@ def cmd_compile(args) -> int:
         changed = _write_if_changed(path, generate_python(module))
         print(f"{'wrote' if changed else 'up to date'} {path}")
     if args.cpp:
-        opts = CppOptions(args.module, args.parent_class, args.parent_include, property_bag=args.bag, double_members=args.double_members)
+        opts = CppOptions(args.module, args.parent_class, args.parent_include, property_bag=args.bag, double_members=args.double_members,
+                          object_settings=tuple(x for a in args.object_settings for x in a.split(",") if x), native_structs=tuple(args.native_struct),
+                          channel_defaults=tuple(args.channel_default))
         for name, text in generate_cpp(module, opts).items():
             path = os.path.join(args.cpp, name)
             changed = _write_if_changed(path, text)
@@ -138,6 +140,14 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--double-members", action="store_true",
                    help="vector / rotator / quat / transform members of structs get the double-precision engine types (FVector, FRotator, FQuat, FTransform) "
                         "instead of FVector3f ...: what a Control Rig or a Blueprint pin that was made for ALS's own structs expects; the logic still computes in single precision")
+    c.add_argument("--object-settings", action="append", default=[], metavar="NAME[,NAME]",
+                   help="settings types that an asset holds as Instanced UObjects (ALS: AlsTurnInPlaceSettings): U<Name> is the object the settings types that hold it point to, "
+                        "F<Name>Value is what the logic reads (a null object reads as the declared defaults)")
+    c.add_argument("--native-struct", action="append", default=[], metavar="NAME=FEngineType[=Header]",
+                   help="a struct that is an engine type with the same members (ALS: AlsFloatInterval=FFloatInterval=Math/Interval.h): the type is not declared, the engine's is used")
+    c.add_argument("--channel-default", action="append", default=[], metavar="Struct.Member=Channel,Channel",
+                   help="the default of a channel_set member of a settings type, in the constructor (ALS: AlsGeneralMantlingSettings.MantlingTraceResponseChannels=WorldStatic,WorldDynamic,Destructible; "
+                        "the constructors of ALS's settings classes set these, an asset holds them only when it differs)")
     c.set_defaults(func=cmd_compile)
 
     k = sub.add_parser("check", help="parse and type-check only")

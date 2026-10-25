@@ -132,6 +132,19 @@ python -m dal host                                                      # the ho
   engine's double-precision types (`FVector`, `FRotator`, `FQuat`, `FTransform`) instead of `FVector3f` ...; the logic still computes in single
   precision (reads convert, writes convert back), top-level states / inputs / params keep theirs.  A Control Rig or a Blueprint pin made for
   ALS's own structs does not convert a `FVector3f`; the ALS rewrite is generated with it.
+* The next three make settings read what an asset made with the original ALS holds (a plain struct of the same members does not load; the
+  engine skips the property, or the asset does not hold a value that equals the original's constructor default, and the logic runs on the
+  defaults):
+  * `--object-settings NAME[,NAME]`: a settings type the assets hold as an `Instanced` `UObject` (ALS: `AlsTurnInPlaceSettings`).  It is generated as
+    `U<Name>` (`EditInlineNew`), the settings types that hold it have a `TObjectPtr<U<Name>>`, the logic reads `F<Name>Value` through
+    `DalValueOf(pointer)` (a null object reads as the declared defaults).
+  * `--native-struct Name=FEngineType[=Header]`: a struct that is an engine type with the same members (ALS: `AlsFloatInterval=FFloatInterval=Math/Interval.h`);
+    it is not declared, the engine's type is used.
+  * `--channel-default Struct.Member=Channel,Channel`: the default of a `channel_set` member of a settings type, set in the constructor (ALS:
+    `AlsGeneralMantlingSettings.MantlingTraceResponseChannels=WorldStatic,WorldDynamic,Destructible` -- the constructors of `UAlsCharacterSettings`
+    and `UAlsAnimationInstanceSettings` set them, so no asset holds them).
+  Names that the file being compiled does not declare are ignored (one option list serves every file of a system); a name that is declared but
+  of the wrong kind is an error.  `Unreal/AlsHost/gen_als.py` has the list for the ALS rewrite (`ASSET_COMPAT`).
 * `--bag` (anim logic): also write `U<Logic>Bag` into `<Logic>.h`, a `UAnimInstance` with the same params / inputs / states
   and none of the logic -- the parent class of an Animation Blueprint while DalLive interprets the program.
 * A file without a `logic` line that only declares shared things is a library (`use "x.dal";`): it checks and compiles on
@@ -282,7 +295,7 @@ value-returning method call inside an expression (it was DAL4042 everywhere but 
 python -I -m unittest discover -s tests
 ```
 
-1007 tests (about 10 minutes; the C++ compile tests are most of it): 608 at 0.3.0, 379 when DalLive was added, 184 of them from v0 unchanged. Python 3.11+ syntax; also run under Blender 5.2's embedded Python 3.13.
+1128 tests (about 10 minutes; the C++ compile tests are most of it): 608 at 0.3.0, 379 when DalLive was added, 184 of them from v0 unchanged. Python 3.11+ syntax; also run under Blender 5.2's embedded Python 3.13.
 
 | File | What it checks |
 |---|---|
@@ -302,6 +315,7 @@ python -I -m unittest discover -s tests
 | `test_cli.py` | `python -m dal` |
 | `test_cpp_bag.py` | the property bag (`--bag`): same UPROPERTYs as the main class, no logic, off by default (other output byte-identical) |
 | `test_use.py` (21) | libraries: loading, merging, cycles, root escape, diagnostics that point into the library, one shared C++ header, a library compiling alone |
+| `test_asset_compat.py` (12) | `--object-settings`, `--native-struct`, `--channel-default`: the generated text, the restoration of the types after a generation, errors, the stand-in engine compile and run against Python with object-held settings |
 | `test_struct.py` (22), `test_tags.py` (13) | structs (defaults, construction by name, value semantics, dotted-path snapshots, library sharing) and tag sets: checker, interpreter vs Python, C++ compile-and-run |
 | `test_methods.py` (18), `test_peers.py` (23), `test_cpp_system.py` (13) | methods, views, call statements, `begin_play`, peers (sampled reads, direct and queued calls), tick slots; the three-logic ALS-shaped system in all three implementations (several logics wired to one stand-in actor) |
 | `test_settings.py` (60) | settings / curves / tables / lists / asset values: diagnostics, the loader (every spelling, error paths, resolvers), FRichCurve evaluation by hand, random settings data through interpreter, Python and C++, the real ALS pack (`G:\DCC\AlsPack`, skipped when absent), `als_lib.dal` in all three |
@@ -337,10 +351,10 @@ Regenerate golden files with `UPDATE_GOLDEN=1 python -I -m unittest discover -s 
   7.4k lines) replaced ALS-Refactored's logic layer in a sandbox host and was compared with ten recordings of the original.  UHT rejected two things (a
   lambda as a default member initializer, `TObjectPtr` in a `UFUNCTION` signature); loading and running found a Control Rig that does not accept
   `FVector3f` members (`--double-members`) and a linked animation instance whose parent stayed null (the engine updates it through its proxy, so the
-  parent is looked up again in the thread-safe update).  `dal-syntax-v3.md` section 32 has the numbers.  Not covered: the generated notify classes
-  (`PostNotify`; no `notify` declaration in `als/` yet), a cooked / packaged build, several logics with same-named enums in one module.
-  Known mismatches with existing ALS assets, read from the code and not tried: `UAlsTurnInPlaceSettings` (an instanced object in ALS, a nested value
-  here) and the response container of `FAlsInAirSettings` (a list of channels here).
+  parent is looked up again in the thread-safe update).  Comparing the settings assets as the engine loads them (original vs generated classes) found
+  three more: the turn-in-place settings are objects, the mantling / ground prediction channels are constructor defaults, `FFloatInterval` is the
+  engine's (the three options above).  `dal-syntax-v3.md` section 32 has the numbers.  Not covered: a cooked / packaged build, several logics with
+  same-named enums in one module, the ragdoll against the original (no ragdoll in the truth takes).
 * Settings in C++ are filled by the engine's property system (`.uasset`); the JSON loader is Python only. A response container
   (`FCollisionResponseContainer`) in exported data is read as the list of channels that block; curves are `UCurveFloat` /
   `UCurveVector` objects.

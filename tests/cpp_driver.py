@@ -23,7 +23,7 @@ import subprocess
 import tempfile
 
 from dal import ir
-from dal.cppbackend import CppGen, CppOptions, generate_cpp
+from dal.cppbackend import CppGen, CppOptions, generate_cpp, generation_scope, object_settings
 from dal.types import BOOL, FLOAT, INT, MOVEMENT_MODE, QUAT, ROTATOR, TRANSFORM, VEC2, VEC3, ArrayType, AssetType, EnumType, MapType, StructType, TagType
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -126,7 +126,14 @@ class SettingsInit:
     def fill(self, ty, v, target: str) -> None:
         if isinstance(ty, StructType):
             for f in ty.fields:
-                if not f.derived:
+                if f.derived:
+                    continue
+                if object_settings(f.ty):                         # CppOptions.object_settings: the member points to an object of its own
+                    e = self.fresh()
+                    self.lines.append(f"{{ auto* {e} = new U{f.ty.name}();")
+                    self.fill(f.ty, getattr(v, f.name), f"(*{e})")
+                    self.lines.append(f"{target}.{f.name} = {e}; }}")
+                else:
                     self.fill(f.ty, getattr(v, f.name), f"{target}.{f.name}")
         elif isinstance(ty, MapType):
             for k, x in v.items():
@@ -778,7 +785,8 @@ def build_and_run(module: ir.Module, frames: list[dict], extra_include: str | No
             f.write("// intentionally empty\n")
         driver = os.path.join(work, "driver.cpp")
         with open(driver, "w", encoding="utf-8", newline="\n") as f:
-            f.write(make_driver(module, frames, params))
+            with generation_scope(module, options or CppOptions()):        # the driver writes code against the types as the options changed them
+                f.write(make_driver(module, frames, params))
         exe = os.path.join(work, "run.exe" if kind == "msvc" else "run")
         includes = [inc, gen] + ([os.path.abspath(extra_include)] if extra_include else [])
         srcs = [os.path.join(gen, n) for n in sorted(files) if n.endswith(".cpp")]

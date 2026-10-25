@@ -279,6 +279,12 @@ struct FCollisionQueryParams
 };
 #define SCENE_QUERY_STAT(QueryName) FName(#QueryName), 0
 
+struct FFloatInterval
+{
+	float Min = 0.0f;
+	float Max = 0.0f;
+};
+
 // the responses of a query: stored and accepted, the stub's scene blocks everything
 struct FCollisionResponseContainer
 {

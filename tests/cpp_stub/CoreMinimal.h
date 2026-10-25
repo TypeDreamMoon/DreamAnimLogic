@@ -93,6 +93,9 @@ template <class T>
 struct TArray
 {
 	std::vector<T> V;
+	TArray() = default;
+	TArray(std::initializer_list<T> InitList) : V(InitList) {}
+	TArray& operator=(std::initializer_list<T> InitList) { V.assign(InitList.begin(), InitList.end()); return *this; }
 	int32 Num() const { return static_cast<int32>(V.size()); }
 	bool IsValidIndex(int32 I) const { return I >= 0 && I < Num(); }
 	int32 Add(const T& In) { V.push_back(In); return Num() - 1; }

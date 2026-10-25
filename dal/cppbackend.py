@@ -28,6 +28,7 @@ the class starts with ``Dal`` (``bDal`` for booleans); ``names.py`` keeps user n
 
 from __future__ import annotations
 
+import contextlib
 import os
 import struct
 from dataclasses import dataclass, field
@@ -39,6 +40,8 @@ from .names import SAMPLE_LOCALS
 from .types import (
     VOID,
     BOOL,
+    CHANNEL,
+    CHANNEL_SET,
     FLOAT,
     HIT,
     INT,
@@ -79,6 +82,9 @@ class CppOptions:
     parent_include: str = ""                       # "" = Animation/AnimInstance.h resp. Components/ActorComponent.h
     property_bag: bool = False                     # anim logic: also emit U<Logic>Bag, the same UPROPERTYs without the logic (DalLive)
     double_members: bool = False                   # vector / rotator / quat / transform members of structs are the double-precision engine types (MEMBER_TYPES)
+    object_settings: tuple = ()                    # names of settings types an asset holds as Instanced UObjects: U<Name> (the object) + F<Name>Value (what the logic reads)
+    native_structs: tuple = ()                     # "Name=FEngineType[=Header]": a struct that is an engine type with the same members (FFloatInterval); not declared
+    channel_defaults: tuple = ()                   # "Struct.Member=Channel,Channel": the default of a channel_set member of a settings type (the constructor of the original sets it)
 
 
 KIND_PARENT = {
@@ -293,6 +299,36 @@ def from_member(text: str, ty: Type) -> str:
     return f"{cpp_type(ty)}({text})" if double_member(ty) else text
 
 
+# Settings that must read what an asset made with the original ALS holds.  The original has three things in its settings types that a plain struct
+# of the same members does not give (the property is skipped when the asset is loaded, or the asset does not hold it and the default is another):
+#   * UAlsTurnInPlaceSettings is an Instanced UObject: the asset stores a sub-object of that class (CppOptions.object_settings);
+#   * FFloatInterval is the engine's, here a struct of two floats (CppOptions.native_structs);
+#   * the collision channels of the mantling and the ground prediction are defaults the constructors of UAlsCharacterSettings and
+#     UAlsAnimationInstanceSettings set, so no asset holds them (CppOptions.channel_defaults).
+_OBJECT_SETTINGS: frozenset = frozenset()                  # set by generate_cpp for the duration of one generation
+_CHANNEL_DEFAULTS: dict = {}                               # (struct, member) -> the C++ names of the channels
+_NATIVE_STRUCTS: dict = {}                                 # name -> (C++ type, header or "")
+
+
+def object_settings(ty: Type) -> bool:
+    """A settings type the assets hold as an object: its members are TObjectPtr<U<Name>> (null = the defaults), the logic reads F<Name>Value."""
+    return isinstance(ty, StructType) and ty.is_settings and ty.name in _OBJECT_SETTINGS
+
+
+def settings_member_type(ty: Type) -> str:
+    """C++ type of a member of a settings type."""
+    if object_settings(ty):
+        return f"TObjectPtr<U{ty.name}>"
+    return member_type(ty)
+
+
+def settings_member_read(text: str, owner: Type, ty: Type) -> str:
+    """A member of a struct, as the logic's type (a member of a settings type may be an object)."""
+    if isinstance(owner, StructType) and owner.is_settings and object_settings(ty):
+        return f"DalValueOf({text})"
+    return from_member(text, ty)
+
+
 def cpp_value(ty: Type, v) -> str:
     if ty is FLOAT:
         return fmt_float(v)
@@ -498,7 +534,7 @@ class CppExprGen:
         base = self.x(e.x)
         if isinstance(e.x.ty, StructType):
             text = f"{base}->{e.comps}" if e.x.ty.is_notify else f"{base}.{e.comps}"
-            return f"static_cast<{enum_cast(e.ty)}>({text})" if enum_cast(e.ty) else from_member(text, e.ty)
+            return f"static_cast<{enum_cast(e.ty)}>({text})" if enum_cast(e.ty) else settings_member_read(text, e.x.ty, e.ty)
         if e.x.ty is HIT:
             return f"{base}.{HIT_MEMBER_CPP[e.comps]}"
         if e.x.ty is SPRING or e.x.ty is SPRING3:
@@ -1851,12 +1887,18 @@ class CppGen:
         for st in own + self.notify_structs(origin):
             for f in st.fields:
                 asset_headers(f.ty, inc)
+        for st in own:
+            native = _NATIVE_STRUCTS.get(st.name)
+            if native and native[1] and native[1] not in inc:
+                inc.append(native[1])
         if origin is None:
             for d in [*self.m.params, *self.m.inputs, *self.m.states]:
                 asset_headers(d.ty, inc)
         return [x for x in inc if x not in skip]
 
     def struct_decl(self, st: StructType) -> list[str]:
+        if st.name in _NATIVE_STRUCTS:
+            return []                                        # an engine type (CppOptions.native_structs)
         if st.is_settings:
             return self.settings_decl(st)
         out = ["USTRUCT(BlueprintType)", f"struct {st.cpp_type}", "{", f"{T}GENERATED_BODY()"]
@@ -1873,14 +1915,12 @@ class CppGen:
         out.append("};")
         return out
 
-    def settings_decl(self, st: StructType) -> list[str]:
-        """A settings type: a USTRUCT inside another settings type, a UDataAsset at the top (no other settings type holds it)."""
+    def settings_members(self, st: StructType) -> tuple[list[str], list[str]]:
+        """The member declarations of a settings type, and the constructor lines for the members whose default UHT cannot read as an initializer."""
         from . import values
 
-        root = st.asset_root
-        recompute = needs_recompute(st)
         inst = values.default_of(st) if any(f.derived for f in st.fields) else None
-        ctor: list[str] = []                    # members whose default is an expression UHT cannot read as an initializer
+        ctor: list[str] = []
         members: list[str] = []
         for k, f in enumerate(st.fields):
             if k:
@@ -1888,12 +1928,54 @@ class CppGen:
             if f.derived:
                 members.append(f'{T}UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "DAL", Transient)')
                 init, late = member_init(f.ty, getattr(inst, f.name), True)
+            elif object_settings(f.ty):
+                members.append(f'{T}UPROPERTY(EditAnywhere, BlueprintReadOnly, Instanced, Category = "DAL")')
+                init, late = "", None
             else:
                 members.append(f'{T}UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "DAL")')
-                init, late = ("", None) if isinstance(f.ty, (MapType, ArrayType, AssetType)) else member_init(f.ty, f.default, True)
-            members.append(f"{T}{member_type(f.ty)} {f.name}{init};")
+                channels = _CHANNEL_DEFAULTS.get((st.name, f.name))
+                if channels is not None:
+                    init, late = "", "{ " + ", ".join(channels) + " }"
+                else:
+                    init, late = ("", None) if isinstance(f.ty, (MapType, ArrayType, AssetType)) else member_init(f.ty, f.default, True)
+            members.append(f"{T}{settings_member_type(f.ty)} {f.name}{init};")
             if late is not None:
                 ctor.append(f"{T}{T}{f.name} = {late};")
+        return members, ctor
+
+    def object_settings_decl(self, st: StructType, members: list[str], ctor: list[str]) -> list[str]:
+        """A settings type the assets hold as an Instanced UObject (CppOptions.object_settings): the value struct the logic reads, the object
+        (EditInlineNew; the settings types that hold it have a TObjectPtr), and the read of a member as a value (a null object is the defaults)."""
+        if st.asset_root or any(f.derived or object_settings(f.ty) for f in st.fields):
+            raise ValueError(f"object settings `{st.name}`: it must be held by another settings type and have no derived members or members of its own kind")
+        obj = f"U{st.name}"
+        out = ["USTRUCT(BlueprintType)", f"struct {st.cpp_type}", "{", f"{T}GENERATED_BODY()", ""]
+        out += members
+        if ctor:
+            out += ["", f"{T}{st.cpp_type}()", f"{T}{{", *ctor, f"{T}}}"]
+        out += ["};", "",
+                "UCLASS(BlueprintType, EditInlineNew)",
+                f"class {self.api}{obj} : public UObject",
+                "{", f"{T}GENERATED_BODY()", "", "public:"]
+        if ctor:
+            out += [f"{T}{obj}()", f"{T}{{", *ctor, f"{T}}}", ""]
+        out += members
+        out += ["", f"{T}/** The values of this object, as the logic reads them. */",
+                f"{T}{st.cpp_type} ToValue() const", f"{T}{{", f"{T}{T}{st.cpp_type} Value;"]
+        out += [f"{T}{T}Value.{f.name} = {f.name};" for f in st.fields]
+        out += [f"{T}{T}return Value;", f"{T}}}", "};", "",
+                "/** What the logic reads of a member that holds the object: the values of the declared defaults when there is none. */",
+                f"inline {st.cpp_type} DalValueOf(const {obj}* Object)", "{",
+                f"{T}return Object != nullptr ? Object->ToValue() : {st.cpp_type}();", "}"]
+        return out
+
+    def settings_decl(self, st: StructType) -> list[str]:
+        """A settings type: a USTRUCT inside another settings type, a UDataAsset at the top (no other settings type holds it)."""
+        root = st.asset_root
+        recompute = needs_recompute(st)
+        members, ctor = self.settings_members(st)           # ctor: members whose default is an expression UHT cannot read as an initializer
+        if object_settings(st):
+            return self.object_settings_decl(st, members, ctor)
         if root:
             out = ["UCLASS(BlueprintType)", f"class {self.api}{st.cpp_type} : public UDataAsset", "{", f"{T}GENERATED_BODY()", "", "public:"]
             if recompute or ctor:
@@ -2002,7 +2084,7 @@ class CppGen:
             L.extend(self.tags_decl(ts))
             L.append("")
         for st in m.structs:
-            if st.origin == origin:
+            if st.origin == origin and st.name not in _NATIVE_STRUCTS:
                 L.extend(self.struct_decl(st))
                 L.append("")
         for nd in own_notifies:
@@ -2169,7 +2251,7 @@ class CppGen:
                 L.extend(self.tags_decl(ts))
                 L.append("")
         for st in m.structs:
-            if st.origin is None:
+            if st.origin is None and st.name not in _NATIVE_STRUCTS:
                 L.extend(self.struct_decl(st))
                 L.append("")
         for nd in m.notifies:
@@ -3088,13 +3170,70 @@ class CppGen:
 
 def generate_cpp(module: ir.Module, options: CppOptions | None = None) -> dict[str, str]:
     """Return ``{filename: text}`` for the generated header, source, the math header and (v1 host traffic) DalHost.h."""
-    global _DOUBLE_MEMBERS
     options = options or CppOptions()
-    _DOUBLE_MEMBERS = options.double_members
-    try:
+    with generation_scope(module, options):
         return _generate_cpp(module, options)
+
+
+@contextlib.contextmanager
+def generation_scope(module: ir.Module, options: CppOptions):
+    """What the options change in how the types of the module are written (member types, the C++ names of settings and native structs), for the
+    duration of the block: the generation itself, and whatever writes code against the generated types (the test driver)."""
+    global _DOUBLE_MEMBERS, _OBJECT_SETTINGS, _NATIVE_STRUCTS, _CHANNEL_DEFAULTS
+    _DOUBLE_MEMBERS = options.double_members
+    renamed: list = []                                       # (struct, its C++ type before): restored when the block is over
+    objects: set = set()
+    natives: dict = {}
+    try:
+        declared = {st.name: st for st in module.structs}
+        for name in options.object_settings:
+            st = declared.get(name)
+            if st is None:
+                continue                                     # a file that does not use the type
+            if not st.is_settings:
+                raise ValueError(f"object settings `{name}` is not a settings type")
+            objects.add(name)
+            renamed.append((st, st.cpp_type))
+            st.cpp_type = f"F{name}Value"                    # U<Name> is the object; the value the logic reads must not share its engine name
+        for spec in options.native_structs:
+            name, _, rest = spec.partition("=")
+            ctype, _, header = rest.partition("=")
+            if not name or not ctype:
+                raise ValueError(f"native struct `{spec}`: Name=FEngineType[=Header] is needed")
+            st = declared.get(name)
+            if st is None:
+                continue
+            natives[name] = (ctype, header)
+            renamed.append((st, st.cpp_type))
+            st.cpp_type = ctype
+        channels: dict = {}
+        for spec in options.channel_defaults:
+            target, _, names = spec.partition("=")
+            owner, _, member = target.partition(".")
+            if not owner or not member or not names:
+                raise ValueError(f"channel default `{spec}`: Struct.Member=Channel,Channel is needed")
+            st = declared.get(owner)
+            if st is None:
+                continue
+            field_ = st.field(member)
+            if field_ is None or field_.ty is not CHANNEL_SET:
+                raise ValueError(f"channel default `{spec}`: {owner}.{member} is not a channel_set member")
+            listed = [x.strip() for x in names.split(",") if x.strip()]
+            for x in listed:
+                if x not in CHANNEL.cpp_members:
+                    raise ValueError(f"channel default `{spec}`: `{x}` is not a channel")
+            channels[(owner, member)] = [CHANNEL.cpp_members[x] for x in listed]
+        _OBJECT_SETTINGS = frozenset(objects)
+        _NATIVE_STRUCTS = natives
+        _CHANNEL_DEFAULTS = channels
+        yield
     finally:
+        for st, old in renamed:
+            st.cpp_type = old
         _DOUBLE_MEMBERS = False
+        _OBJECT_SETTINGS = frozenset()
+        _NATIVE_STRUCTS = {}
+        _CHANNEL_DEFAULTS = {}
 
 
 def _generate_cpp(module: ir.Module, options: CppOptions) -> dict[str, str]:
