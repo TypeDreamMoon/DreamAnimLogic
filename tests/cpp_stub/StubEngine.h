@@ -960,12 +960,19 @@ private:
 
 class UAnimInstance;
 
+// which thread the code runs on: the tests say (CoreGlobals.h IsInGameThread())
+inline bool GStubInGameThread = false;
+inline bool IsInGameThread() { return GStubInGameThread; }
+
 // the proxy of an animation instance: PostUpdate is the hook that runs on the game thread after the graph updated
 struct FAnimInstanceProxy
 {
 	FAnimInstanceProxy() = default;
 	explicit FAnimInstanceProxy(UAnimInstance*) {}
 	virtual ~FAnimInstanceProxy() = default;
+
+	FTransform StubComponentTransform;                       // what the proxy cached (the tests set it)
+	const FTransform& GetComponentTransform() const { return StubComponentTransform; }
 
 protected:
 	virtual void PostUpdate(UAnimInstance*) const {}
@@ -977,6 +984,10 @@ class UAnimInstance : public UObject
 public:
 	APawn* StubPawn = nullptr;
 	UWorld* StubWorld = nullptr;
+
+	mutable FAnimInstanceProxy StubProxy;
+	template <class T = FAnimInstanceProxy>
+	T& GetProxyOnAnyThread() const { return static_cast<T&>(StubProxy); }
 
 	TStubMulticast<UAnimMontage*, bool> OnMontageEnded;
 	TStubMulticast<UAnimMontage*, bool> OnMontageBlendingOut;

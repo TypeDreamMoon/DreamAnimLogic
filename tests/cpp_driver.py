@@ -537,6 +537,11 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
                 L.append("\t\t" + fmt(f[key]))
         if "mesh_world_transform" in f:
             L.append(f"		Mesh.StubTransform = {_dtransform(f['mesh_world_transform'])};")
+        proxy = f.get("proxy_component_transform", f.get("mesh_world_transform"))
+        if proxy is not None and not actor:                                 # (the proxy of the animation instance cached the mesh's transform, unless a frame says otherwise)
+            L.append(f"		Obj.StubProxy.StubComponentTransform = {_dtransform(proxy)};")
+        if "game_thread" in f:
+            L.append(f"		GStubInGameThread = {'true' if f['game_thread'] else 'false'};")
         if "root_motion_mode" in f:
             L.append(f"		{target}.RootMotionMode = static_cast<ERootMotionMode::Type>({int(f['root_motion_mode'])});")
         if "ragdoll_supported" in f:
@@ -664,9 +669,13 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
         else:
             L.append(f"\t\tObj.NativeUpdateAnimation({dt}f);")
             L.append(f"\t\tObj.NativeThreadSafeUpdateAnimation({dt}f);")
+        if f.get("mark"):                                           # (a test asks where in the frame the commands ran)
+            L.append('\t\tStubLog::Lines().push_back("mark_updated");')
         for call in f.get("calls", []):
             L.append("\t\t" + entry_call(module, "Obj", call))
         if gen.post:
+            if f.get("mark"):
+                L.append('\t\tStubLog::Lines().push_back("mark_calls_done");')
             L.append("\t\tObj.StubPostUpdate();")                  # the animation graph has updated: the proxy's PostUpdate
         if f.get("end_play"):
             L.append("\t\tObj.EndPlay(EEndPlayReason::Destroyed);" if actor else "\t\tObj.NativeUninitializeAnimation();")

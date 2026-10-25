@@ -327,6 +327,14 @@ QUERIES: dict[str, Query] = {
               "Segment->GetAnimReference()->ExtractRootTrackTransform(FAnimExtractContext(Segment->ConvertTrackPosToAnimPos(Time)), nullptr)", True),
         Query("montage_last_root_transform", (MONTAGE_ASSET,), TRANSFORM, "absolute root bone transform at the end of the montage's last segment",
               "AnimTrack.AnimSegments.Last(): ExtractRootTrackTransform(FAnimExtractContext(Segment.GetEndPos()), nullptr)", True),
+        # v5: where the code runs, and the transform an animation proxy caches (ALS reads both while the animation graph updates)
+        Query("is_game_thread", (), BOOL,
+              "does the code run on the game thread (an animation graph may update on a worker thread; a host without threads answers false)",
+              "IsInGameThread()", True),
+        Query("proxy_component_transform", (), TRANSFORM,
+              "the component transform the animation proxy has cached while the graph updates (FAnimInstanceProxy::GetComponentTransform): the mesh's "
+              "transform at the last PreUpdate / PreEvaluateAnimation, which is not the mesh's transform of the moment while root motion moves the character",
+              "GetProxyOnAnyThread<FAnimInstanceProxy>().GetComponentTransform() (an actor logic: the mesh component's transform)", True),
         Query("target_count", (), INT, "number of targetable actors", "actors with the tag DalTargetTag (DalTarget), collected once per tick"),
         Query("target_id", (INT,), INT, "stable id of the i-th target", "AActor::GetUniqueID()"),
         Query("target_location", (INT,), VEC3, "location of the i-th target", "Actor->GetActorLocation()"),
@@ -676,6 +684,15 @@ class HostV1(HostV0):
     def montage_is_playing(self, name) -> bool:
         """manager.is_playing(montage) for a montage asset value (the asset's name); the same as ``montage_playing`` for a declared montage"""
         return bool(self.montage_playing(name)) if name is not None else False
+
+    def is_game_thread(self) -> bool:
+        """is the code running on the game thread: the generated C++ asks IsInGameThread(); a host without threads (Blender) answers False, so what the
+        animation logic wants done on the game thread waits for its post update"""
+        return False
+
+    def proxy_component_transform(self):
+        """the component transform the animation proxy cached (FAnimInstanceProxy::GetComponentTransform()); a host without a proxy answers the mesh's"""
+        return self.mesh_world_transform
 
     def set_movement_mode_locked(self, value: bool) -> None:
         """cm.set_movement_mode_locked(value): the movement mode cannot change, the movement component's own changes included"""

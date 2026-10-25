@@ -820,6 +820,8 @@ class CppGen:
         self.slots = [u.phase for u in module.updates] or [module.default_phase]
         self.queue_target = module.kind == "anim" and any(x.pub and not x.is_view for x in module.methods)
         self.has_cmds = bool(self.cmds) or module.flush_peers
+        # an animation logic that asks where it runs (host.is_game_thread) wants what it queued to happen at once when the graph updates on the game thread
+        self.game_thread_flush = bool(self.post_flush and self.cmds and "is_game_thread" in self.queries)
         self.flush_peer_names: list[str] = []                            # `flush_peers`: the peers whose pub methods this logic calls at once
         if module.flush_peers:
             for _label, body in module.bodies():
@@ -1561,6 +1563,11 @@ class CppGen:
         out += ["}", "DalFrameEvents.Reset();"]
         return out
 
+    def game_thread_flush_lines(self) -> list[str]:
+        return [f"{T}// The graph updates on the game thread here: what was queued runs at once, as it does in the C++ it was ported from.",
+                f"{T}// (On a worker thread the commands wait for the post update.)",
+                f"{T}if (IsInGameThread())", f"{T}{{", f"{T}{T}DalFlushCommands();", f"{T}}}"]
+
     def execute_body(self) -> list[str]:
         if not self.cmds:                                        # a logic with flush_peers and no commands of its own: nothing to run here
             return ["(void)DalCommand;"]
@@ -1683,6 +1690,17 @@ class CppGen:
                 "\treturn false;",
                 "}",
                 "return DalHit.Normal.Z >= UE_KINDA_SMALL_NUMBER && DalHit.Normal.Z >= DalMovement->GetWalkableFloorZ();"]))
+        if "is_game_thread" in q:
+            out.append(Method("bool", "DalIsGameThread", doc="host.is_game_thread: does the code run on the game thread.", body=["return IsInGameThread();"]))
+        if "proxy_component_transform" in q:
+            if self.actor:
+                body = ["const AActor* DalOwner = GetOwner();",
+                        "const USkeletalMeshComponent* DalMesh = DalOwner != nullptr ? DalOwner->FindComponentByClass<USkeletalMeshComponent>() : nullptr;",
+                        "return DalMesh != nullptr ? FTransform3f(DalMesh->GetComponentTransform()) : FTransform3f();"]
+            else:
+                body = ["return FTransform3f(GetProxyOnAnyThread<FAnimInstanceProxy>().GetComponentTransform());"]
+            out.append(Method("FTransform3f", "DalProxyComponentTransform",
+                              doc="host.proxy_component_transform: the component transform the animation proxy cached (the mesh's, for an actor logic).", body=body))
         if "montage_is_playing" in q:
             out.append(Method("bool", "DalMontageIsPlaying", "const UAnimMontage* DalMontage",
                               doc="host.montage_is_playing: is the montage (an asset value) playing on the animation instance.",
@@ -2551,6 +2569,12 @@ class CppGen:
         if self.bind_input:
             for x in ("EnhancedInputComponent.h", "InputAction.h", "InputActionValue.h"):
                 add(x)
+        if "is_game_thread" in self.queries:
+            add("CoreGlobals.h")
+        if "proxy_component_transform" in self.queries:
+            add("Animation/AnimInstanceProxy.h" if not self.actor else "Components/SkeletalMeshComponent.h")
+            if self.actor:
+                add("GameFramework/Actor.h")
         if _MONTAGE_ASSET_QUERIES & set(self.queries):
             add("Animation/AnimMontage.h")
         if {"montage_root_transform", "montage_last_root_transform"} & set(self.queries):
@@ -2868,7 +2892,10 @@ class CppGen:
                 # its proxy, which runs this one.  At NativeInitializeAnimation the mesh does not always know the main instance yet (a graph that links
                 # instances while it is being initialised), so the parent is looked up again here until it is found.
                 tsu += [f"{T}if (!Parent.IsValid())", f"{T}{{", f"{T}{T}DalResolveParent();", f"{T}}}", ""]
-            tsu += [f"{T}Dal_DeltaSeconds = DeltaSeconds;", f"{T}DalUpdate(DeltaSeconds);", "}"]
+            tsu += [f"{T}Dal_DeltaSeconds = DeltaSeconds;", f"{T}DalUpdate(DeltaSeconds);"]
+            if self.game_thread_flush:
+                tsu += self.game_thread_flush_lines()
+            tsu.append("}")
             blocks.append(tsu)
             if self.post:
                 blocks.append([f"F{m.name}Proxy::F{m.name}Proxy(UAnimInstance* AnimationInstance) : FAnimInstanceProxy(AnimationInstance)", "{", "}"])
@@ -2972,6 +2999,8 @@ class CppGen:
             lines.extend(self.stmts(e.body, 1))
             if self.actor and self.has_cmds:
                 lines.append(f"{T}DalFlushCommands();")
+            elif self.game_thread_flush:
+                lines.extend(self.game_thread_flush_lines())
             lines.append("}")
             blocks.append(lines)
         if not self.actor:

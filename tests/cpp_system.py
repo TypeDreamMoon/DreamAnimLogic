@@ -133,6 +133,8 @@ def make_system_driver(modules: dict[str, ir.Module], frames: list[dict], schedu
                 L.append(f'\t\tL_{n}.StubCurves["{cname}"] = {cd._num(cv)}f;')
         if "mesh_world_transform" in f:                                        # the mesh component and the pose evaluated last
             L.append(f"\t\tMesh.StubTransform = {cd._dtransform(f['mesh_world_transform'])};")
+            for n in anims:                                                    # (the proxy of an animation instance cached the mesh's transform)
+                L.append(f"\t\tL_{n}.StubProxy.StubComponentTransform = {cd._dtransform(f['mesh_world_transform'])};")
         if "bones" in f:
             L.append("\t\tMesh.StubBones.clear();")
             for bname, bt in f["bones"].items():

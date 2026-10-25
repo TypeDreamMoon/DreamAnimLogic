@@ -38,7 +38,18 @@ from .types import BOOL, FLOAT, INT, QUAT, ROTATOR, TRANSFORM, VEC2, VEC3, Array
 class ScriptedHost(MockHost):
     """A host that replays one frame dict at a time and records the commands it is given."""
 
+    _game_thread = False
+    _proxy_transform = None
+
+    def is_game_thread(self) -> bool:
+        return self._game_thread
+
+    def proxy_component_transform(self):
+        return self._proxy_transform if self._proxy_transform is not None else rt.as_transform(self.mesh_world_transform)
+
     def load(self, frame: dict) -> None:
+        self._game_thread = bool(frame.get("game_thread", False))                       # where the code runs; the proxy's cached transform ("proxy_component_transform")
+        self._proxy_transform = rt.as_transform(frame["proxy_component_transform"]) if "proxy_component_transform" in frame else None
         for name, item in HOST_ITEMS.items():
             if name in ("action", "notify") or name.startswith("montage_") or item.arg:
                 continue
