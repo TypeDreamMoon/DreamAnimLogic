@@ -81,8 +81,11 @@ examples/
 als/                              ALS-Refactored rewritten in .dal (library + character + input + animation instances)
   als_lib.dal                     the shared declarations: 8 tag sets, enums, the state structs, 23 settings types (they load the data
                                   assets of G:\DCC\AlsPack) and the pure math helpers
-  AlsCharacter.dal                AAlsCharacter: states, view, locomotion, gait, rotation, landing, jumping, the CMC gait settings push
+  AlsCharacter.dal                AAlsCharacter: states, view, locomotion, gait, rotation, landing, jumping, the CMC gait settings push, and the
+                                  actions of AlsCharacter_Actions.cpp: rolling, mantling (with the root motion source as a driver), get up,
+                                  ragdolling, plus the three notify states they end on
   AlsInput.dal                    the example character's Enhanced Input actions
+  bindings.json                   which data asset of the ALS pack each root settings param of the logics takes (the mantling kinds)
   AlsAnimationInstance.dal        UAlsAnimationInstance: layering, pose, view, spine, head, locomotion, lean, grounded, standing, crouching, in air with
                                   the ground prediction sweep, the foot lock, transitions and dynamic transitions, rotate and turn in place with their
                                   montages, the final ragdoll pose, the ControlRig input, the notifies of the instance (82 of the 82 state paths of
@@ -95,6 +98,10 @@ tests/                            python -I -m unittest discover -s tests
   golden/                         golden C++ output
 Unreal/
   DalLive/                        UE plugin: hot reload of .dal in the editor (editor-Python interpreter + a thin C++ component)
+  DalRuntime/                     UE plugin: the native half of the generated code (movement component with the ALS extensions, root motion
+                                  override source, ragdoll service, hook events and the event router, test character); README.md
+  AlsHost/                        puts the C++ generated from als/*.dal in for ALS's own logic layer in a UE sandbox host, records the truth
+                                  routes in PIE and compares them with the original ALS's takes; DalRuntime checks, the c3 scenarios; README.md
   TestHost/                       generator of the test project + PIE harness: generated C++ vs DalLive, frame by frame
 ```
 
@@ -121,6 +128,10 @@ python -m dal host                                                      # the ho
 * `--parent-class UMyBase --parent-include MyBase.h` changes the C++ base class (default `UAnimInstance`, or
   `UActorComponent` for `logic X : actor;`).
 * `--standins FILE` provides the Python stand-ins of `extern fn`s (default: `<source>_standins.py`).
+* `--double-members`: the vector / rotator / quaternion / transform members of structs (state structs, settings, notify payloads) get the
+  engine's double-precision types (`FVector`, `FRotator`, `FQuat`, `FTransform`) instead of `FVector3f` ...; the logic still computes in single
+  precision (reads convert, writes convert back), top-level states / inputs / params keep theirs.  A Control Rig or a Blueprint pin made for
+  ALS's own structs does not convert a `FVector3f`; the ALS rewrite is generated with it.
 * `--bag` (anim logic): also write `U<Logic>Bag` into `<Logic>.h`, a `UAnimInstance` with the same params / inputs / states
   and none of the logic -- the parent class of an Animation Blueprint while DalLive interprets the program.
 * A file without a `logic` line that only declares shared things is a library (`use "x.dal";`): it checks and compiles on
@@ -298,7 +309,9 @@ python -I -m unittest discover -s tests
 | `test_host_reads.py` (17), `test_host_mesh.py` (10) | the v3 host reads: capsule, curves, consume-on-read, bones, mesh transform, reference skeleton, root motion mode |
 | `test_math3.py` (43) | component assignment, quaternion / vector / spring / easing built-ins by hand, `transform` (also against the animation runtime of the Blender host when it is on the machine) |
 | `test_queries.py` (23) | scene queries with channels, the extended hit, primitives, the thread-safe set; mock host vs stand-in engine scene |
-| `test_als_character.py` (62) | `als/`: every function cites its ALS line; the library's structs / settings against the C++ headers; the pack's settings load without a warning; the library math against the UE 5.8 goldens (`als/goldens`); interpreter / Python / C++ (stand-in engine) agree on random frames; gait, rotation, stance, landing, jump and input behaviour against the C++ semantics. `als_host_v2.py` was the shim that registered the host commands `hostapi.py` did not list yet; the compiler has them now (0.4.0) and the shim only carries the settings data of the system driver |
+| `test_als_actions.py` (40), `als_world.py` | the actions of `AlsCharacter.dal`: rolling, mantling against a scene of boxes (a wall, a ledge, a ceiling) with a movement component that obeys the commands, get up and ragdolling against the host's `ragdoll_*` commands and pelvis bone, the notify states they end on; interpreter and generated Python play the same scenarios |
+| `test_als_truth.py` (6) | the ten truth takes of the UE recorder (`G:\DCC\AlsTruth`) through the T2 teacher of the Blender side: none of the 39 state fields of the character differs in any frame of any take; the mantling driver against `Cmc.Velocity` of the mantle take (skipped when the takes, the pack or the DreamVEd modules are not there) |
+| `test_als_character.py` (64) | `als/`: every function cites its ALS line; the library's structs / settings against the C++ headers; the pack's settings load without a warning; the library math against the UE 5.8 goldens (`als/goldens`); interpreter / Python / C++ (stand-in engine) agree on random frames (hooks of the movement component, root motion mode, a ragdoll or none in the host); gait, rotation, stance, landing, jump and input behaviour against the C++ semantics. `als_host_v2.py` was the shim that registered the host commands `hostapi.py` did not list yet; the compiler has them now (0.4.0) and the shim only carries the settings data of the system driver |
 | `test_als_anim.py` (11), `test_als_anim_scenarios.py` (110), `test_als_contract.py` (30) | `als/AlsAnimationInstance.dal`: against the independent port `oracles/als_anim_oracle.py` over random character / pose / curve / notify sequences (every state and every host command of every frame; 24 sequences, counters that prove the branches were reached, mutation checks), hand-checked scenarios (foot lock with both limits, teleports, dynamic transitions, the ground prediction against spheres and a plane, turn in place, notifies, time dilation, the pack's real curves), interpreter / Python / C++ agree on random and on character-like frames, the 82 state paths and 17 entries the AnimBPs use against the `.dab` corpus and the ALS headers |
 | `test_als_anim_truth.py` (5) | the same instance teacher forced against the recordings of the original ALS in Unreal (`G:\DCC\AlsTruth`, `truth_als_anim.py`): every frame starts from the recorded state and the recorded inputs, the result is compared with the recorded end state (foot lock: every leaf of both feet; ground prediction: the sweep it asks and its amount; rotate / turn in place; the montage commands). Skipped without the recordings |
 | `test_timer_hooks.py` (26), `test_notify.py` (20), `test_post_update.py` (20) | 0.4.0: `on timer`, the character's hook events, notify declarations with payloads (branching, ticks), `post_update` / `post_flush` and the animation instance proxy; interpreter vs Python on random frames, C++ compile-and-run |
@@ -317,15 +330,14 @@ Regenerate golden files with `UPDATE_GOLDEN=1 python -I -m unittest discover -s 
   `OnPlayMontageNotifyBegin/End`, the `BindAction` overload, `SCENE_QUERY_STAT` in a component and the `FVector3f` / `FQuat4f`
   conversions all compile and behave. Not covered by those runs: several logics with same-named enums in one module, the custom
   `AnimNotify_<Name>()` functions of anim logic, a cooked / packaged build.
-* Nothing of v3 / 0.4.0 has been compiled in the real engine yet (the C++ only compiles against `tests/cpp_stub`, MSVC `/W4 /WX`). The engine-side
-  pieces 0.4.0 assumes are not written: the code in `DalRuntime` that posts the hook events (`DalHost::FEventRouter::Post`), the new members of
-  `UDalCharacterMovementComponent` (`MaxAccelerationWalking`, `bInputBlocked`, `bMovementModeLocked`, `SetRootMotionOverride`,
-  `ClearRootMotionOverride`), `UDalRagdollService`, and the generated notify classes / animation instance proxy have never met UHT.
-  The stand-in headers are written from the engine's documented behaviour and signatures; known places where UHT or the engine may
-  disagree: C++ default arguments of `UFUNCTION`s (entries with parameters: a struct or tag default is a C++ expression UHT cannot
-  parse -- give such a parameter no default or set it in the body), `FTransform3f` / `FCollisionResponseParams` details, the
-  `ALS` module name of generated `UDataAsset`s (use `--module ALS_API` to keep `/Script/ALS.AlsCharacterSettings`), and the
-  `DalRuntime` module that `pre_penetration_velocity` needs (`UDalCharacterMovementComponent`, not written yet).
+* v3 / 0.4.0 was compiled in UE 5.8.2 and run in PIE on 2026-10-25 (`Unreal/AlsHost`, `Unreal/DalRuntime`): the generated ALS (`als/*.dal`, about
+  7.4k lines) replaced ALS-Refactored's logic layer in a sandbox host and was compared with ten recordings of the original.  UHT rejected two things (a
+  lambda as a default member initializer, `TObjectPtr` in a `UFUNCTION` signature); loading and running found a Control Rig that does not accept
+  `FVector3f` members (`--double-members`) and a linked animation instance whose parent stayed null (the engine updates it through its proxy, so the
+  parent is looked up again in the thread-safe update).  `dal-syntax-v3.md` section 32 has the numbers.  Not covered: the generated notify classes
+  (`PostNotify`; no `notify` declaration in `als/` yet), a cooked / packaged build, several logics with same-named enums in one module.
+  Known mismatches with existing ALS assets, read from the code and not tried: `UAlsTurnInPlaceSettings` (an instanced object in ALS, a nested value
+  here) and the response container of `FAlsInAirSettings` (a list of channels here).
 * Settings in C++ are filled by the engine's property system (`.uasset`); the JSON loader is Python only. A response container
   (`FCollisionResponseContainer`) in exported data is read as the list of channels that block; curves are `UCurveFloat` /
   `UCurveVector` objects.
