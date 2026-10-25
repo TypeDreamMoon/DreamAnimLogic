@@ -13,13 +13,17 @@ import re
 from dataclasses import dataclass
 
 from . import ir
+from . import runtime as rt
 from . import syntax as S
 from .builtins import (
     BUILTIN_CONSTS,
     BUILTINS,
+    CONSTRUCTOR_FAMILY,
     CONSTRUCTORS,
+    CONVERTING,
     TYPE_NAMES,
     all_reserved_names,
+    can_widen,
     resolve_overload,
 )
 from .errors import DalError, Diagnostic, Pos, SourceFile
@@ -50,6 +54,19 @@ from .types import (
     SPRING_MEMBERS,
     TRANSFORM,
     TRANSFORM_MEMBERS,
+    DOUBLE,
+    DOUBLE_TO_SINGLE,
+    QUATD,
+    ROTATORD,
+    SINGLE_TO_DOUBLE,
+    TRANSFORMD,
+    VEC2D,
+    VEC3D,
+    double_of,
+    other_precision,
+    scalar_of,
+    single_of,
+    transform_members,
     INT,
     MONTAGE,
     MONTAGE_ASSET,
@@ -101,7 +118,8 @@ class Sym:
 
 # the components of the vector types, in constructor order, and the constructor that rebuilds one
 COMPONENTS: dict = {VEC2: (("x", "y"), "vec2"), VEC3: (("x", "y", "z"), "vec3"), ROTATOR: (("pitch", "yaw", "roll"), "rotator"),
-                    QUAT: (("x", "y", "z", "w"), "quat")}
+                    QUAT: (("x", "y", "z", "w"), "quat"), VEC2D: (("x", "y"), "vec2"), VEC3D: (("x", "y", "z"), "vec3"),
+                    ROTATORD: (("pitch", "yaw", "roll"), "rotator"), QUATD: (("x", "y", "z", "w"), "quat")}      # (the double types are built by the same constructor kinds)
 
 
 @dataclass
@@ -157,7 +175,7 @@ STRUCT_API = frozenset({"copy", "to_plain", "flatten", "from_value", "load"})
 
 _SWIZZLE = {"x": 0, "y": 1, "z": 2}
 _MONTAGE_STATE = {"playing": BOOL, "active": BOOL, "position": FLOAT}   # Light1.playing ... ('section' has the montage's own enum)
-_HIT_TYPES = {"bool": BOOL, "vec3": VEC3, "float": FLOAT, "quat": QUAT, "primitive": ASSET_TYPES["primitive"]}
+_HIT_TYPES = {"bool": BOOL, "vec3": VEC3, "float": FLOAT, "quat": QUAT, "primitive": ASSET_TYPES["primitive"], "vec3d": VEC3D, "double": DOUBLE, "quatd": QUATD}
 _ACTION_TYPES = (BOOL, FLOAT, VEC2, VEC3)
 
 
@@ -317,13 +335,15 @@ class Checker:
             return e
         if e.ty is NONE_T and isinstance(target, AssetType) and not target.settings_only:
             return ir.Lit(target, None)
-        if target is FLOAT and e.ty is INT:
-            return self.widen(e)
+        if can_widen(e.ty, target) and target is not INT:
+            return self.widen(e, target)                           # int -> float -> double, and a float type -> its double counterpart
         hint = ""
         if e.ty is NONE_T:
             hint = "; 'none' is the empty value of a sequence or montage"
-        if target is INT and e.ty is FLOAT:
+        if target is INT and e.ty in (FLOAT, DOUBLE):
             hint = "; use to_int(), floor_to_int(), round_to_int() or ceil_to_int()"
+        elif DOUBLE_TO_SINGLE.get(e.ty) is target:
+            hint = f"; a double is never narrowed by itself: write {target.name}(x) to round it to float32"
         self.err("DAL4002", f"cannot use a value of type {e.ty} as {what} of type {target}{hint}", pos)
         return e
 
@@ -1185,8 +1205,10 @@ class Checker:
                 self.err("DAL4020", f"host.{item.name}({b.arg}) has type {info.enum.name}, but input '{d.name}' is declared {ty}", d.type_pos)
                 return None
         elif item.ty is not None:
-            if ty is not item.ty:
-                self.err("DAL4020", f"host.{item.name} has type {item.ty}, but input '{d.name}' is declared {ty}", d.type_pos)
+            if ty is not item.ty and ty is not other_precision(item.ty):
+                twin = other_precision(item.ty)
+                also = f" (or {twin}: the same value at the other precision)" if twin is not None else ""
+                self.err("DAL4020", f"host.{item.name} has type {item.ty}{also}, but input '{d.name}' is declared {ty}", d.type_pos)
                 return None
         elif ty not in item.allowed:
             allowed = ", ".join(t.name for t in item.allowed)
@@ -1550,13 +1572,14 @@ class Checker:
                     self.ex(s.value, sc)
                     return None
                 break
-            if cur_ty is TRANSFORM:
+            if cur_ty is TRANSFORM or cur_ty is TRANSFORMD:
                 rest = s.path[i:]
-                if member not in TRANSFORM_MEMBERS:
-                    self.err("DAL4030", f"transform has no member '{member}' (members: {', '.join(TRANSFORM_MEMBERS)})", pos)
+                members = transform_members(cur_ty)
+                if member not in members:
+                    self.err("DAL4030", f"{cur_ty} has no member '{member}' (members: {', '.join(members)})", pos)
                 elif len(rest) == 1:
                     component = (i, (member,))
-                elif len(rest) == 2 and _HIT_TYPES[TRANSFORM_MEMBERS[member]] in COMPONENTS and rest[1] in COMPONENTS[_HIT_TYPES[TRANSFORM_MEMBERS[member]]][0]:
+                elif len(rest) == 2 and _HIT_TYPES[members[member]] in COMPONENTS and rest[1] in COMPONENTS[_HIT_TYPES[members[member]]][0]:
                     component = (i, tuple(rest))
                 else:
                     self.err("DAL4030", f"cannot assign to .{'.'.join(rest)}: assign a whole member of the transform, or one component of its location / rotation / scale",
@@ -1608,7 +1631,7 @@ class Checker:
         leaf: ir.Expr = target                          # the part being replaced, as it reads now
         leaf_ty = walk_ty
         for part in rest:
-            leaf_ty = FLOAT if leaf_ty in COMPONENTS else _HIT_TYPES[TRANSFORM_MEMBERS[part]]
+            leaf_ty = scalar_of(leaf_ty) if leaf_ty in COMPONENTS else _HIT_TYPES[transform_members(leaf_ty)[part]]
             leaf = ir.Member(leaf_ty, leaf, part)
         if s.op == "=":
             self.mark_value_call(s.value)
@@ -1624,14 +1647,15 @@ class Checker:
 
     def rebuild(self, expr: ir.Expr, ty: Type, rest: tuple[str, ...], new: ir.Expr) -> ir.Expr:
         """`expr` (a vector or a transform) with the part named by `rest` replaced by `new`."""
-        if ty is TRANSFORM:
+        if ty is TRANSFORM or ty is TRANSFORMD:
+            members = transform_members(ty)
             member = rest[0]
-            member_ty = _HIT_TYPES[TRANSFORM_MEMBERS[member]]
+            member_ty = _HIT_TYPES[members[member]]
             inner = new if len(rest) == 1 else self.rebuild(ir.Member(member_ty, expr, member), member_ty, rest[1:], new)
-            args = [inner if n == member else ir.Member(_HIT_TYPES[t], expr, n) for n, t in TRANSFORM_MEMBERS.items()]
-            return ir.Make(TRANSFORM, "transform", args, 1)
+            args = [inner if n == member else ir.Member(_HIT_TYPES[t], expr, n) for n, t in members.items()]
+            return ir.Make(ty, "transform", args, 1)
         names, ctor = COMPONENTS[ty]
-        args = [new if c == rest[0] else ir.Member(FLOAT, expr, c) for c in names]
+        args = [new if c == rest[0] else ir.Member(scalar_of(ty), expr, c) for c in names]
         return ir.Make(ty, ctor, args, 0)
 
     def return_stmt(self, s: S.ReturnStmt, sc: Scope) -> ir.Stmt:
@@ -1655,6 +1679,8 @@ class Checker:
             return ir.Lit(INT, e.value)
         if isinstance(e, S.FloatLit):
             return ir.Lit(FLOAT, e.value)
+        if isinstance(e, S.DoubleLit):
+            return ir.Lit(DOUBLE, e.value)
         if isinstance(e, S.BoolLit):
             return ir.Lit(BOOL, e.value)
         if isinstance(e, S.NameRef):
@@ -1825,13 +1851,13 @@ class Checker:
             if f in members:
                 return ir.Member(_HIT_TYPES[members[f]], b, f)
             return self.bad("DAL4030", f"{b.ty} has no member '{f}' (members: {', '.join(members)})", e.field_pos)
-        if b.ty in (VEC2, VEC3):
-            dim = 2 if b.ty is VEC2 else 3
+        if b.ty in (VEC2, VEC3, VEC2D, VEC3D):
+            dim = 2 if b.ty in (VEC2, VEC2D) else 3
             if not f or any(c not in "xyz" for c in f) or len(f) > 3:
                 return self.bad("DAL4030", f"{b.ty} has no member '{f}' (components: x, y{', z' if dim == 3 else ''}; swizzles such as .xy are allowed)", e.field_pos)
             if any(_SWIZZLE[c] >= dim for c in f):
                 return self.bad("DAL4030", f"{b.ty} has no component '{[c for c in f if _SWIZZLE[c] >= dim][0]}'", e.field_pos)
-            ty = {1: FLOAT, 2: VEC2, 3: VEC3}[len(f)]
+            ty = {1: scalar_of(b.ty), 2: VEC2D if b.ty.is_double else VEC2, 3: VEC3D if b.ty.is_double else VEC3}[len(f)]
             return ir.Member(ty, b, f)
         if isinstance(b.ty, StructType):
             fd = b.ty.field(f)
@@ -1839,18 +1865,19 @@ class Checker:
                 return self.bad("DAL4030", f"{b.ty.kind} {b.ty.name} has no member '{f}'" + self.suggest(f, [x.name for x in b.ty.fields])
                                 + f" (members: {', '.join(x.name for x in b.ty.fields) or 'none'})", e.field_pos)
             return ir.Member(fd.ty, b, f)
-        if b.ty is ROTATOR:
+        if b.ty is ROTATOR or b.ty is ROTATORD:
             if f in ("pitch", "yaw", "roll"):
-                return ir.Member(FLOAT, b, f)
-            return self.bad("DAL4030", f"rotator has no member '{f}' (members: pitch, yaw, roll)", e.field_pos)
-        if b.ty is QUAT:
+                return ir.Member(scalar_of(b.ty), b, f)
+            return self.bad("DAL4030", f"{b.ty} has no member '{f}' (members: pitch, yaw, roll)", e.field_pos)
+        if b.ty is QUAT or b.ty is QUATD:
             if f in ("x", "y", "z", "w"):
-                return ir.Member(FLOAT, b, f)
-            return self.bad("DAL4030", f"quat has no member '{f}' (members: x, y, z, w)", e.field_pos)
-        if b.ty is TRANSFORM:
-            if f in TRANSFORM_MEMBERS:
-                return ir.Member(_HIT_TYPES[TRANSFORM_MEMBERS[f]], b, f)
-            return self.bad("DAL4030", f"transform has no member '{f}' (members: {', '.join(TRANSFORM_MEMBERS)})", e.field_pos)
+                return ir.Member(scalar_of(b.ty), b, f)
+            return self.bad("DAL4030", f"{b.ty} has no member '{f}' (members: x, y, z, w)", e.field_pos)
+        if b.ty is TRANSFORM or b.ty is TRANSFORMD:
+            members = transform_members(b.ty)
+            if f in members:
+                return ir.Member(_HIT_TYPES[members[f]], b, f)
+            return self.bad("DAL4030", f"{b.ty} has no member '{f}' (members: {', '.join(members)})", e.field_pos)
         return self.bad("DAL4030", f"type {b.ty} has no members", e.field_pos)
 
     # ---- v1 / v2: montages, actions, handlers, commands, queries, loops --------------------------------------------------
@@ -2197,56 +2224,91 @@ class Checker:
             if x.ty is not BOOL:
                 return self.bad("DAL4001", f"operator '!' needs a bool, not {x.ty}", e.pos)
             return ir.Unary(BOOL, "!", x)
-        if x.ty in (INT, FLOAT, VEC2, VEC3):
+        if x.ty in (INT, FLOAT, VEC2, VEC3, DOUBLE, VEC2D, VEC3D):
             return ir.Unary(x.ty, "-", x)
         return self.bad("DAL4001", f"operator '-' cannot be applied to {x.ty}", e.pos)
 
-    def widen(self, x: ir.Expr) -> ir.Expr:
-        if x.ty is not INT:
+    def widen(self, x: ir.Expr, to: Type | None = None) -> ir.Expr:
+        """``x`` converted to ``to`` without loss: int -> float (the default), int / float -> double, a float type -> its double counterpart.  A literal is converted
+        when the program is compiled (a float literal widened to double keeps its float32 value: 0.1 is 0.10000000149011612 as a double, write 0.1d for the double)."""
+        if to is None:
+            to = FLOAT if x.ty is INT else x.ty
+        if x.ty is to or (x.ty is not INT and x.ty not in SINGLE_TO_DOUBLE and x.ty not in DOUBLE_TO_SINGLE):
             return x
+        if x.ty is INT:
+            if isinstance(x, ir.Lit):
+                return ir.Lit(to, float(x.value))
+            return ir.ToFloat(FLOAT, x) if to is FLOAT else ir.Convert(to, x)
+        return self.convert(x, to)
+
+    def convert(self, x: ir.Expr, to: Type) -> ir.Expr:
+        """A change of precision (float type <-> its double counterpart, int -> float / double); narrowing rounds to float32.  Literals are converted at compile time."""
+        if x.ty is to:
+            return x
+        if x.ty is INT:
+            return self.widen(x, to)
         if isinstance(x, ir.Lit):
-            return ir.Lit(FLOAT, float(x.value))
-        return ir.ToFloat(FLOAT, x)
+            return ir.Lit(to, rt.round32_any(x.value))
+        return ir.Convert(to, x)
+
+    def unify(self, a: ir.Expr, b: ir.Expr) -> tuple[ir.Expr, ir.Expr]:
+        """Operands of different precision meet at double: the one that is not a double type is converted (exactly)."""
+        da, db = a.ty.is_double, b.ty.is_double
+        if da == db:
+            return a, b
+        other = b if da else a
+        if other.ty is INT:
+            conv = self.widen(other, DOUBLE)
+        elif other.ty in SINGLE_TO_DOUBLE:
+            conv = self.convert(other, SINGLE_TO_DOUBLE[other.ty])
+        else:
+            return a, b
+        return (a, conv) if da else (conv, b)
 
     def binary(self, op: str, a: ir.Expr, b: ir.Expr, pos: Pos, op_pos: Pos) -> ir.Expr:
         ta, tb = a.ty, b.ty
         if ta is ERROR or tb is ERROR:
             return ir.Lit(ERROR, 0)
+        shown = (ta, tb)                                       # the types as written, for the messages
+        if op not in ("&&", "||"):
+            a, b = self.unify(a, b)                            # a double operand makes the other one a double
+            ta, tb = a.ty, b.ty
         num = ta.is_numeric and tb.is_numeric
         both_int = ta is INT and tb is INT
+        nt = DOUBLE if (ta is DOUBLE or tb is DOUBLE) else FLOAT       # the type of a numeric result that is not an int
 
         def fail() -> ir.Expr:
-            return self.bad("DAL4001", f"operator '{op}' cannot be applied to {ta} and {tb}", op_pos)
+            return self.bad("DAL4001", f"operator '{op}' cannot be applied to {shown[0]} and {shown[1]}", op_pos)
 
         if op in ("+", "-"):
             if num:
-                return ir.Binary(INT, op, a, b) if both_int else ir.Binary(FLOAT, op, self.widen(a), self.widen(b))
+                return ir.Binary(INT, op, a, b) if both_int else ir.Binary(nt, op, self.widen(a, nt), self.widen(b, nt))
             if ta is tb and ta.is_vector:
                 return ir.Binary(ta, op, a, b)
-            if ta is ROTATOR and tb is ROTATOR:
-                return ir.Binary(ROTATOR, op, a, b)                      # component-wise, as FRotator's operators (no normalisation)
+            if ta is tb and (ta is ROTATOR or ta is ROTATORD):
+                return ir.Binary(ta, op, a, b)                           # component-wise, as FRotator's operators (no normalisation)
             return fail()
         if op == "*":
             if num:
-                return ir.Binary(INT, op, a, b) if both_int else ir.Binary(FLOAT, op, self.widen(a), self.widen(b))
-            if ta is ROTATOR and tb.is_numeric:
-                return ir.Binary(ROTATOR, op, a, self.widen(b))
-            if ta.is_numeric and tb is ROTATOR:
-                return ir.Binary(ROTATOR, op, b, self.widen(a))          # scalar * rotator is the rotator scaled (FRotator has the one operator*)
+                return ir.Binary(INT, op, a, b) if both_int else ir.Binary(nt, op, self.widen(a, nt), self.widen(b, nt))
+            if (ta is ROTATOR or ta is ROTATORD) and tb.is_numeric:
+                return ir.Binary(ta, op, a, self.widen(b, scalar_of(ta)))
+            if ta.is_numeric and (tb is ROTATOR or tb is ROTATORD):
+                return ir.Binary(tb, op, b, self.widen(a, scalar_of(tb)))          # scalar * rotator is the rotator scaled (FRotator has the one operator*)
             if ta is tb and ta.is_vector:
                 return ir.Binary(ta, op, a, b)
             if ta.is_vector and tb.is_numeric:
-                return ir.Binary(ta, op, a, self.widen(b))
+                return ir.Binary(ta, op, a, self.widen(b, scalar_of(ta)))
             if ta.is_numeric and tb.is_vector:
-                return ir.Binary(tb, op, self.widen(a), b)
-            if ta is QUAT and tb is QUAT:
-                return ir.Binary(QUAT, op, a, b)
+                return ir.Binary(tb, op, self.widen(a, scalar_of(tb)), b)
+            if ta is tb and (ta is QUAT or ta is QUATD):
+                return ir.Binary(ta, op, a, b)
             return fail()
         if op == "/":
             if num:
-                return ir.Binary(INT, op, a, b) if both_int else ir.Binary(FLOAT, op, self.widen(a), self.widen(b))
+                return ir.Binary(INT, op, a, b) if both_int else ir.Binary(nt, op, self.widen(a, nt), self.widen(b, nt))
             if ta.is_vector and tb.is_numeric:
-                return ir.Binary(ta, op, a, self.widen(b))
+                return ir.Binary(ta, op, a, self.widen(b, scalar_of(ta)))
             return fail()
         if op == "%":
             if both_int:
@@ -2254,11 +2316,11 @@ class Checker:
             return self.bad("DAL4001", f"operator '%' needs two ints, not {ta} and {tb}; use fmod() for floats", op_pos)
         if op in ("<", "<=", ">", ">="):
             if num:
-                return ir.Binary(BOOL, op, a, b) if both_int else ir.Binary(BOOL, op, self.widen(a), self.widen(b))
+                return ir.Binary(BOOL, op, a, b) if both_int else ir.Binary(BOOL, op, self.widen(a, nt), self.widen(b, nt))
             return fail()
         if op in ("==", "!="):
             if num:
-                return ir.Binary(BOOL, op, a, b) if both_int else ir.Binary(BOOL, op, self.widen(a), self.widen(b))
+                return ir.Binary(BOOL, op, a, b) if both_int else ir.Binary(BOOL, op, self.widen(a, nt), self.widen(b, nt))
             if ta is BOOL and tb is BOOL:
                 return ir.Binary(BOOL, op, a, b)
             if ta.is_enum and ta is tb:
@@ -2271,10 +2333,10 @@ class Checker:
                 return ir.Binary(BOOL, op, ir.Lit(tb, None), b)
             if ta is tb and ta is SNAPSHOT:
                 return self.bad("DAL4001", f"snapshot values cannot be compared with '{op}'; ask valid(snapshot)", op_pos)
-            if ta is tb and ta in (VEC2, VEC3, ROTATOR, QUAT):
+            if ta is tb and ta in (VEC2, VEC3, ROTATOR, QUAT, VEC2D, VEC3D, ROTATORD, QUATD):
                 return self.bad("DAL4001", f"{ta} values cannot be compared with '{op}'; compare lengths or components, e.g. is_nearly_zero(length(a - b))", op_pos)
-            if ta is tb and ta is TRANSFORM:
-                return self.bad("DAL4001", f"transform values cannot be compared with '{op}'; compare .location, .rotation or .scale", op_pos)
+            if ta is tb and (ta is TRANSFORM or ta is TRANSFORMD):
+                return self.bad("DAL4001", f"{ta} values cannot be compared with '{op}'; compare .location, .rotation or .scale", op_pos)
             if ta is tb and isinstance(ta, StructType):
                 return self.bad("DAL4001", f"{ta.kind} values cannot be compared with '{op}'; compare the members you care about", op_pos)
             return fail()
@@ -2296,6 +2358,9 @@ class Checker:
             self.err("DAL4003", f"the condition of '?:' must be bool, not {c.ty}", e.cond.pos)
         if a.ty is ERROR or b.ty is ERROR:
             return ir.Lit(ERROR, 0)
+        shown = (a.ty, b.ty)
+        if a.ty is not b.ty:
+            a, b = self.unify(a, b)                            # (a double branch makes the other one a double)
         if a.ty is b.ty:
             return ir.Cond(a.ty, c, a, b)
         if a.ty.is_numeric and b.ty.is_numeric:
@@ -2304,7 +2369,7 @@ class Checker:
             return ir.Cond(b.ty, c, ir.Lit(b.ty, None), b)
         if b.ty is NONE_T and isinstance(a.ty, AssetType) and not a.ty.settings_only:
             return ir.Cond(a.ty, c, a, ir.Lit(a.ty, None))
-        return self.bad("DAL4004", f"the two branches of '?:' have different types ({a.ty} and {b.ty})", e.pos)
+        return self.bad("DAL4004", f"the two branches of '?:' have different types ({shown[0]} and {shown[1]})", e.pos)
 
     # ---- calls -----------------------------------------------------------------------------------------------------------------------
     def call(self, e: S.CallExpr, sc: Scope) -> ir.Expr:
@@ -2323,19 +2388,24 @@ class Checker:
             return ir.Lit(ERROR, 0)
         if name in CONSTRUCTORS:
             sigs = CONSTRUCTORS[name]
-            r = resolve_overload(sigs, [a.ty for a in args])
+            given = [a.ty for a in args]
+            r = resolve_overload(sigs, given)
             if r is None:
                 return self.bad("DAL4040", self.no_overload(name, sigs, args), e.pos)
             idx, widen = r
-            args = [self.widen(a) if w else a for a, w in zip(args, widen)]
-            return ir.Make(sigs[idx].ret, name, args, idx)
+            sig = sigs[idx]
+            if name in CONVERTING and (CONVERTING[name] is None or CONVERTING[name] == idx):
+                # float(x), double(x), vec3(v), vec3d(v) ... : the value of the other precision (an int for the scalars); the type it already has is left alone
+                return args[0] if given[0] is sig.ret else self.convert(args[0], sig.ret)
+            args = [self.widen(a, w) if w is not None else a for a, w in zip(args, widen)]
+            return ir.Make(sig.ret, CONSTRUCTOR_FAMILY.get(name, name), args, idx)
         if name in BUILTINS:
             b = BUILTINS[name]
             r = resolve_overload(b.sigs, [a.ty for a in args])
             if r is None:
-                return self.bad("DAL4040", self.no_overload(name, b.sigs, args), e.pos)
+                return self.bad("DAL4040", self.no_overload(name, b.sigs if any(a.ty.is_double for a in args) else b.single_sigs, args), e.pos)
             idx, widen = r
-            args = [self.widen(a) if w else a for a, w in zip(args, widen)]
+            args = [self.widen(a, w) if w is not None else a for a, w in zip(args, widen)]
             return ir.CallBuiltin(b.sigs[idx].ret, name, idx, args)
         sym = self.globals.get(name)
         if sym is not None and sym.kind == "struct":

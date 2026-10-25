@@ -1,4 +1,4 @@
-"""The DAL type system: float, int, bool, vec2, vec3, rotator, quat and enums."""
+"""The DAL type system: float, int, bool, vec2, vec3, rotator, quat, their double-precision counterparts and enums."""
 
 from __future__ import annotations
 
@@ -26,11 +26,16 @@ class Type:
 
     @property
     def is_numeric(self) -> bool:
-        return self is INT or self is FLOAT
+        return self is INT or self is FLOAT or self is DOUBLE
 
     @property
     def is_vector(self) -> bool:
-        return self is VEC2 or self is VEC3
+        return self is VEC2 or self is VEC3 or self is VEC2D or self is VEC3D
+
+    @property
+    def is_double(self) -> bool:
+        """A double-precision type (double, vec2d, vec3d, rotatord, quatd, transformd)."""
+        return self in DOUBLE_TO_SINGLE
 
     # v3 families (overridden by the subclasses below)
     is_struct = False       # a struct or settings value (named members)
@@ -47,6 +52,40 @@ VEC3 = Type("vec3")
 ROTATOR = Type("rotator")
 QUAT = Type("quat")
 
+# v5: the double-precision counterparts of the float types (C++: double, FVector2D, FVector, FRotator, FQuat, FTransform -- the engine's own types; the float
+# types are float, FVector2f, FVector3f, FRotator3f, FQuat4f, FTransform3f).  A float type converts to its counterpart implicitly (it is exact), the other way
+# round needs float(x), vec3(x) ... (it rounds).  In Python a double and a float are the same kind of value (a Python float); only the type checker and the
+# float32 mode tell them apart.
+DOUBLE = Type("double")
+VEC2D = Type("vec2d")
+VEC3D = Type("vec3d")
+ROTATORD = Type("rotatord")
+QUATD = Type("quatd")
+TRANSFORMD = Type("transformd")
+
+SINGLE_TO_DOUBLE: dict = {FLOAT: DOUBLE, VEC2: VEC2D, VEC3: VEC3D, ROTATOR: ROTATORD, QUAT: QUATD}
+DOUBLE_TO_SINGLE: dict = {}                    # filled below, after TRANSFORM is known
+
+
+def double_of(ty: "Type") -> "Type":
+    """The double-precision counterpart of a float type (any other type is returned as it is)."""
+    return SINGLE_TO_DOUBLE.get(ty, ty)
+
+
+def single_of(ty: "Type") -> "Type":
+    """The float counterpart of a double type (any other type is returned as it is)."""
+    return DOUBLE_TO_SINGLE.get(ty, ty)
+
+
+def other_precision(ty: "Type") -> "Type | None":
+    """The same type at the other precision (float <-> double ...), None for a type that has no counterpart."""
+    return SINGLE_TO_DOUBLE.get(ty) or DOUBLE_TO_SINGLE.get(ty)
+
+
+def scalar_of(ty: "Type") -> "Type":
+    """The type of one component of a float or double type (the scalar of its precision)."""
+    return DOUBLE if ty in DOUBLE_TO_SINGLE else FLOAT
+
 
 class _ErrorType(Type):
     """Poison type used after an error so one mistake does not cascade."""
@@ -61,11 +100,22 @@ ERROR = _ErrorType()
 # it cannot be stored (state / input / param / const) because Unreal cannot reflect it.
 HIT = Type("hit")
 HIT_MEMBERS = {"blocking": "bool", "point": "vec3", "normal": "vec3", "distance": "float", "time": "float",
-               "location": "vec3", "start_penetrating": "bool", "primitive": "primitive", "face_normal": "vec3"}
+               "location": "vec3", "start_penetrating": "bool", "primitive": "primitive", "face_normal": "vec3",
+               # v5: the same two positions at the precision of the engine (FHitResult is double): point_d / location_d are vec3d
+               "point_d": "vec3d", "location_d": "vec3d"}
 
 # v3: a QST transform (UE FTransform3f): location (vec3), rotation (quat), scale (vec3); a value type that can be stored
 TRANSFORM = Type("transform")
 TRANSFORM_MEMBERS = {"location": "vec3", "rotation": "quat", "scale": "vec3"}
+TRANSFORM_MEMBERS_D = {"location": "vec3d", "rotation": "quatd", "scale": "vec3d"}      # the members of a transformd
+
+SINGLE_TO_DOUBLE[TRANSFORM] = TRANSFORMD
+DOUBLE_TO_SINGLE.update({d: s for s, d in SINGLE_TO_DOUBLE.items()})
+
+
+def transform_members(ty: "Type") -> dict:
+    """The members of a transform or transformd, with the type names of their values."""
+    return TRANSFORM_MEMBERS_D if ty is TRANSFORMD else TRANSFORM_MEMBERS
 
 # v3: the result of critical_spring_damper: the new value and velocity.  Like `hit`, a value type for locals, function
 # parameters and results; it is not stored (copy .value and .velocity into states).
@@ -80,7 +130,8 @@ VOID = Type("void")
 MONTAGE = Type("montage")
 
 BASIC_TYPES: dict[str, Type] = {
-    t.name: t for t in (FLOAT, INT, BOOL, VEC2, VEC3, ROTATOR, QUAT, HIT, SPRING, SPRING3, TRANSFORM)
+    t.name: t for t in (FLOAT, INT, BOOL, VEC2, VEC3, ROTATOR, QUAT, HIT, SPRING, SPRING3, TRANSFORM,
+                        DOUBLE, VEC2D, VEC3D, ROTATORD, QUATD, TRANSFORMD)
 }
 
 
@@ -290,6 +341,7 @@ def zero_value(ty: Type):
     """Default value of a type as a Python runtime value (imported lazily to avoid cycles)."""
     from . import runtime as rt
 
+    ty = DOUBLE_TO_SINGLE.get(ty, ty)          # a double has the value of its float counterpart
     if ty is FLOAT:
         return 0.0
     if ty is INT:

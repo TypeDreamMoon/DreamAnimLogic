@@ -54,7 +54,7 @@ def cmd_compile(args) -> int:
         return 2
     if args.py:
         path = os.path.join(args.py, f"{module.name}.py")
-        changed = _write_if_changed(path, generate_python(module))
+        changed = _write_if_changed(path, generate_python(module, args.float32))
         print(f"{'wrote' if changed else 'up to date'} {path}")
     if args.cpp:
         opts = CppOptions(args.module, args.parent_class, args.parent_include, property_bag=args.bag, double_members=args.double_members,
@@ -97,7 +97,7 @@ def cmd_verify(args) -> int:
         from .settings import PackResolver
 
         params["resolver"] = PackResolver(args.pack)
-    diffs = verify(module, args.frames, args.seed, args.tol, **params)
+    diffs = verify(module, args.frames, args.seed, args.tol, float32=args.float32, **params)
     if not diffs:
         print(f"{module.name}: interpreter and generated Python agree over {args.frames} frames (seed {args.seed})")
         return 0
@@ -133,6 +133,9 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--cpp", metavar="DIR", help="write <Logic>.h/.cpp and DalMath.h here")
     c.add_argument("--module", default="", metavar="MYGAME_API", help="module API macro for the generated UCLASS")
     c.add_argument("--standins", metavar="FILE", help="Python stand-ins for extern fns (default: <file>_standins.py)")
+    c.add_argument("--float32", action=argparse.BooleanOptionalAction, default=None,
+                   help="Python output: float32 mode, every float is a float32 and each operation rounds as C++ float arithmetic does (the double types are never rounded); "
+                        "default: off, or on when the environment variable DAL_FLOAT32 is 1")
     c.add_argument("--parent-class", default="", help="C++ base class of the generated class (default: UAnimInstance, or UActorComponent for actor logic)")
     c.add_argument("--parent-include", default="", help="header that declares the base class")
     c.add_argument("--bag", action="store_true",
@@ -161,6 +164,7 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--frames", type=int, default=300)
     v.add_argument("--seed", type=int, default=1)
     v.add_argument("--tol", type=float, default=0.0, help="relative tolerance (0 = exact)")
+    v.add_argument("--float32", action=argparse.BooleanOptionalAction, default=None, help="run both in the float32 mode (see compile --float32)")
     v.add_argument("--param", action="append", metavar="NAME=FILE", help="data file (JSON) for a settings param; repeatable")
     v.add_argument("--pack", metavar="DIR", help="asset pack folder: settings find their curves in DIR/curves")
     v.set_defaults(func=cmd_verify)

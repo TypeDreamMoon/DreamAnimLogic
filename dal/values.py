@@ -13,10 +13,14 @@ from .types import (
     AssetType,
     MapType,
     BOOL,
+    DOUBLE_TO_SINGLE,
     FLOAT,
+    HIT,
     INT,
     QUAT,
     ROTATOR,
+    SPRING,
+    SPRING3,
     TRANSFORM,
     VEC2,
     VEC3,
@@ -91,8 +95,44 @@ def new_struct(ty: StructType, members: dict):
     return struct_class(ty)(**members)
 
 
+# float32 mode: how a value of a float type is rounded (the double types are never rounded)
+ROUND32 = {FLOAT: rt.f32, VEC2: rt.f32_vec2, VEC3: rt.f32_vec3, ROTATOR: rt.f32_rotator, QUAT: rt.f32_quat, TRANSFORM: rt.f32_transform,
+           SPRING: rt.f32_spring, SPRING3: rt.f32_spring3, HIT: rt.f32_hit}
+
+
+def round32(ty: Type, v):
+    """``v`` (a value of type ``ty``) with every float in it rounded to float32: scalars and vectors as they are, a struct member by member (its derived members
+    recomputed), the tables and lists of a settings value element by element.  The double types are left alone."""
+    fn = ROUND32.get(ty)
+    if fn is not None:
+        return fn(v)
+    if isinstance(ty, StructType) and isinstance(v, rt.Struct):
+        changed = False
+        for f in ty.fields:
+            if f.derived:
+                continue
+            cur = getattr(v, f.name)
+            new = round32(f.ty, cur)
+            if new is not cur and new != cur:
+                setattr(v, f.name, new)
+                changed = True
+        if changed and hasattr(v, "_derive"):
+            v._derive()
+        if any(f.derived for f in ty.fields):
+            for f in ty.fields:
+                if f.derived:
+                    setattr(v, f.name, round32(f.ty, getattr(v, f.name)))
+        return v
+    if isinstance(ty, MapType) and isinstance(v, dict):
+        return {k: round32(ty.value, x) for k, x in v.items()}
+    if isinstance(ty, ArrayType) and isinstance(v, tuple):
+        return tuple(round32(ty.elem, x) for x in v)
+    return v
+
+
 def coerce(ty: Type, v):
     """Convert a host-supplied or user-supplied value to the runtime representation of ``ty``."""
+    ty = DOUBLE_TO_SINGLE.get(ty, ty)              # a double is a Python float / the same vector class as its float counterpart
     if ty is FLOAT:
         return float(v)
     if ty is INT:

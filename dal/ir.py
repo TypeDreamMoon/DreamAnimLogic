@@ -2,8 +2,9 @@
 
 The checker lowers the syntax tree to this IR; both backends and the reference
 interpreter consume only the IR.  Every ``Expr`` carries its resolved type
-``ty``; implicit int -> float conversions are explicit ``ToFloat`` nodes and
-compound assignments are already expanded (``x += e`` is ``x = x + e``).
+``ty``; implicit int -> float conversions are explicit ``ToFloat`` nodes, a conversion between
+precisions (float -> double, vec3 -> vec3d, int -> double ... and the narrowing float(x), vec3(x) ...)
+is a ``Convert`` node, and compound assignments are already expanded (``x += e`` is ``x = x + e``).
 """
 
 from __future__ import annotations
@@ -83,6 +84,13 @@ class Cond(Expr):
 
 @dataclass
 class ToFloat(Expr):
+    x: Expr
+
+
+@dataclass
+class Convert(Expr):
+    """A change of precision: ``ty`` is the type produced.  Widening (float -> double, vec3 -> vec3d ..., int -> double) is exact; narrowing
+    (double -> float, vec3d -> vec3 ...) rounds every component to float32."""
     x: Expr
 
 
@@ -597,7 +605,7 @@ class Module:
 # ---- traversal ---------------------------------------------------------------------------------
 
 def children(e: Expr) -> list[Expr]:
-    if isinstance(e, (Unary, ToFloat, Member, Valid)):
+    if isinstance(e, (Unary, ToFloat, Convert, Member, Valid)):
         return [e.x]
     if isinstance(e, CurveEval):
         return [e.curve, e.x]
@@ -689,6 +697,8 @@ def dump_expr(e: Expr) -> str:
         return f"({dump_expr(e.c)} ? {dump_expr(e.a)} : {dump_expr(e.b)})"
     if isinstance(e, ToFloat):
         return f"float({dump_expr(e.x)})"
+    if isinstance(e, Convert):
+        return f"{e.ty.name}({dump_expr(e.x)})"
     if isinstance(e, Member):
         return f"{dump_expr(e.x)}.{e.comps}"
     if isinstance(e, Make):

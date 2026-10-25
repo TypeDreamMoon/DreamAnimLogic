@@ -16,7 +16,8 @@ from . import runtime as rt
 from . import values as vals
 from .builtins import BUILTINS, CONSTRUCTORS
 from .hostapi import COMMANDS, HOOK_EVENTS, HOST_ITEMS, HostV1
-from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, SPRING_MEMBERS, TRANSFORM, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, VOID, SPRING, ArrayType, AssetType, EnumType, MapType, StructType, TagType, Type, zero_value
+from .types import (BOOL, DOUBLE, DOUBLE_TO_SINGLE, FLOAT, HIT, HIT_MEMBERS, SPRING_MEMBERS, TRANSFORM, TRANSFORMD, INT, MOVEMENT_MODE, QUAT, QUATD, ROTATOR, VEC2, VEC3, VOID, SPRING,
+                    ArrayType, AssetType, EnumType, MapType, StructType, TagType, Type, zero_value)
 
 
 class InterpError(Exception):
@@ -32,6 +33,7 @@ _COMPS = {"x": 0, "y": 1, "z": 2, "w": 3, "pitch": 0, "yaw": 1, "roll": 2}
 
 def coerce(ty: Type, v):
     """Coerce a host- or user-supplied value to the runtime representation of ``ty``."""
+    ty = DOUBLE_TO_SINGLE.get(ty, ty)              # a double is a Python float / the same vector class as its float counterpart
     if ty is FLOAT:
         return float(v)
     if ty is INT:
@@ -72,6 +74,9 @@ def command_arg(expr: ir.Expr, value):
 class Evaluator:
     """Expression/statement evaluator.  ``env`` maps local names; ``owner`` supplies inputs/states/params."""
 
+    f32 = False                       # float32 mode (Evaluator32)
+    folding = False                   # evaluating a constant at compile time: a float widened to a double is its float32 value there (the program is not running, nothing rounded it yet)
+
     def __init__(self, owner=None, externs: dict[str, Callable] | None = None, funcs: dict[str, ir.FnDef] | None = None,
                  methods: dict[str, ir.MethodDef] | None = None):
         self.owner = owner
@@ -96,6 +101,11 @@ class Evaluator:
             return self.owner.values[e.name]
         if k is ir.ToFloat:
             return float(self.ev(e.x, env))
+        if k is ir.Convert:
+            x = self.ev(e.x, env)
+            if e.x.ty is INT:
+                return float(x)
+            return x if e.ty.is_double and not self.folding else rt.round32_any(x)     # widening keeps the value (in the float32 mode it is a float32 already); narrowing rounds to float32
         if k is ir.Unary:
             x = self.ev(e.x, env)
             if e.op == "!":
@@ -193,15 +203,17 @@ class Evaluator:
         if op == "*":
             if ta is INT and tb is INT:
                 return rt.i32(a * b)
-            if ta is QUAT:
+            if ta is QUAT or ta is QUATD:
                 return rt.quat_mul(a, b)
             return a * b
         if op == "/":
             if ta is INT and tb is INT:
                 return rt.idiv(a, b)
-            if ta is FLOAT and tb is FLOAT:
+            if (ta is FLOAT or ta is DOUBLE) and (tb is FLOAT or tb is DOUBLE):
                 return rt.fdiv(a, b)
-            return a / b  # vector / scalar (zero-safe in Vec*)
+            if e.ty.is_double:
+                return rt.vdiv_recip(a, b)                      # vector / scalar as the engine does it: times the reciprocal
+            return rt.vdiv_recip32(a, b) if self.f32 else a / b  # (zero-safe in Vec*)
         if op == "%":
             return rt.imod(a, b)
         raise InterpError(f"unknown operator {op}")
@@ -211,7 +223,7 @@ class Evaluator:
         if isinstance(e.x.ty, StructType):
             return getattr(v, e.comps)
         comps = e.comps
-        if comps in HIT_MEMBERS or e.x.ty in SPRING_MEMBERS or e.x.ty is TRANSFORM:
+        if comps in HIT_MEMBERS or e.x.ty in SPRING_MEMBERS or e.x.ty is TRANSFORM or e.x.ty is TRANSFORMD:
             return getattr(v, comps)
         if len(comps) == 1 or comps in ("pitch", "yaw", "roll"):
             return v[_COMPS[comps]]
@@ -295,17 +307,49 @@ class _BreakLoop(Exception):
     """`break;` -- caught by the innermost loop."""
 
 
+# the built-ins whose float result is exactly representable as float32 when the arguments are (selection, rounding to an integer, negation of the sign bit ...):
+# the float32 mode does not round them again
+EXACT_BUILTINS = frozenset({"abs", "sign", "min", "max", "clamp", "saturate", "floor", "ceil", "round", "trunc", "frac", "to_int", "floor_to_int", "ceil_to_int",
+                            "round_to_int", "fmod", "is_nearly_zero", "is_nearly_equal", "quat_inverse"})
+# the node kinds that make a new float value (everything else passes one on): their float results are rounded in float32 mode
+ROUNDED_KINDS = frozenset({ir.Lit, ir.ConstRef, ir.ToFloat, ir.Convert, ir.CurveEval, ir.HostQuery, ir.CallExtern})
+
+
+class Evaluator32(Evaluator):
+    """The evaluator of the float32 mode: a ``float`` is a float32 held in a Python float, and every node that makes a new one rounds it
+    (``dal.runtime.f32``): arithmetic on floats is exactly C++ ``float`` arithmetic.  Library functions are computed in double and rounded once."""
+
+    f32 = True
+
+    def ev(self, e: ir.Expr, env: dict):
+        v = Evaluator.ev(self, e, env)
+        fn = vals.ROUND32.get(e.ty)
+        if fn is None:
+            if isinstance(e.ty, StructType) and type(e) in (ir.MakeStruct, ir.Lit, ir.ConstRef):
+                return vals.round32(e.ty, v)                       # (the members the program does not write have their declared defaults)
+            return v
+        k = type(e)
+        if k is ir.Binary:
+            return fn(v) if e.op in ("+", "-", "*", "/") else v
+        if k is ir.CallBuiltin:
+            return v if e.name in EXACT_BUILTINS else fn(v)
+        return fn(v) if k in ROUNDED_KINDS else v
+
+
 def eval_const(expr: ir.Expr):
     """Evaluate a constant expression (no inputs/state/params/locals/functions)."""
-    return Evaluator().ev(expr, {})
+    ev = Evaluator()
+    ev.folding = True
+    return ev.ev(expr, {})
 
 
 class Interpreter:
     """Runs a checked module.  Mirrors the API of the generated Python class."""
 
     def __init__(self, module: ir.Module, host=None, externs: dict[str, Callable] | None = None, peers: dict | None = None,
-                 resolver=None, **params):
+                 resolver=None, float32: bool | None = None, **params):
         self.module = module
+        self.float32 = rt.want_float32(float32)                                       # every float is a float32 (see Evaluator32)
         self.resolver = resolver                                           # where settings find their curves (dal.settings.AssetResolver)
         self.host = host if host is not None else HostV1()
         self.overrides: dict[str, object] = {}
@@ -330,19 +374,29 @@ class Interpreter:
             if isinstance(p.ty, StructType) and p.ty.is_settings and not isinstance(val, rt.Struct):
                 from . import settings
 
-                self._params[name] = settings.load_ir(p.ty, val, self.resolver)
+                self._params[name] = self._round(p.ty, settings.load_ir(p.ty, val, self.resolver, f32=self.float32))
             else:
-                self._params[name] = coerce(p.ty, val)
-        self.ev = Evaluator(self, externs, {f.name: f for f in module.funcs}, {x.name: x for x in module.methods})
+                self._params[name] = self._c(p.ty, val)
+        if self.float32:
+            self._params = {n: self._round(p.ty, v) for p in module.params for n, v in [(p.name, self._params[p.name])]}
+        self.ev = (Evaluator32 if self.float32 else Evaluator)(self, externs, {f.name: f for f in module.funcs}, {x.name: x for x in module.methods})
         self.reset()
+
+    def _round(self, ty: Type, v):
+        """The value rounded to float32 in float32 mode (as it is otherwise)."""
+        return vals.round32(ty, v) if self.float32 else v
+
+    def _c(self, ty: Type, v):
+        """``coerce`` for this interpreter's mode."""
+        return self._round(ty, coerce(ty, v))
 
     def reset(self) -> None:
         self.values.clear()
         self.values.update(self._params)
         for i in self.module.inputs:
-            self.values[i.name] = vals.copy_value(i.default)
+            self.values[i.name] = self._round(i.ty, vals.copy_value(i.default))
         for s in self.module.states:
-            self.values[s.name] = vals.copy_value(s.default)
+            self.values[s.name] = self._round(s.ty, vals.copy_value(s.default))
         self._dt = 0.0
         self._pending = []
         self._cmds = []
@@ -362,7 +416,7 @@ class Interpreter:
         m = self.module.find_method(method)
         if m is None or not m.pub or m.is_view:
             raise InterpError(f"no pub method {method!r}")
-        return self.ev.call_method(m, [coerce(t, a) for (_n, t), a in zip(m.params, args)])
+        return self.ev.call_method(m, [self._c(t, a) for (_n, t), a in zip(m.params, args)])
 
     def dal_enqueue(self, method: str, args: tuple) -> None:
         """A queued call from an actor logic: it runs at the start of the next update."""
@@ -379,7 +433,7 @@ class Interpreter:
         if self.module.flush_peers and not any(other is p for p in self._called):
             self._called.append(other)
         result = other.dal_call(e.method, *args)
-        return None if e.ty is VOID else coerce(e.ty, result)
+        return None if e.ty is VOID else self._c(e.ty, result)
 
     def _drain_peer_calls(self) -> None:
         queue, self._peer_queue = self._peer_queue, []
@@ -392,7 +446,7 @@ class Interpreter:
 
     def host_query(self, e: ir.HostQuery, args: list):
         fn = getattr(self.host, e.name)
-        return coerce(e.ty, fn(*args))
+        return self._c(e.ty, fn(*args))
 
     def post_event(self, kind: str, name: str, *args) -> None:
         self._pending.append((kind, name) + args)
@@ -466,7 +520,7 @@ class Interpreter:
         d = self.module.find_input(name)
         if d is None or not d.is_free:
             raise InterpError(f"{name!r} is not a free input")
-        self.values[name] = coerce(d.ty, value)
+        self.values[name] = self._c(d.ty, value)
 
     def sample_inputs(self, phase: str | None = None) -> None:
         h = self.host
@@ -475,7 +529,7 @@ class Interpreter:
         for i in self.module.inputs:
             if i.peer is not None:
                 if i.name in self.overrides:
-                    self.values[i.name] = coerce(i.ty, self.overrides[i.name])
+                    self.values[i.name] = self._c(i.ty, self.overrides[i.name])
                     continue
                 other = self.peers.get(i.peer.peer)
                 if other is None:
@@ -485,12 +539,12 @@ class Interpreter:
                 v = other.dal_get(i.peer.path[0])
                 for member in i.peer.path[1:]:
                     v = getattr(v, member)
-                self.values[i.name] = coerce(i.ty, v)
+                self.values[i.name] = self._c(i.ty, v)
                 continue
             if i.host is None:
                 continue
             if i.name in self.overrides:
-                self.values[i.name] = coerce(i.ty, self.overrides[i.name])
+                self.values[i.name] = self._c(i.ty, self.overrides[i.name])
                 continue
             item = i.host.item
             spec = HOST_ITEMS[item]
@@ -511,7 +565,7 @@ class Interpreter:
                 raw = getattr(h, item)(i.host.arg, *(() if i.host.arg2 is None else (i.host.arg2,)))
             else:
                 raw = getattr(h, item)
-            self.values[i.name] = coerce(i.ty, raw)
+            self.values[i.name] = self._c(i.ty, raw)
 
     # ---- events -------------------------------------------------------------------------------------
     def _dispatch(self, events: list[tuple]) -> None:
@@ -520,7 +574,7 @@ class Interpreter:
             if kind in HOOK_EVENTS:                          # the hooks of the character have no name: the payload follows the kind
                 for h in self.module.handlers:
                     if h.event == kind:
-                        env = {n: coerce(t, ev[i + 1] if i + 1 < len(ev) else zero_value(t)) for i, (n, t) in enumerate(h.params)}
+                        env = {n: self._c(t, ev[i + 1] if i + 1 < len(ev) else zero_value(t)) for i, (n, t) in enumerate(h.params)}
                         self._run(h.body, env)
                 continue
             name = ev[1]
@@ -533,9 +587,9 @@ class Interpreter:
                 elif kind == "input":
                     if h.phase != ev[2]:
                         continue
-                    env["value"] = coerce(h.params[0][1], ev[3] if len(ev) > 3 else 0.0)
+                    env["value"] = self._c(h.params[0][1], ev[3] if len(ev) > 3 else 0.0)
                 elif h.params:                                    # a declared notify: the payload (its properties) and the montage instance
-                    env[h.params[0][0]] = coerce(h.params[0][1], ev[2] if len(ev) > 2 else None)
+                    env[h.params[0][0]] = self._c(h.params[0][1], ev[2] if len(ev) > 2 else None)
                     self._source = ev[3] if len(ev) > 3 else None
                 try:
                     self.ev.run_block(h.body, env)
@@ -562,7 +616,7 @@ class Interpreter:
             return
         self._ensure_begun()
         self.sample_inputs(phase)
-        self._dt = float(dt)
+        self._dt = rt.f32(dt) if self.float32 else float(dt)
         events: list[tuple] = []
         if first:
             self._drain_peer_calls()
@@ -653,9 +707,9 @@ class Interpreter:
         env: dict = {}
         for p in e.params:
             if p.name in given and not (given[p.name] is None and p.has_default and isinstance(p.ty, StructType)):
-                env[p.name] = coerce(p.ty, given[p.name])         # (None for a struct stands for its declared default)
+                env[p.name] = self._c(p.ty, given[p.name])        # (None for a struct stands for its declared default)
             elif p.has_default:
-                env[p.name] = vals.copy_value(p.default) if isinstance(p.default, rt.Struct) else p.default
+                env[p.name] = self._round(p.ty, vals.copy_value(p.default) if isinstance(p.default, rt.Struct) else p.default)
             else:
                 raise TypeError(f"entry {e.name} needs the argument {p.name!r}")
         return env

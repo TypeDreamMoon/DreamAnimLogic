@@ -103,7 +103,8 @@ class PackResolver(AssetResolver):
 
 # ---- schema: the types as plain data ---------------------------------------------------------------------------
 #
-# desc ::= "float" | "int" | "bool" | "vec2" | "vec3" | "rotator" | "quat" | "curve" | "curve3" | "sequence" | "montage"
+# desc ::= "float" | "int" | "bool" | "vec2" | "vec3" | "rotator" | "quat" | "transform" | "curve" | "curve3" | "sequence" | "montage"
+#        | "double" | "vec2d" | "vec3d" | "rotatord" | "quatd" | "transformd"
 #        | ("enum", name, [members]) | ("tags", name, prefix, [members]) | ("struct", name) | ("settings", name)
 #        | ("map", key desc, value desc) | ("array", element desc)
 # schema ::= {type name: {"kind": "struct" | "settings", "fields": [(member, desc, derived)]}}
@@ -165,12 +166,18 @@ def _snake(name: str) -> str:
 _ENUM_PREFIX = re.compile(r"^(.*::|EC[CR]_)")
 
 
+# the double types read the same data as their float counterparts; in float32 mode only the float types round what they read
+_DOUBLE_KINDS = {"double": "float", "vec2d": "vec2", "vec3d": "vec3", "rotatord": "rotator", "quatd": "quat", "transformd": "transform"}
+_ROUND_KIND = {"float": rt.f32, "vec2": rt.f32_vec2, "vec3": rt.f32_vec3, "rotator": rt.f32_rotator, "quat": rt.f32_quat, "transform": rt.f32_transform}
+
+
 class _Loader:
-    def __init__(self, schema: dict, classes: dict, resolver: AssetResolver, report: Report):
+    def __init__(self, schema: dict, classes: dict, resolver: AssetResolver, report: Report, f32: bool = False):
         self.schema = schema
         self.classes = classes
         self.resolver = resolver
         self.report = report
+        self.f32 = f32                                       # float32 mode: a float member is rounded to float32 as it is read
 
     # ---- structs ----------------------------------------------------------------------------------------------
     def build(self, name: str, data, path: str):
@@ -275,6 +282,13 @@ class _Loader:
         raise SettingsError(f"{path}: '{v}' is not a member of {name} ({', '.join(members)})")
 
     def decode_simple(self, kind: str, v, path: str):
+        base = _DOUBLE_KINDS.get(kind, kind)
+        out = self.decode_plain(base, v, path)
+        if self.f32 and base is kind and kind in _ROUND_KIND:
+            out = _ROUND_KIND[kind](out)
+        return out
+
+    def decode_plain(self, kind: str, v, path: str):
         if kind == "float":
             if isinstance(v, bool) or not isinstance(v, (int, float)):
                 raise SettingsError(f"{path}: expected a number, got {v!r}")
@@ -369,7 +383,7 @@ def _read_source(source):
     return source
 
 
-def load(schema: dict, classes: dict, type_name: str, source=None, resolver: AssetResolver | None = None, report: Report | None = None):
+def load(schema: dict, classes: dict, type_name: str, source=None, resolver: AssetResolver | None = None, report: Report | None = None, f32: bool = False):
     """An instance of the settings type ``type_name`` from ``source`` (None, a dict, a JSON file path, or an instance already).
 
     ``schema`` and ``classes`` describe the type graph (``schema_of`` for the interpreter, ``DAL_SCHEMA`` / ``DAL_CLASSES`` of a
@@ -378,11 +392,11 @@ def load(schema: dict, classes: dict, type_name: str, source=None, resolver: Ass
     if isinstance(source, rt.Struct) and type(source) is cls:
         return source
     data = _read_source(source)
-    loader = _Loader(schema, classes, resolver or AssetResolver(), report if report is not None else Report())
+    loader = _Loader(schema, classes, resolver or AssetResolver(), report if report is not None else Report(), f32)
     return loader.build(type_name, data, type_name)
 
 
-def load_ir(ty, source=None, resolver: AssetResolver | None = None, report: Report | None = None):
+def load_ir(ty, source=None, resolver: AssetResolver | None = None, report: Report | None = None, f32: bool = False):
     """``load`` for a ``StructType`` of the checked IR (the interpreter's classes)."""
     from . import values
 
@@ -391,4 +405,4 @@ def load_ir(ty, source=None, resolver: AssetResolver | None = None, report: Repo
     classes = {n: values.struct_class(t) for n, t in types.items()}
     if isinstance(source, rt.Struct) and source._TYPE_NAME == ty.name:
         return values.copy_value(source)
-    return load(schema, classes, ty.name, source, resolver, report)
+    return load(schema, classes, ty.name, source, resolver, report, f32)

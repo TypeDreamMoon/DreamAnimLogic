@@ -16,9 +16,9 @@ from _bootstrap import EXAMPLES
 import dal
 from dal import harness, ir
 from builtin_programs import PRELUDE, arg, input_decl, outputs, uses_curve
-from dal.builtins import BUILTINS, CONSTRUCTORS
+from dal.builtins import BUILTINS, CONSTRUCTOR_FAMILY, CONSTRUCTORS, CONVERTING
 from dal.pybackend import generate_python
-from dal.types import BOOL, FLOAT, INT, QUAT, ROTATOR, TRANSFORM, VEC2, VEC3
+from dal.types import BOOL, DOUBLE_TO_SINGLE, FLOAT, INT, QUAT, ROTATOR, TRANSFORM, VEC2, VEC3
 
 FLOAT_POOL = [0.0, -0.0, 1.0, -1.0, 0.5, -0.5, 2.5, 1e-9, -1e-9, 180.0, -180.0, 360.0, 540.0, -540.0, 1e4, 3.14159, 0.25, 100.0]
 
@@ -45,6 +45,7 @@ def rand_quat(rng):
 
 
 def rand_for(rng, ty):
+    ty = DOUBLE_TO_SINGLE.get(ty, ty)                  # the data of a double type is made like the data of its float counterpart
     if ty is FLOAT:
         return rand_float(rng)
     if ty is INT:
@@ -137,6 +138,8 @@ class BuiltinConsistency(unittest.TestCase):
                 frames = free_frames(module, 120, hash((name, idx)) & 0xFFFF)
                 diffs = harness.compare(harness.run_interpreter(module, frames), harness.run_python(module, frames))
                 self.assertEqual(diffs, [], f"{name}{tuple(p.name for p in sig.params)}: {diffs[:2]}")
+                diffs = harness.compare(harness.run_interpreter(module, frames, float32=True), harness.run_python(module, frames, float32=True))
+                self.assertEqual(diffs, [], f"{name}{tuple(p.name for p in sig.params)} in the float32 mode: {diffs[:2]}")
                 count += 1
         self.assertGreaterEqual(count, 80)
 
@@ -148,10 +151,15 @@ class BuiltinConsistency(unittest.TestCase):
                 src = f"logic T;\n{params}state R: {sig.ret.name};\nupdate(dt) {{ R = {name}({args}); }}\n"
                 module = compile_src(src)
                 make = module.update.body[0].value
-                self.assertIsInstance(make, ir.Make)
-                self.assertEqual((make.ctor, make.sig_index), (name, idx))
+                if CONVERTING.get(name, -1) is None or CONVERTING.get(name, -1) == idx:
+                    self.assertIsInstance(make, (ir.Convert, ir.ToFloat), name)           # float(x), vec3(vd) ...: a change of precision
+                    self.assertIs(make.ty, sig.ret)
+                else:
+                    self.assertIsInstance(make, ir.Make)
+                    self.assertEqual((make.ctor, make.sig_index, make.ty), (CONSTRUCTOR_FAMILY.get(name, name), idx, sig.ret))
                 frames = free_frames(module, 40, 9)
                 self.assertEqual(harness.compare(harness.run_interpreter(module, frames), harness.run_python(module, frames)), [])
+                self.assertEqual(harness.compare(harness.run_interpreter(module, frames, float32=True), harness.run_python(module, frames, float32=True)), [])
 
     def test_builtin_constants(self):
         names = ["PI", "TWO_PI", "HALF_PI", "LN2", "SMALL_NUMBER", "KINDA_SMALL_NUMBER"]

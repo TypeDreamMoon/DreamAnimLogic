@@ -38,7 +38,7 @@ INT_MAX = 2**31 - 1
 
 @dataclass(frozen=True)
 class Token:
-    kind: str  # IDENT KEYWORD INT FLOAT STRING OP EOF
+    kind: str  # IDENT KEYWORD INT FLOAT DOUBLE STRING OP EOF
     text: str
     pos: Pos
     value: object = None
@@ -163,11 +163,17 @@ def tokenize(source: SourceFile) -> list[Token]:
                     j = k
                 else:
                     fail("DAL1004", "malformed number: exponent has no digits", i, k)
+            if j < n and text[j] == "d" and not (j + 1 < n and _is_ident_char(text[j + 1])):
+                # `0.2d`, `60d`, `1e-3d`: a double literal (a literal without the suffix is a float, an integer an int)
+                literal = text[i:j]
+                tokens.append(Token("DOUBLE", literal + "d", Pos(line, col, col + (j + 1 - i)), float(literal)))
+                i = j + 1
+                continue
             if j < n and _is_ident_char(text[j]):
                 k = j
                 while k < n and _is_ident_char(text[k]):
                     k += 1
-                fail("DAL1004", f"malformed number '{text[i:k]}' (numeric suffixes such as 'f' are not used)", i, k)
+                fail("DAL1004", f"malformed number '{text[i:k]}' (the only numeric suffix is 'd', as in 0.2d, a double; there is no 'f': a plain 0.2 is a float)", i, k)
             literal = text[i:j]
             if is_float:
                 tokens.append(Token("FLOAT", literal, Pos(line, col, col + (j - i)), float(literal)))

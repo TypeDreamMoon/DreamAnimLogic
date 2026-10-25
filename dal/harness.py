@@ -32,7 +32,7 @@ from .hostapi import HOOK_EVENTS, HOST_ITEMS
 from .mockhost import MockHost
 from .interp import Interpreter
 from .pybackend import generate_python, load_class
-from .types import BOOL, FLOAT, INT, QUAT, ROTATOR, TRANSFORM, VEC2, VEC3, ArrayType, AssetType, EnumType, MapType, StructType, TagType, Type
+from .types import BOOL, DOUBLE_TO_SINGLE, FLOAT, INT, QUAT, ROTATOR, TRANSFORM, VEC2, VEC3, ArrayType, AssetType, EnumType, MapType, StructType, TagType, Type
 
 
 class ScriptedHost(MockHost):
@@ -82,6 +82,7 @@ def load_standins(module: ir.Module) -> dict[str, Callable]:
 # ---- random input generation ---------------------------------------------------------------
 
 def _rand_value(rng: random.Random, ty: Type, scale: float = 10.0):
+    ty = DOUBLE_TO_SINGLE.get(ty, ty)             # the data of a double type is made like the data of its float counterpart
     if ty is FLOAT:
         return rng.uniform(-scale, scale)
     if ty is INT:
@@ -326,9 +327,9 @@ def _snapshot(obj, host: ScriptedHost) -> dict:
     return snap
 
 
-def run_interpreter(module: ir.Module, frames: list[dict], **params) -> list[dict]:
+def run_interpreter(module: ir.Module, frames: list[dict], float32: bool | None = None, **params) -> list[dict]:
     host = ScriptedHost()
-    it = Interpreter(module, host, externs=load_standins(module), **params)
+    it = Interpreter(module, host, externs=load_standins(module), float32=float32, **params)
     out = []
     for f in frames:
         host.load(f)
@@ -343,9 +344,9 @@ def run_interpreter(module: ir.Module, frames: list[dict], **params) -> list[dic
     return out
 
 
-def run_python(module: ir.Module, frames: list[dict], source: str | None = None, **params) -> list[dict]:
+def run_python(module: ir.Module, frames: list[dict], source: str | None = None, float32: bool | None = None, **params) -> list[dict]:
     host = ScriptedHost()
-    cls = load_class(module, source if source is not None else generate_python(module))
+    cls = load_class(module, source if source is not None else generate_python(module, float32))
     obj = cls(host, **params)
     out = []
     for f in frames:
@@ -388,10 +389,10 @@ def compare(a: list[dict], b: list[dict], tol: float = 0.0) -> list[tuple[int, s
     return diffs
 
 
-def verify(module: ir.Module, frames: int = 300, seed: int = 1, tol: float = 0.0, **params) -> list[tuple]:
-    """Interpreter vs generated Python on random frames; returns the list of differences (empty = consistent)."""
+def verify(module: ir.Module, frames: int = 300, seed: int = 1, tol: float = 0.0, float32: bool | None = None, **params) -> list[tuple]:
+    """Interpreter vs generated Python on random frames; returns the list of differences (empty = consistent).  ``float32``: both in float32 mode."""
     seq = random_frames(module, frames, seed)
-    return compare(run_interpreter(module, seq, **params), run_python(module, seq, **params), tol)
+    return compare(run_interpreter(module, seq, float32=float32, **params), run_python(module, seq, float32=float32, **params), tol)
 
 
 # ---- several logics that read and call each other -----------------------------------------------------------------
@@ -453,7 +454,7 @@ def random_system_frames(modules: dict[str, ir.Module], count: int, seed: int = 
 
 def run_system(modules: dict[str, ir.Module], frames: list[dict], backend: str = "python",
                schedule: list[tuple[str, str | None]] | None = None, sources: dict[str, str] | None = None,
-               params: dict[str, dict] | None = None) -> list[dict]:
+               params: dict[str, dict] | None = None, float32: bool | None = None) -> list[dict]:
     """Run several connected logics frame by frame; returns ``{logic: snapshot}`` per frame.
 
     ``backend`` is 'interp' (the reference interpreter) or 'python' (generated classes); ``params`` is ``{logic: {param: data}}``."""
@@ -462,9 +463,9 @@ def run_system(modules: dict[str, ir.Module], frames: list[dict], backend: str =
     for n, m in modules.items():
         given = (params or {}).get(n, {})
         if backend == "interp":
-            objs[n] = Interpreter(m, hosts[n], externs=load_standins(m), **given)
+            objs[n] = Interpreter(m, hosts[n], externs=load_standins(m), float32=float32, **given)
         else:
-            objs[n] = load_class(m, (sources or {}).get(n))(hosts[n], **given)
+            objs[n] = load_class(m, (sources or {}).get(n), float32)(hosts[n], **given)
     for n, m in modules.items():
         for p in m.peers:
             if p.logic in objs:
@@ -515,10 +516,11 @@ def run_system(modules: dict[str, ir.Module], frames: list[dict], backend: str =
 
 
 def verify_system(modules: dict[str, ir.Module], frames: int = 200, seed: int = 1, tol: float = 0.0,
-                  schedule: list[tuple[str, str | None]] | None = None) -> list[tuple]:
+                  schedule: list[tuple[str, str | None]] | None = None, float32: bool | None = None) -> list[tuple]:
     """Interpreter vs generated Python for a connected system; (frame, logic.name, interpreter, python) differences."""
     seq = random_system_frames(modules, frames, seed)
-    a, b = run_system(modules, seq, "interp", schedule), run_system(modules, seq, "python", schedule)
+    a = run_system(modules, seq, "interp", schedule, float32=float32)
+    b = run_system(modules, seq, "python", schedule, float32=float32)
     diffs = []
     for i, (fa, fb) in enumerate(zip(a, b)):
         for logic in fa:

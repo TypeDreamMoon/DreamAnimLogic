@@ -636,7 +636,7 @@ class Parser:
                     call = self.parse_postfix()
                     self.expect_op(";", "after the call")
                     return S.ExprStmt(t.pos, call)
-        if t.kind in ("INT", "FLOAT", "STRING") or t.kind == "IDENT" or t.is_op("("):
+        if t.kind in ("INT", "FLOAT", "DOUBLE", "STRING") or t.kind == "IDENT" or t.is_op("("):
             raise self.error(
                 "DAL2011",
                 f"expected a statement (let, var, assignment, if, return), found an expression starting with {self.describe(t)}",
@@ -1103,6 +1103,9 @@ class Parser:
         if t.kind == "FLOAT":
             self.advance()
             return S.FloatLit(t.pos, t.value)  # type: ignore[arg-type]
+        if t.kind == "DOUBLE":
+            self.advance()
+            return S.DoubleLit(t.pos, t.value)  # type: ignore[arg-type]
         if t.is_kw("true") or t.is_kw("false"):
             self.advance()
             return S.BoolLit(t.pos, t.text == "true")

@@ -3,6 +3,10 @@
 The generated module imports ``dal.runtime`` (value types and UE-semantics math)
 and, if the program declares ``extern fn``, bundles the checked stand-in file.
 Output is deterministic (no timestamps) so it can be diffed and golden-tested.
+
+``float32=True`` generates the float32 mode: every ``float`` (the scalar and the components of vec2, vec3, rotator, quat and transform) is a float32 held in a
+Python float, and each operation that makes a new one rounds it with ``_f32`` (``dal.runtime.f32``) -- float arithmetic as C++ does it.  The ``double`` types are
+never rounded.  Without it a ``float`` is an ordinary Python float (a double).
 """
 
 from __future__ import annotations
@@ -10,7 +14,11 @@ from __future__ import annotations
 from . import ir
 from .builtins import BUILTIN_CONSTS, BUILTINS
 from .hostapi import COMMANDS, HOOK_EVENTS, HOST_ITEMS
-from .types import BOOL, FLOAT, HIT, HIT_MEMBERS, NAME_T, NONE_T, SPRING, SPRING3, SPRING_MEMBERS, TRANSFORM, INT, MOVEMENT_MODE, QUAT, ROTATOR, VEC2, VEC3, VOID, ArrayType, AssetType, EnumType, MapType, StructType, TagType, Type, py_member_name, zero_value
+from . import runtime as rt
+from .interp import EXACT_BUILTINS
+from .types import (BOOL, DOUBLE, DOUBLE_TO_SINGLE, FLOAT, HIT, HIT_MEMBERS, NAME_T, NONE_T, SINGLE_TO_DOUBLE, SPRING, SPRING3, SPRING_MEMBERS, TRANSFORM, TRANSFORMD, INT,
+                    MOVEMENT_MODE, QUAT, QUATD, ROTATOR, ROTATORD, VEC2, VEC2D, VEC3, VEC3D, VOID, ArrayType, AssetType, EnumType, MapType, StructType, TagType, Type,
+                    py_member_name, zero_value)
 
 INDENT = "    "
 
@@ -26,15 +34,33 @@ _AS = {
     TRANSFORM: "_rt.as_transform",
     SPRING: "_rt.as_spring",
     SPRING3: "_rt.as_spring3",
+    # the double types are the same Python values
+    DOUBLE: "float",
+    VEC2D: "_rt.as_vec2",
+    VEC3D: "_rt.as_vec3",
+    ROTATORD: "_rt.as_rotator",
+    QUATD: "_rt.as_quat",
+    TRANSFORMD: "_rt.as_transform",
 }
+
+# float32 mode: how a value of a float type is rounded (module-level aliases of the generated code, see PyGen.module) and read from the host / a peer / a caller
+_R32 = {FLOAT: "_f32", VEC2: "_f32v2", VEC3: "_f32v3", ROTATOR: "_f32r", QUAT: "_f32q", TRANSFORM: "_f32t", SPRING: "_f32s", SPRING3: "_f32s3", HIT: "_f32h"}
+_R32_ALIASES = {"_f32": "f32", "_f32v2": "f32_vec2", "_f32v3": "f32_vec3", "_f32r": "f32_rotator", "_f32q": "f32_quat", "_f32t": "f32_transform", "_f32s": "f32_spring",
+                "_f32s3": "f32_spring3", "_f32h": "f32_hit"}
+_AS32 = {FLOAT: "_f32", VEC2: "_f32v2", VEC3: "_f32v3", ROTATOR: "_f32r", QUAT: "_f32q", TRANSFORM: "_f32t", SPRING: "_f32s", SPRING3: "_f32s3", HIT: "_rt.as_hit32"}
+_SCALAR_FLOATS = (FLOAT, DOUBLE)
+_ROUND_FN = {FLOAT: "f32", VEC2: "f32_vec2", VEC3: "f32_vec3", ROTATOR: "f32_rotator", QUAT: "f32_quat", TRANSFORM: "f32_transform"}      # (dal.runtime)
 
 
 def py_enum_class(ty: EnumType) -> str:
     return f"_rt.{ty.name}" if ty.builtin else ty.name
 
 
-def py_value(ty: Type, v) -> str:
-    """Python source for a constant value of type ``ty``."""
+def py_value(ty: Type, v, f32: bool = False) -> str:
+    """Python source for a constant value of type ``ty`` (``f32``: the values of the float types are rounded to float32 first)."""
+    if f32 and ty in SINGLE_TO_DOUBLE:
+        v = rt.round32_any(v)
+    ty = DOUBLE_TO_SINGLE.get(ty, ty)              # a double is written like its float counterpart
     if ty is FLOAT:
         return repr(float(v))
     if ty is INT:
@@ -56,7 +82,7 @@ def py_value(ty: Type, v) -> str:
     if isinstance(ty, TagType):
         return repr(str(v))
     if isinstance(ty, StructType):
-        return f"{ty.name}(" + ", ".join(f"{f.name}={py_value(f.ty, getattr(v, f.name))}" for f in ty.fields if not f.derived) + ")"
+        return f"{ty.name}(" + ", ".join(f"{f.name}={py_value(f.ty, getattr(v, f.name), f32)}" for f in ty.fields if not f.derived) + ")"
     if isinstance(ty, AssetType):
         return "None" if v is None else repr(str(v))
     if ty is NAME_T:
@@ -64,14 +90,16 @@ def py_value(ty: Type, v) -> str:
     if ty is NONE_T:
         return "None"
     if isinstance(ty, MapType):
-        return "{" + ", ".join(f"{py_value(ty.key, k)}: {py_value(ty.value, x)}" for k, x in v.items()) + "}"
+        return "{" + ", ".join(f"{py_value(ty.key, k)}: {py_value(ty.value, x, f32)}" for k, x in v.items()) + "}"
     if isinstance(ty, ArrayType):
-        return "(" + "".join(py_value(ty.elem, x) + ", " for x in v) + ")"
+        return "(" + "".join(py_value(ty.elem, x, f32) + ", " for x in v) + ")"
     raise ValueError(f"cannot emit a {ty} constant")
 
 
-def py_coercer(ty: Type) -> str:
-    """A callable (as source) that converts a loose value to the runtime representation of ``ty``."""
+def py_coercer(ty: Type, f32: bool = False) -> str:
+    """A callable (as source) that converts a loose value to the runtime representation of ``ty`` (``f32``: and rounds a float type to float32)."""
+    if f32 and ty in _AS32:
+        return _AS32[ty]
     if ty in _AS:
         return _AS[ty]
     if isinstance(ty, StructType):
@@ -107,10 +135,23 @@ def unparen(s: str) -> str:
 
 
 class PyGen:
-    def __init__(self, m: ir.Module):
+    def __init__(self, m: ir.Module, float32: bool = False):
         self.m = m
+        self.f32 = float32                # the float32 mode: every operation that makes a float rounds it
         self.self_locals = False          # in the body of _derive the members of the settings are attributes of self
         self.loops = 0                    # `while` loops generated so far (their counters are numbered)
+
+    # ---- float32 mode -----------------------------------------------------------------------------
+    def pv(self, ty: Type, v) -> str:
+        """py_value in this mode."""
+        return py_value(ty, v, self.f32)
+
+    def coercer(self, ty: Type) -> str:
+        return py_coercer(ty, self.f32)
+
+    def r(self, ty: Type, text: str) -> str:
+        """``text`` (an expression that makes a new value of the float type ``ty``) rounded to float32 in float32 mode."""
+        return f"{_R32[ty]}({unparen(text)})" if self.f32 and ty in _R32 else text
 
     # ---- value semantics of structs -------------------------------------------------------
     @staticmethod
@@ -133,19 +174,21 @@ class PyGen:
     def x(self, e: ir.Expr) -> str:
         k = type(e)
         if k is ir.Lit:
-            return py_value(e.ty, e.value)
+            return self.pv(e.ty, e.value)
         if k is ir.EnumLit:
             return f"{py_enum_class(e.ty)}.{py_member_name(e.member)}"  # type: ignore[arg-type]
         if k is ir.ConstRef:
             if e.name in BUILTIN_CONSTS:
-                return f"_rt.{e.name}"
+                return self.pv(e.ty, e.value) if self.f32 and e.ty in _R32 else f"_rt.{e.name}"
             return f"_K_{e.name}"
         if k in (ir.ParamRef, ir.InputRef, ir.StateRef):
             return f"self.{e.name}"
         if k is ir.LocalRef:
             return ("self." + e.name) if self.self_locals else e.name
         if k is ir.ToFloat:
-            return f"float({self.x(e.x)})"
+            return f"_f32({unparen(self.x(e.x))})" if self.f32 else f"float({self.x(e.x)})"
+        if k is ir.Convert:
+            return self.convert(e)
         if k is ir.Unary:
             if e.op == "!":
                 return f"(not {self.x(e.x)})"
@@ -160,9 +203,9 @@ class PyGen:
             return f"bool({self.x(e.x)})"
         if k is ir.CurveEval:
             fn = "curve_eval" if e.ty is FLOAT else "curve3_eval"
-            return f"_rt.{fn}({unparen(self.x(e.curve))}, {unparen(self.x(e.x))})"
+            return self.r(e.ty, f"_rt.{fn}({unparen(self.x(e.curve))}, {unparen(self.x(e.x))})")
         if k is ir.Index:
-            default = f"lambda: {py_value(e.ty, zero_value(e.ty))}" if isinstance(e.ty, StructType) else py_value(e.ty, zero_value(e.ty))
+            default = f"lambda: {self.pv(e.ty, zero_value(e.ty))}" if isinstance(e.ty, StructType) else self.pv(e.ty, zero_value(e.ty))
             fn = "map_get" if isinstance(e.base.ty, MapType) else "array_get"
             return f"_rt.{fn}({unparen(self.x(e.base))}, {unparen(self.x(e.index))}, {default})"
         if k is ir.MapHas:
@@ -177,8 +220,8 @@ class PyGen:
             args = "(" + "".join(self.val(a) + ", " for a in e.args) + ")"
             if e.ty is VOID:
                 return f"self._peer_call({e.peer!r}, {e.method!r}, {args}, None, {e.queued})"
-            default = py_value(e.ty, zero_value(e.ty))
-            return f"{py_coercer(e.ty)}(self._peer_call({e.peer!r}, {e.method!r}, {args}, {default}))"
+            default = self.pv(e.ty, zero_value(e.ty))
+            return f"{self.coercer(e.ty)}(self._peer_call({e.peer!r}, {e.method!r}, {args}, {default}))"
         if k is ir.PeerValid:
             return f"(self.peers.get({e.peer!r}) is not None)"
         if k is ir.MakeStruct:
@@ -186,7 +229,7 @@ class PyGen:
         if k is ir.Member:
             if isinstance(e.x.ty, StructType):
                 return f"{self.x(e.x)}.{e.comps}"
-            if e.comps in HIT_MEMBERS or e.x.ty in SPRING_MEMBERS or e.x.ty is TRANSFORM or len(e.comps) == 1 or e.comps in ("pitch", "yaw", "roll"):
+            if e.comps in HIT_MEMBERS or e.x.ty in SPRING_MEMBERS or e.x.ty is TRANSFORM or e.x.ty is TRANSFORMD or len(e.comps) == 1 or e.comps in ("pitch", "yaw", "roll"):
                 return f"{self.x(e.x)}.{e.comps}"
             return f"_rt.swizzle({self.x(e.x)}, {e.comps!r})"
         if k is ir.Make:
@@ -201,18 +244,31 @@ class PyGen:
                 return f"_rt.Transform({args})"
             return f"_rt.Quat({args})"
         if k is ir.CallBuiltin:
-            return f"_rt.{BUILTINS[e.name].py}({', '.join(unparen(self.x(a)) for a in e.args)})"
+            call = f"_rt.{BUILTINS[e.name].py}({', '.join(unparen(self.x(a)) for a in e.args)})"
+            return call if e.name in EXACT_BUILTINS else self.r(e.ty, call)
         if k is ir.CallFn:
             return f"_fn_{e.name}({', '.join(unparen(self.x(a)) for a in e.args)})"
         if k is ir.CallExtern:
             ext = self.m.find_extern(e.name)
             call = f"{ext.py}({', '.join(unparen(self.x(a)) for a in e.args)})"  # type: ignore[union-attr]
-            conv = _AS.get(e.ty, "int")
+            conv = (_AS32 if self.f32 else _AS).get(e.ty) or _AS.get(e.ty, "int")
             return f"{conv}({call})"
         if k is ir.HostQuery:
             call = f"self.host.{e.name}({', '.join(unparen(self.x(a)) for a in e.args)})"
-            return f"{_AS.get(e.ty, 'int')}({call})"
+            conv = (_AS32 if self.f32 else _AS).get(e.ty) or _AS.get(e.ty, "int")
+            return f"{conv}({call})"
         raise AssertionError(k)
+
+    def convert(self, e: ir.Convert) -> str:
+        """A change of precision.  Widening keeps the value (a float is a float32 already in float32 mode; in the plain mode it is a Python float and stays what it is);
+        narrowing rounds to float32; an int converts exactly."""
+        src, dst = e.x.ty, e.ty
+        text = self.x(e.x)
+        if src is INT:
+            return f"float({unparen(text)})"
+        if dst.is_double:
+            return text
+        return f"{_R32[dst]}({unparen(text)})" if self.f32 else f"_rt.{_ROUND_FN[dst]}({unparen(text)})"
 
     def cmd_arg(self, e: ir.Expr) -> str:
         """How one command argument is passed to the host: names for montages and sections, runtime values otherwise."""
@@ -241,12 +297,14 @@ class PyGen:
         if op == "/":
             if ta is INT and tb is INT:
                 return f"_rt.idiv({a}, {b})"
-            if ta is FLOAT and tb is FLOAT:
-                return f"({a} / {b})" if _is_nonzero_number(e.b) else f"_rt.fdiv({a}, {b})"
-            return f"({a} / {b})"
+            if ta in _SCALAR_FLOATS and tb in _SCALAR_FLOATS:
+                return self.r(e.ty, f"({a} / {b})" if _is_nonzero_number(e.b) else f"_rt.fdiv({a}, {b})")
+            if e.ty.is_double:
+                return f"_rt.vdiv_recip({a}, {b})"             # vector / scalar as the engine does it: times the reciprocal
+            return f"_rt.vdiv_recip32({a}, {b})" if self.f32 else f"({a} / {b})"
         if op == "%":
             return f"_rt.imod({a}, {b})"
-        return f"({a} {op} {b})"
+        return self.r(e.ty, f"({a} {op} {b})") if e.ty is not INT else f"({a} {op} {b})"
 
     # ---- statements ---------------------------------------------------------------------
     def stmts(self, body: list[ir.Stmt], depth: int) -> list[str]:
@@ -314,7 +372,7 @@ class PyGen:
             elif isinstance(p.ty, StructType):
                 parts.append(f"{p.name}=None")
             else:
-                parts.append(f"{p.name}={py_value(p.ty, p.default)}")
+                parts.append(f"{p.name}={self.pv(p.ty, p.default)}")
         return ", ".join(parts)
 
     def value_types(self) -> list[Type]:
@@ -346,7 +404,7 @@ class PyGen:
         plain = [f for f in st.fields if not f.derived]
         if plain:
             # the properties of an animation notify come from the host as plain data: an enum member may be named
-            conv = "".join(f"({f.name!r}, " + (f"lambda v: _rt.as_enum({py_enum_class(f.ty)}, v)" if st.is_notify and isinstance(f.ty, EnumType) else py_coercer(f.ty)) + "), " for f in plain)
+            conv = "".join(f"({f.name!r}, " + (f"lambda v: _rt.as_enum({py_enum_class(f.ty)}, v)" if st.is_notify and isinstance(f.ty, EnumType) else self.coercer(f.ty)) + "), " for f in plain)
             L.append(f"{INDENT}_SPEC = ({conv})")
         factories = [f for f in plain if isinstance(f.ty, StructType)]
         if factories:
@@ -354,7 +412,7 @@ class PyGen:
             # names, not the constructor parameter of the same name
             L.append("")
             for f in factories:
-                L.append(f"{INDENT}_new_{f.name} = staticmethod(lambda: {py_value(f.ty, f.default)})")
+                L.append(f"{INDENT}_new_{f.name} = staticmethod(lambda: {self.pv(f.ty, f.default)})")
         L.append("")
         params = ["self"]
         body: list[str] = []
@@ -367,11 +425,11 @@ class PyGen:
                 empty = "{}" if isinstance(f.ty, MapType) else "()"
                 body.append(f"{INDENT*2}self.{f.name} = {empty} if {f.name} is None else {f.name}")
             else:
-                params.append(f"{f.name}={py_value(f.ty, f.default) if f.default is not None else 'None'}")
+                params.append(f"{f.name}={self.pv(f.ty, f.default) if f.default is not None else 'None'}")
                 body.append(f"{INDENT*2}self.{f.name} = {f.name}")
         derived = [f for f in st.fields if f.derived]
         for f in derived:
-            body.append(f"{INDENT*2}self.{f.name} = {py_value(f.ty, zero_value(f.ty))}")
+            body.append(f"{INDENT*2}self.{f.name} = {self.pv(f.ty, zero_value(f.ty))}")
         if derived:
             body.append(f"{INDENT*2}self._derive()")
         L.append(f"{INDENT}def __init__({', '.join(params)}):")
@@ -394,7 +452,7 @@ class PyGen:
             L.append(f"{INDENT}@classmethod")
             L.append(f"{INDENT}def load(cls, source=None, resolver=None, report=None):")
             L.append(f'{INDENT*2}"""An instance from a JSON file, a dict (see dal.settings) or None (the declared defaults)."""')
-            L.append(f"{INDENT*2}return _settings.load(DAL_SCHEMA, DAL_CLASSES, {st.name!r}, source, resolver, report)")
+            L.append(f"{INDENT*2}return _settings.load(DAL_SCHEMA, DAL_CLASSES, {st.name!r}, source, resolver, report{', True' if self.f32 else ''})")
         L.append("")
         return L
 
@@ -412,6 +470,11 @@ class PyGen:
         L.append("from dal import runtime as _rt")
         if any(st.is_settings for st in m.structs):
             L.append("from dal import settings as _settings")
+        if self.f32:
+            L.append("")
+            L.append("# float32 mode: every operation that makes a float rounds its result (dal.runtime.f32 and the vector versions)")
+            for alias, fn in _R32_ALIASES.items():
+                L.append(f"{alias} = _rt.{fn}")
         L.append("")
 
         for en in m.enums:
@@ -445,7 +508,7 @@ class PyGen:
         if m.consts:
             L.append("")
             for c in m.consts:
-                L.append(f"_K_{c.name} = {py_value(c.ty, c.value)}")
+                L.append(f"_K_{c.name} = {self.pv(c.ty, c.value)}")
             L.append("")
 
         if m.montages:
@@ -468,9 +531,11 @@ class PyGen:
         L.append(f'{INDENT}DAL_NAME = "{m.name}"')
         L.append(f'{INDENT}DAL_VERSION = "{__version__}"')
         L.append(f'{INDENT}DAL_SOURCE_SHA256 = "{m.source_sha256}"')
+        if self.f32:
+            L.append(f"{INDENT}DAL_FLOAT32 = True")
         L.append(f"{INDENT}DAL_PARAMS = (")
         for p in m.params:
-            L.append(f"{INDENT*2}({p.name!r}, {p.ty.name!r}, {py_value(p.ty, p.default)}),")
+            L.append(f"{INDENT*2}({p.name!r}, {p.ty.name!r}, {self.pv(p.ty, p.default)}),")
         L.append(f"{INDENT})")
         L.append(f"{INDENT}DAL_INPUTS = (")
         for i in m.inputs:
@@ -497,7 +562,7 @@ class PyGen:
             L.append(f"{INDENT}DAL_LINKED = {m.linked.parent!r}")
         coerced = [t for t in self.value_types() if isinstance(t, (StructType, TagType))]
         if coerced:
-            L.append(f"{INDENT}DAL_TYPES = {{" + ", ".join(f"{t.name!r}: {py_coercer(t)}" for t in coerced) + "}")
+            L.append(f"{INDENT}DAL_TYPES = {{" + ", ".join(f"{t.name!r}: {self.coercer(t)}" for t in coerced) + "}")
         traffic = bool(m.handlers) or m.uses_commands
         lifecycle = m.lifecycle
         event_handlers = [(k, h) for k, h in enumerate(m.handlers) if h.event not in ("begin_play", "end_play")]
@@ -554,9 +619,9 @@ class PyGen:
         if queue_target:
             L.append(f"{INDENT*2}self._peer_queue = []")
         for i in m.inputs:
-            L.append(f"{INDENT*2}self.{i.name} = {py_value(i.ty, i.default)}")
+            L.append(f"{INDENT*2}self.{i.name} = {self.pv(i.ty, i.default)}")
         for s in m.states:
-            L.append(f"{INDENT*2}self.{s.name} = {py_value(s.ty, s.default)}")
+            L.append(f"{INDENT*2}self.{s.name} = {self.pv(s.ty, s.default)}")
         L.append("")
         only = m.consume_slots()
         L.append(f"{INDENT}def _sample(self" + (", phase=None" if only is not None else "") + "):")
@@ -583,7 +648,7 @@ class PyGen:
             spec = HOST_ITEMS[h.item]
             if spec.consume:
                 # consume-on-read: the host hands the group out once per sample, and not at all when every member is overridden
-                conv = _AS[i.ty]
+                conv = self.coercer(i.ty)
                 L.append(f"{INDENT*2}if {i.name!r} in ov:")
                 L.append(f"{INDENT*3}self.{i.name} = {conv}(ov[{i.name!r}])")
                 if only is not None:                              # the slots whose block does not read it leave it to the ones that do
@@ -605,7 +670,7 @@ class PyGen:
             if isinstance(i.ty, EnumType):
                 conv = f"{py_enum_class(i.ty)}(int({{}}))"
             else:
-                conv = _AS[i.ty] + "({})"
+                conv = self.coercer(i.ty) + "({})"
             L.append(
                 f"{INDENT*2}self.{i.name} = " + conv.format(f"ov[{i.name!r}] if {i.name!r} in ov else {src}")
             )
@@ -614,14 +679,14 @@ class PyGen:
             assert pu is not None
             path = "(" + "".join(f"{x!r}, " for x in pu.path[1:]) + ")"
             L.append(f"{INDENT*2}if {i.name!r} in ov:")
-            L.append(f"{INDENT*3}self.{i.name} = {py_coercer(i.ty)}(ov[{i.name!r}])")
+            L.append(f"{INDENT*3}self.{i.name} = {self.coercer(i.ty)}(ov[{i.name!r}])")
             L.append(f"{INDENT*2}else:")
             L.append(f"{INDENT*3}p = self.peers.get({pu.peer!r})")
             L.append(f"{INDENT*3}if p is None:")
             L.append(f"{INDENT*4}self.unresolved.add({pu.peer!r})")
-            L.append(f"{INDENT*4}self.{i.name} = {py_value(i.ty, i.default)}")
+            L.append(f"{INDENT*4}self.{i.name} = {self.pv(i.ty, i.default)}")
             L.append(f"{INDENT*3}else:")
-            L.append(f"{INDENT*4}self.{i.name} = {py_coercer(i.ty)}(_rt.path_get(p.dal_get({pu.path[0]!r}), {path}))")
+            L.append(f"{INDENT*4}self.{i.name} = {self.coercer(i.ty)}(_rt.path_get(p.dal_get({pu.path[0]!r}), {path}))")
         if not bound and not peered:
             L.append(f"{INDENT*2}pass")
         L.append("")
@@ -646,7 +711,7 @@ class PyGen:
                 out.append(f"{pad}self._drain_peer_calls()")
             if (first or m.slot_events) and event_handlers:
                 out.append(f"{pad}events = self._collect_events()")
-            out.append(f"{pad}{dt} = float({dt})")
+            out.append(f"{pad}{dt} = _f32({dt})" if self.f32 else f"{pad}{dt} = float({dt})")
             out.append(f"{pad}self._dt = {dt}")
             if first and u is not None:
                 out.extend(self.stmts(u.pre, depth))
@@ -735,12 +800,12 @@ class PyGen:
             L.append(f"{INDENT}def {e.name}({self.entry_signature(e)}):")
             L.append(f'{INDENT*2}"""Entry: runs with the delta time of the last update."""' if e.dt_name else f'{INDENT*2}"""Entry."""')
             for p in e.params:
-                conv = py_coercer(p.ty)
+                conv = self.coercer(p.ty)
                 if isinstance(p.ty, EnumType):
                     conv = f"_rt.as_enum({py_enum_class(p.ty)}, {p.name})"
                     L.append(f"{INDENT*2}{p.name} = {conv}")
                 elif p.has_default and isinstance(p.ty, StructType):
-                    L.append(f"{INDENT*2}{p.name} = {py_value(p.ty, p.default)} if {p.name} is None else {conv}({p.name})")
+                    L.append(f"{INDENT*2}{p.name} = {self.pv(p.ty, p.default)} if {p.name} is None else {conv}({p.name})")
                 else:
                     L.append(f"{INDENT*2}{p.name} = {conv}({p.name})")
             if e.dt_name:
@@ -767,13 +832,13 @@ class PyGen:
         return "\n".join(L).rstrip("\n") + "\n"
 
 
-def generate_python(module: ir.Module) -> str:
-    return PyGen(module).module()
+def generate_python(module: ir.Module, float32: bool | None = None) -> str:
+    return PyGen(module, rt.want_float32(float32)).module()
 
 
-def load_class(module: ir.Module, source: str | None = None):
+def load_class(module: ir.Module, source: str | None = None, float32: bool | None = None):
     """Exec the generated code and return the logic class (used by tests and tools)."""
-    src = source if source is not None else generate_python(module)
+    src = source if source is not None else generate_python(module, float32)
     ns: dict = {"__name__": f"dal_generated_{module.name}"}
     exec(compile(src, f"<dal:{module.name}>", "exec"), ns)  # noqa: S102
     return ns if module.is_library else ns[module.name]

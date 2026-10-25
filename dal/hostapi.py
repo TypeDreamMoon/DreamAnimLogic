@@ -4,7 +4,8 @@ Three layers, all driven by the tables below (the compiler checks programs again
 backends and every host implement them):
 
 * **Reads** (``HOST_ITEMS``): values bound to inputs with ``input X: type <- host.item``; sampled once per
-  update (v0, plus the montage reads of v1).
+  update (v0, plus the montage reads of v1).  An item of a float type may be declared with its double counterpart too
+  (``input T: double <- host.time;``): the table gives the precision the engine has the value in, the program chooses the one it reads it at.
 * **Commands** (``COMMANDS``): ``host.name(args);`` statements. They never take effect inside the update:
   they are queued, and the host executes them in order after the update (Unreal: on the game thread;
   Python: ``LogicBase.update`` calls the host methods when the update has finished).
@@ -23,7 +24,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from . import runtime as rt
-from .types import BLEND_OPTION, BOOL, CHANNEL, CHANNEL_SET, FLOAT, HIT, INT, MONTAGE_ASSET, MONTAGE_BLEND_MODE, MOVEMENT_MODE, PRIMITIVE, QUAT, ROOT_MOTION_MODE, ROTATOR, SEQUENCE, TRANSFORM, VEC2, VEC3, Type
+from .types import (BLEND_OPTION, BOOL, CHANNEL, CHANNEL_SET, DOUBLE, FLOAT, HIT, INT, MONTAGE_ASSET, MONTAGE_BLEND_MODE, MOVEMENT_MODE, PRIMITIVE, QUAT, QUATD, ROOT_MOTION_MODE,
+                    ROTATOR, ROTATORD, SEQUENCE, TRANSFORM, TRANSFORMD, VEC2, VEC3, VEC3D, Type)
 
 
 # ---- reads ---------------------------------------------------------------------------------------------------
@@ -48,11 +50,11 @@ class HostItem:
 HOST_ITEMS: dict[str, HostItem] = {
     i.name: i
     for i in (
-        HostItem("time", FLOAT, unit="s", doc="world time in seconds",
+        HostItem("time", DOUBLE, unit="s", doc="world time in seconds",
                  ue="GetWorld()->GetTimeSeconds()"),
-        HostItem("velocity", VEC3, unit="cm/s", doc="character velocity, world space",
+        HostItem("velocity", VEC3D, unit="cm/s", doc="character velocity, world space",
                  ue="CharacterMovement->Velocity"),
-        HostItem("acceleration", VEC3, unit="cm/s^2", doc="current input acceleration, world space",
+        HostItem("acceleration", VEC3D, unit="cm/s^2", doc="current input acceleration, world space",
                  ue="CharacterMovement->GetCurrentAcceleration()"),
         HostItem("max_acceleration", FLOAT, unit="cm/s^2", doc="CMC MaxAcceleration",
                  ue="CharacterMovement->GetMaxAcceleration()"),
@@ -66,11 +68,11 @@ HOST_ITEMS: dict[str, HostItem] = {
                  ue="CharacterMovement->IsMovingOnGround()"),
         HostItem("is_crouching", BOOL, doc="character is crouched",
                  ue="CharacterMovement->IsCrouching()"),
-        HostItem("actor_location", VEC3, unit="cm", doc="world location of the owning actor",
+        HostItem("actor_location", VEC3D, unit="cm", doc="world location of the owning actor",
                  ue="Pawn->GetActorLocation()"),
-        HostItem("actor_rotation", QUAT, doc="world rotation of the owning actor",
+        HostItem("actor_rotation", QUATD, doc="world rotation of the owning actor",
                  ue="Pawn->GetActorQuat()"),
-        HostItem("control_rotation", ROTATOR, unit="deg", doc="controller rotation (pitch, yaw, roll)",
+        HostItem("control_rotation", ROTATORD, unit="deg", doc="controller rotation (pitch, yaw, roll)",
                  ue="Pawn->GetControlRotation()"),
         # v2: reads the ALS rewrite needs
         HostItem("capsule_radius", FLOAT, unit="cm", doc="scaled radius of the character's capsule",
@@ -104,13 +106,13 @@ HOST_ITEMS: dict[str, HostItem] = {
         HostItem("ragdoll_supported", BOOL, doc="the mesh has a physics asset with the pelvis and spine_03 bodies (ragdolling can start)",
                  ue="Mesh->GetPhysicsAsset() has bodies pelvis and spine_03"),
         # v4: what the ragdoll service knows while the character ragdolls (ALS reads the pelvis body, not a bone: the bones lag behind the simulation)
-        HostItem("ragdoll_pelvis_location", VEC3, unit="cm", doc="world location of the pelvis body of the ragdoll (zero without a ragdoll service or a pelvis body)",
+        HostItem("ragdoll_pelvis_location", VEC3D, unit="cm", doc="world location of the pelvis body of the ragdoll (zero without a ragdoll service or a pelvis body)",
                  ue="UDalRagdollService::GetPelvisLocation() (DalRuntime): FBodyInstance::GetUnrealWorldTransform() of the pelvis body"),
-        HostItem("ragdoll_velocity", VEC3, unit="cm/s", doc="linear velocity of the pelvis body of the ragdoll (zero without a ragdoll service or a pelvis body)",
+        HostItem("ragdoll_velocity", VEC3D, unit="cm/s", doc="linear velocity of the pelvis body of the ragdoll (zero without a ragdoll service or a pelvis body)",
                  ue="UDalRagdollService::GetPelvisVelocity() (DalRuntime): FBodyInstance::GetUnrealWorldVelocity() of the pelvis body"),
         HostItem("ragdoll_facing_up", BOOL, doc="the ragdoll lies face up: the roll of the pelvis unwound to -180..180 degrees is <= 0 (how ALS decides the get up montage); false without a ragdoll service",
                  ue="UDalRagdollService::IsFacingUp() (DalRuntime): FMath::UnwindDegrees(Mesh->GetSocketTransform(pelvis).Rotator().Roll) <= 0"),
-        HostItem("mesh_world_transform", TRANSFORM, doc="world transform of the character mesh", ue="Mesh->GetComponentTransform()"),
+        HostItem("mesh_world_transform", TRANSFORMD, doc="world transform of the character mesh", ue="Mesh->GetComponentTransform()"),
         HostItem("bone_component_transform", TRANSFORM, arg=True, arg_kind="string", free_name=True,
                  doc='transform of a bone in component space, from the pose evaluated last: host.bone_component_transform("pelvis")',
                  ue="Mesh->GetSocketTransform(Bone, RTS_Component)"),
@@ -121,7 +123,7 @@ HOST_ITEMS: dict[str, HostItem] = {
                  doc='host.ref_path_child_translation("calf_l", "thigh_l"): the local reference-pose translation of the bone of the path from the first '
                      "bone up to the second that is a direct child of the second (the thigh axis)",
                  ue="Mesh->GetSkeletalMeshAsset()->GetRefSkeleton(): the reference pose translation of the child of Ancestor on the path from Descendant"),
-        HostItem("pre_penetration_velocity", VEC3, unit="cm/s", consume="consume_pre_penetration_velocity", part=1,
+        HostItem("pre_penetration_velocity", VEC3D, unit="cm/s", consume="consume_pre_penetration_velocity", part=1,
                  doc="velocity the movement had before depenetration moved the character; consumed by the read",
                  ue="UDalCharacterMovementComponent::TryConsumePrePenetrationAdjustmentVelocity (DalRuntime)"),
         HostItem("pre_penetration_velocity_valid", BOOL, consume="consume_pre_penetration_velocity", part=0,
@@ -247,15 +249,16 @@ COMMANDS: dict[str, Command] = {
                                            "the host gets the dotted path of the place; valid(State) is true from the next update (animation logic)",
            ue="AnimInstance->SnapshotPose(<the FPoseSnapshot state or member>)"),
         # v4: root motion override (the character is driven by the logic: climbing; MOVE_Custom with a sub mode is its movement mode)
-        _c("root_motion_override", [VEC3, QUAT],
-           doc="root motion for the next movement update: velocity (cm/s, world space) and the rotation to apply (a delta of the actor's rotation); "
-               "it stays in effect until root_motion_clear()",
+        _c("root_motion_override", [VEC3D, QUATD],
+           doc="root motion for the next movement update: velocity (cm/s, world space) and the rotation to apply (a delta of the actor's rotation), both "
+               "double precision as the engine takes them (floats are widened); it stays in effect until root_motion_clear()",
            ue="UDalCharacterMovementComponent::SetRootMotionOverride(Velocity, RotationDelta): an override root motion source (DalRuntime)"),
         _c("root_motion_clear", [], doc="end the root motion override", ue="UDalCharacterMovementComponent::ClearRootMotionOverride() (DalRuntime)"),
         # v4: the rest of the character commands of the ALS rewrite (climbing, ragdolling)
         _c("set_movement_mode_locked", [BOOL], doc="while it is set the movement component ignores every SetMovementMode, its own calls included (ALS's movement component)",
            ue="UDalCharacterMovementComponent::bMovementModeLocked = b (DalRuntime)"),
-        _c("set_actor_location", [VEC3, BOOL, BOOL], 1, (False, True), doc="move the actor; sweep: stop at what blocks, teleport: reset the physics state (a teleport)",
+        _c("set_actor_location", [VEC3D, BOOL, BOOL], 1, (False, True), doc="move the actor (double precision, as the engine takes the location; a float vec3 is widened); "
+                                                                        "sweep: stop at what blocks, teleport: reset the physics state (a teleport)",
            ue="Pawn->SetActorLocation(Location, bSweep, nullptr, bTeleport ? ETeleportType::TeleportPhysics : ETeleportType::None)"),
         _c("set_velocity", [VEC3], ue="CharacterMovement->Velocity = v"),
         _c("set_anim_root_motion_translation_scale", [FLOAT], ue="Character->SetAnimRootMotionTranslationScale(Scale)"),
@@ -291,20 +294,20 @@ class Query:
 QUERIES: dict[str, Query] = {
     q.name: q
     for q in (
-        Query("trace_line", (VEC3, VEC3), HIT, "line trace from start to end against the world's blocking geometry",
+        Query("trace_line", (VEC3D, VEC3D), HIT, "line trace from start to end against the world's blocking geometry",
               "World->LineTraceSingleByChannel(Hit, Start, End, DalTraceChannel (ECC_Visibility), IgnoreOwner)"),
-        Query("trace_sphere", (VEC3, VEC3, FLOAT), HIT, "sphere sweep from start to end",
+        Query("trace_sphere", (VEC3D, VEC3D, FLOAT), HIT, "sphere sweep from start to end",
               "World->SweepSingleByChannel(Hit, Start, End, FQuat::Identity, DalTraceChannel (ECC_Visibility), Sphere(Radius), IgnoreOwner)"),
         # v3: queries with a channel and the channels that block; an animation instance may use these (the scene is read-locked in UE)
-        Query("sweep_capsule", (VEC3, VEC3, FLOAT, FLOAT, CHANNEL, CHANNEL_SET), HIT,
+        Query("sweep_capsule", (VEC3D, VEC3D, FLOAT, FLOAT, CHANNEL, CHANNEL_SET), HIT,
               "sweep a vertical capsule (radius, half height) from start to end; only the listed channels block",
               "World->SweepSingleByChannel(Hit, Start, End, FQuat::Identity, Channel, FCollisionShape::MakeCapsule(Radius, HalfHeight), IgnoreOwner, Responses)",
               True),
-        Query("sweep_sphere", (VEC3, VEC3, FLOAT, CHANNEL, CHANNEL_SET), HIT, "sweep a sphere from start to end; only the listed channels block",
+        Query("sweep_sphere", (VEC3D, VEC3D, FLOAT, CHANNEL, CHANNEL_SET), HIT, "sweep a sphere from start to end; only the listed channels block",
               "World->SweepSingleByChannel(Hit, Start, End, FQuat::Identity, Channel, FCollisionShape::MakeSphere(Radius), IgnoreOwner, Responses)", True),
-        Query("line_trace", (VEC3, VEC3, CHANNEL), HIT, "line trace on a channel",
+        Query("line_trace", (VEC3D, VEC3D, CHANNEL), HIT, "line trace on a channel",
               "World->LineTraceSingleByChannel(Hit, Start, End, Channel, IgnoreOwner)", True),
-        Query("overlap_capsule", (VEC3, FLOAT, FLOAT, CHANNEL, CHANNEL_SET), BOOL,
+        Query("overlap_capsule", (VEC3D, FLOAT, FLOAT, CHANNEL, CHANNEL_SET), BOOL,
               "does a vertical capsule at this center overlap anything that blocks (center, radius, half height)",
               "World->OverlapBlockingTestByChannel(Center, FQuat::Identity, Channel, FCollisionShape::MakeCapsule(Radius, HalfHeight), IgnoreOwner, Responses)", True),
         Query("is_walkable", (HIT,), BOOL, "can the character stand on what this hit touched (a blocking hit whose normal is flat enough)",

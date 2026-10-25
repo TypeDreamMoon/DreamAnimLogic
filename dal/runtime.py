@@ -7,7 +7,9 @@ behaviour of the UE function named in its comment (UE 5.8 ``FMath``,
 
 Differences from a UE float build that are inherent to Python:
 
-* values are IEEE doubles, not floats (the C++ backend uses ``float``);
+* values are IEEE doubles, not floats (the C++ backend uses ``float``).  The float32 mode of the interpreter and of the generated Python
+  rounds every ``float`` result to float32 (``f32`` below) and removes this difference for the arithmetic; the ``double`` types are Python
+  floats in both modes;
 * ``atan2`` uses the C library; UE's float ``FMath::Atan2`` is a minimax
   approximation with a relative error below 1e-6 against it;
 * ``to_rotator`` computes pitch with an exact ``asin``; UE's float
@@ -19,6 +21,8 @@ Pure Python 3.11+, no dependencies.
 from __future__ import annotations
 
 import math
+import os as _os
+import struct as _struct
 from enum import IntEnum  # noqa: F401  (re-exported for generated code)
 
 # ---- constants (UE macro values) --------------------------------------------
@@ -175,11 +179,13 @@ class Hit(tuple):
     __slots__ = ()
 
     def __new__(cls, blocking=False, point=(0.0, 0.0, 0.0), normal=(0.0, 0.0, 0.0), distance=0.0, time=1.0,
-                location=None, start_penetrating=False, primitive=None, face_normal=None):
+                location=None, start_penetrating=False, primitive=None, face_normal=None, point_d=None, location_d=None):
         point, normal = as_vec3(point), as_vec3(normal)
+        location = point if location is None else as_vec3(location)
         return tuple.__new__(cls, (bool(blocking), point, normal, float(distance), float(time),
-                                   point if location is None else as_vec3(location), bool(start_penetrating),
-                                   None if primitive is None else primitive, normal if face_normal is None else as_vec3(face_normal)))
+                                   location, bool(start_penetrating),
+                                   None if primitive is None else primitive, normal if face_normal is None else as_vec3(face_normal),
+                                   point if point_d is None else as_vec3(point_d), location if location_d is None else as_vec3(location_d)))
 
     blocking = property(lambda s: s[0])
     point = property(lambda s: s[1])
@@ -190,6 +196,8 @@ class Hit(tuple):
     start_penetrating = property(lambda s: s[6])
     primitive = property(lambda s: s[7])
     face_normal = property(lambda s: s[8])
+    point_d = property(lambda s: s[9])             # point and location at the precision the host gave them (the engine's are doubles)
+    location_d = property(lambda s: s[10])
 
     def __repr__(self):
         return (f"Hit(blocking={self[0]!r}, point={self[1]!r}, normal={self[2]!r}, distance={self[3]!r}, time={self[4]!r}, "
@@ -328,6 +336,83 @@ class BlendOption(IntEnum):
     Custom = 14
 
 
+# ---- float32 ------------------------------------------------------------------
+#
+# In float32 mode (``float32=True`` for the interpreter and the Python backend) every value of a ``float`` type -- the scalar and the components of
+# vec2, vec3, rotator, quat and transform -- is a float32 value held in a Python float, and every operation that makes a new one rounds its result
+# (round to nearest even, what ``float`` arithmetic does in C++): ``f32(a + b)`` is exactly ``a + b`` in C++ ``float``, because a double holds the exact
+# sum, difference, product and quotient of two floats to 53 bits and the one rounding to 24 bits is then the correctly rounded float result.
+# The library functions compute in double and round their result once; where C++ computes the same function in float the two can differ by an ulp.
+
+# Whether the interpreter and the Python backend run in float32 mode when the caller does not say (``float32=None``).  DAL_FLOAT32=1 / 0 in the environment sets it.
+FLOAT32_DEFAULT = _os.environ.get("DAL_FLOAT32", "0") not in ("0", "")
+
+
+def want_float32(float32) -> bool:
+    """The float32 flag a caller passed (None: the default of the process)."""
+    return FLOAT32_DEFAULT if float32 is None else bool(float32)
+
+
+_FLOAT_PACK = _struct.Struct("f")
+_pack_f32 = _FLOAT_PACK.pack
+_unpack_f32 = _FLOAT_PACK.unpack
+_tuple_new = tuple.__new__
+
+
+def f32(x):
+    """``x`` rounded to the nearest float32 (ties to even) as a Python float; too large a magnitude is +-inf, NaN stays NaN."""
+    try:
+        return _unpack_f32(_pack_f32(x))[0]
+    except OverflowError:
+        return _INF if x > 0 else -_INF
+
+
+def f32_vec2(v):
+    return _tuple_new(Vec2, (f32(v[0]), f32(v[1])))
+
+
+def f32_vec3(v):
+    return _tuple_new(Vec3, (f32(v[0]), f32(v[1]), f32(v[2])))
+
+
+def f32_rotator(v):
+    return _tuple_new(Rotator, (f32(v[0]), f32(v[1]), f32(v[2])))
+
+
+def f32_quat(v):
+    return _tuple_new(Quat, (f32(v[0]), f32(v[1]), f32(v[2]), f32(v[3])))
+
+
+def f32_transform(t):
+    return _tuple_new(Transform, (f32_vec3(t[0]), f32_quat(t[1]), f32_vec3(t[2])))
+
+
+def f32_spring(s):
+    return _tuple_new(Spring, (f32(s[0]), f32(s[1])))
+
+
+def f32_spring3(s):
+    return _tuple_new(Spring3, (f32_vec3(s[0]), f32_vec3(s[1])))
+
+
+def f32_hit(h):
+    """A hit with its float members rounded; ``point_d`` and ``location_d`` keep the precision the host gave."""
+    return _tuple_new(Hit, (h[0], f32_vec3(h[1]), f32_vec3(h[2]), f32(h[3]), f32(h[4]), f32_vec3(h[5]), h[6], h[7], f32_vec3(h[8]), h[9], h[10]))
+
+
+def as_hit32(v):
+    return f32_hit(as_hit(v))
+
+
+def round32_any(v):
+    """The float32 value of a number or of a (possibly nested) vector / rotator / quat / transform value: the literal folding of the checker uses it."""
+    if isinstance(v, float):
+        return f32(v)
+    if isinstance(v, tuple) and not isinstance(v, (Hit, Spring, Spring3)):
+        return type(v)(*[round32_any(c) for c in v])
+    return v
+
+
 # Coercions used by the generated ``_sample`` so hosts may return plain tuples.
 def as_float(v):
     return float(v)
@@ -452,6 +537,25 @@ def imod(a: int, b: int) -> int:
 def vdiv(v, s):
     """vector / scalar; ``v / 0`` is the zero vector."""
     return v / s
+
+
+def vdiv_recip(v, s):
+    """vector / scalar the way the engine does it (TVector::operator/): each component times the reciprocal of the scalar, in double; ``v / 0`` is the zero vector.
+    The double types use it always (their results agree with C++ to the last bit); the float types in the float32 mode (``vdiv_recip32``)."""
+    cls = type(v)
+    if s == 0:
+        return cls(*([0.0] * len(v)))
+    r = 1.0 / s
+    return cls(*[c * r for c in v])
+
+
+def vdiv_recip32(v, s):
+    """``vdiv_recip`` in float32: the reciprocal and every product are rounded to float32."""
+    cls = type(v)
+    if s == 0:
+        return cls(*([0.0] * len(v)))
+    r = f32(1.0 / s)
+    return _tuple_new(cls, tuple([f32(c * r) for c in v]))
 
 
 # ---- scalar math --------------------------------------------------------------
@@ -1404,6 +1508,13 @@ _COERCE = {
     "transform": as_transform,
     "spring": as_spring,
     "spring3": as_spring3,
+    # the double types are the same Python values
+    "double": float,
+    "vec2d": as_vec2,
+    "vec3d": as_vec3,
+    "rotatord": as_rotator,
+    "quatd": as_quat,
+    "transformd": as_transform,
 }
 
 
@@ -1413,9 +1524,14 @@ def section_name(names, value):
     return None if i == 0 else names[i]
 
 
-def coerce_by_name(type_name: str, value):
-    """Coerce ``value`` to the runtime representation of the DAL type called ``type_name`` (enums -> int)."""
-    return _COERCE.get(type_name, int)(value)
+# float32 mode: the float types round what they take
+_COERCE32 = dict(_COERCE, float=f32, vec2=f32_vec2, vec3=f32_vec3, rotator=f32_rotator, quat=f32_quat, transform=lambda v: f32_transform(as_transform(v)),
+                 hit=as_hit32, spring=lambda v: f32_spring(as_spring(v)), spring3=lambda v: f32_spring3(as_spring3(v)))
+
+
+def coerce_by_name(type_name: str, value, f32_mode: bool = False):
+    """Coerce ``value`` to the runtime representation of the DAL type called ``type_name`` (enums -> int); ``f32_mode``: the float types are rounded to float32."""
+    return (_COERCE32 if f32_mode else _COERCE).get(type_name, int)(value)
 
 
 # the hook events of the character (hostapi.HOOK_EVENTS): how the host's values become the handler's parameters
@@ -1432,6 +1548,7 @@ HOOK_ARGS = {                                   # event -> ((converter, value wh
     "teleported": (),
     "physics_rotation": ((float, 0.0),),
 }
+HOOK_ARGS32 = dict(HOOK_ARGS, landed=((as_hit32, Hit()),), physics_rotation=((f32, 0.0),))        # (float32 mode)
 
 
 class LogicBase:
@@ -1460,6 +1577,7 @@ class LogicBase:
     DAL_SYNC_EVENTS = False       # logic with `sync_events`: receive_event() handles an event the host raises at once
     DAL_ORDER: tuple = ()         # actor logic: (relation, peer, peer logic, slots) -- in these tick slots the block runs 'before' / 'after' the peer's
     DAL_FLUSH_PEERS = False       # actor logic with `flush_peers`: the commands a peer queued in the calls of a block run when this logic hands its own over
+    DAL_FLOAT32 = False           # generated in float32 mode: every float is a float32 (see f32)
 
     def __init__(self, host, params: dict, peers: dict | None = None):
         from .hostapi import HostV1
@@ -1501,7 +1619,7 @@ class LogicBase:
     def _coerce(self, type_name: str, value):
         conv = self.DAL_TYPES.get(type_name)
         if conv is None:
-            return coerce_by_name(type_name, value)
+            return coerce_by_name(type_name, value, self.DAL_FLOAT32)
         cls = getattr(conv, "__self__", None)
         if getattr(cls, "_IMMUTABLE", False) and not isinstance(value, Struct):
             return cls.load(value, self.resolver)             # a settings class reads files, dicts and names
@@ -1593,7 +1711,7 @@ class LogicBase:
         for ev in events:
             kind = ev[0]
             if kind in HOOK_ARGS:                           # the hooks of the character have no name: the payload follows the kind
-                conv = HOOK_ARGS[kind]
+                conv = (HOOK_ARGS32 if self.DAL_FLOAT32 else HOOK_ARGS)[kind]
                 args = [c(ev[i + 1] if i + 1 < len(ev) else d) for i, (c, d) in enumerate(conv)]
                 for h_kind, _h_name, _h_phase, method, n_params in self.DAL_HANDLERS:
                     if h_kind == kind:
@@ -1607,7 +1725,7 @@ class LogicBase:
                     getattr(self, method)(bool(ev[2]))
                 elif kind == "input":
                     if h_phase == ev[2]:
-                        getattr(self, method)(coerce_by_name(value_type, ev[3] if len(ev) > 3 else 0.0))
+                        getattr(self, method)(coerce_by_name(value_type, ev[3] if len(ev) > 3 else 0.0, self.DAL_FLOAT32))
                 elif value_type:                                  # a declared notify: the payload (its properties) and the montage instance
                     self._source = ev[3] if len(ev) > 3 else None
                     try:

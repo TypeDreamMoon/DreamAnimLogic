@@ -25,6 +25,12 @@ class FloatLit(Expr):
 
 
 @dataclass
+class DoubleLit(Expr):
+    """`0.2d`: a double-precision literal."""
+    value: float
+
+
+@dataclass
 class BoolLit(Expr):
     value: bool
 
