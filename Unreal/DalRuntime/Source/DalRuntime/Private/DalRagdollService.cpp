@@ -3,6 +3,7 @@
 #include "Animation/AnimInstance.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Engine/SkinnedAsset.h"
 #include "GameFramework/Character.h"
 #include "PhysicsEngine/BodyInstance.h"
 #include "PhysicsEngine/PhysicsAsset.h"
@@ -118,15 +119,28 @@ void UDalRagdollService::End()
 	Mesh->AttachToComponent(Character->GetCapsuleComponent(), FAttachmentTransformRules::KeepWorldTransform);
 
 	// The pose of the ragdoll is the one the get up blends from (the logic takes a snapshot of it in the next animation update).  It is in the component
-	// space of the detached mesh, which was wherever the ragdoll ended up; the mesh has moved to the capsule since.  ALS puts the pelvis of the final
-	// pose back where it was in the world, relative to the mesh now (AlsCharacter_Actions.cpp:1128-1138: PelvisTransform.GetRelativeTransform(mesh)).
-	// The snapshot keeps every other bone relative to its parent, so moving all the bones but the root from the old component space to the new one
-	// gives the same pose: the pelvis is where ALS puts it and nothing else changes.
+	// space of the detached mesh, which was wherever the ragdoll ended up; the mesh has moved to the capsule since.  ALS changes the local transform of
+	// the pelvis alone, to where the pelvis was in the world relative to the mesh now (AlsCharacter_Actions.cpp:1128-1138: PelvisTransform.
+	// GetRelativeTransform(mesh)); every other bone keeps its transform relative to its parent.  In component space that moves the pelvis and the bones
+	// below it from the old component space to the new one, and leaves the other bones that hang off the root (the IK and virtual bones: animation,
+	// not simulation) where they are.
 	const FTransform Shift = DetachedMeshTransform * Mesh->GetComponentTransform().Inverse();
 	TArray<FTransform>& ComponentSpace = const_cast<TArray<FTransform>&>(Mesh->GetComponentSpaceTransforms());
-	for (int32 BoneIndex = 1; BoneIndex < ComponentSpace.Num(); ++BoneIndex)
+	const FReferenceSkeleton& RefSkeleton = Mesh->GetSkinnedAsset()->GetRefSkeleton();
+	const int32 PelvisBoneIndex = RefSkeleton.FindBoneIndex(TEXT("pelvis"));
+	if (PelvisBoneIndex != INDEX_NONE && ComponentSpace.Num() == RefSkeleton.GetNum())
 	{
-		ComponentSpace[BoneIndex] = ComponentSpace[BoneIndex] * Shift;
+		TArray<bool> BelowPelvis;
+		BelowPelvis.Init(false, ComponentSpace.Num());
+		for (int32 BoneIndex = 1; BoneIndex < ComponentSpace.Num(); ++BoneIndex)
+		{
+			// (a bone comes after its parent in the reference skeleton)
+			BelowPelvis[BoneIndex] = BoneIndex == PelvisBoneIndex || BelowPelvis[RefSkeleton.GetParentIndex(BoneIndex)];
+			if (BelowPelvis[BoneIndex])
+			{
+				ComponentSpace[BoneIndex] = ComponentSpace[BoneIndex] * Shift;
+			}
+		}
 	}
 
 	if (Mesh->ShouldUseUpdateRateOptimizations())
