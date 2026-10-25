@@ -216,6 +216,8 @@ class LogicDecl(Decl):
     slot_events: bool = False        # `logic X : actor slot_events;` -- events are handled at the start of every tick slot, not only the first
     slot_events_pos: Pos | None = None
     order: list = field(default_factory=list)      # `logic X : actor before Peer, after Other;` -- (relation, peer name, position) in source order
+    flush_peers: bool = False        # `logic X : actor flush_peers;` -- the commands a peer queued in the calls of a block run with the block's own, at its end
+    flush_peers_pos: Pos | None = None
 
 
 @dataclass

@@ -468,6 +468,7 @@ class Module:
     post_update: "UpdateDef | None" = None                      # anim logic: the block that runs after the graph update (game thread)
     post_flush: bool = False                                    # anim logic: its commands run right after the post_update of the same frame
     slot_events: bool = False                                   # actor logic: events are handled at the start of every tick slot
+    flush_peers: bool = False                                   # actor logic: the commands the called peers queue run with this logic's own at the end of its block
     order: list[OrderDef] = field(default_factory=list)         # actor logic: tick slot order against peers
     methods: list[MethodDef] = field(default_factory=list)      # methods and views, in source order
     peers: list[PeerDef] = field(default_factory=list)
@@ -584,7 +585,7 @@ class Module:
 
     @property
     def uses_commands(self) -> bool:
-        return any(isinstance(n, Command) for _l, body in self.bodies() for n in walk_stmts(body))
+        return self.flush_peers or any(isinstance(n, Command) for _l, body in self.bodies() for n in walk_stmts(body))
 
 
 # ---- traversal ---------------------------------------------------------------------------------
@@ -755,7 +756,7 @@ def dump_stmts(stmts: list[Stmt], indent: int = 1) -> list[str]:
 
 def dump(m: Module) -> str:
     out = [f"library {m.name}" if m.is_library else f"logic {m.name}" + (f" : {m.kind}" if m.kind != "anim" else "") + (" post_flush" if m.post_flush else "")
-           + (" slot_events" if m.slot_events else "") + "".join(f" {o.relation} {o.peer}" for o in m.order)]
+           + (" slot_events" if m.slot_events else "") + (" flush_peers" if m.flush_peers else "") + "".join(f" {o.relation} {o.peer}" for o in m.order)]
     for lib in m.libs:
         out.append(f"use {lib.filename!r}")
     for en in m.enums:

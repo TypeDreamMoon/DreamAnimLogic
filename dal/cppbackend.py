@@ -781,7 +781,13 @@ class CppGen:
         self.consume_only = module.consume_slots() if self.phased else None   # the slots that sample the consume-on-read inputs (None: all)
         self.slots = [u.phase for u in module.updates] or [module.default_phase]
         self.queue_target = module.kind == "anim" and any(x.pub and not x.is_view for x in module.methods)
-        self.has_cmds = bool(self.cmds)
+        self.has_cmds = bool(self.cmds) or module.flush_peers
+        self.flush_peer_names: list[str] = []                            # `flush_peers`: the peers whose pub methods this logic calls at once
+        if module.flush_peers:
+            for _label, body in module.bodies():
+                for e in ir.walk_stmt_exprs(body):
+                    if isinstance(e, ir.CallPeer) and not e.queued and e.peer not in self.flush_peer_names:
+                        self.flush_peer_names.append(e.peer)
         self.hosth = self.actor or self.has_events or self.has_cmds or bool(self.world_queries) or bool(module.notifies)       # DalHost.h is part of the output
         kinds = {h.event for h in module.handlers if h not in self.notify_handlers}      # (a declared notify arrives through the router, not a delegate)
         self.bind_begin = bool(kinds & {"notify", "notify_begin"}) or (self.actor and bool(self.notify_names()))
@@ -1086,7 +1092,7 @@ class CppGen:
             out.append(Method("void", "DalEnqueue", "const DalHost::FCommand& DalCommand", doc="Queue a host command; it runs on the game thread after the update.", body=[
                 "FScopeLock DalLock(&DalQueueLock);",
                 "DalCommandQueue.Add(DalCommand);"]))
-            out.append(Method("void", "DalFlushCommands", doc="Game thread: run the queued host commands, oldest first.", body=[
+            flush_body = [
                 "TArray<DalHost::FCommand> DalPending;",
                 "{",
                 "\tFScopeLock DalLock(&DalQueueLock);",
@@ -1096,7 +1102,12 @@ class CppGen:
                 "for (const DalHost::FCommand& DalCommand : DalPending)",
                 "{",
                 "\tDalExecuteCommand(DalCommand);",
-                "}"]))
+                "}"]
+            flush_body += [f"DalHost::FlushPeerCommands({p}.Get(), 0);" for p in self.flush_peer_names]       # flush_peers: what the calls made the peers queue
+            callable_by_peers = any(x.pub and not x.is_view for x in m.methods)
+            out.append(Method("void", "DalFlushCommands", doc="Game thread: run the queued host commands, oldest first." + (
+                "  Public: a logic that declares flush_peers runs it on the peers it called." if callable_by_peers else ""),
+                access="public" if callable_by_peers else "private", body=flush_body))
             out.append(Method("void", "DalExecuteCommand", "const DalHost::FCommand& DalCommand", body=self.execute_body()))
         # ---- binding to the animation instance / input component
         if self.bind_anim:

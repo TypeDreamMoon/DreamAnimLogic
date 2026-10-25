@@ -517,6 +517,8 @@ class PyGen:
             L.append(f"{INDENT}DAL_POST_FLUSH = True")
         if m.slot_events:
             L.append(f"{INDENT}DAL_SLOT_EVENTS = True")
+        if m.flush_peers:
+            L.append(f"{INDENT}DAL_FLUSH_PEERS = True")
         if m.order:
             L.append(f"{INDENT}DAL_ORDER = (" + "".join(f"({o.relation!r}, {o.peer!r}, {o.logic!r}, {tuple(o.slots)!r}), " for o in m.order) + ")")
         if m.peers:

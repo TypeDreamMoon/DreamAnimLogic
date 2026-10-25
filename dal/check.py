@@ -650,6 +650,9 @@ class Checker:
         m = self.module
         self.focus(logic)
         m.slot_events = logic.slot_events
+        m.flush_peers = logic.flush_peers
+        if logic.flush_peers and not any(i.kind == "actor" for i in self.peer_ifaces.values()):
+            self.warn("DAL5096", "flush_peers hands over the commands that the actor peers queue in the calls of a block, and this logic has no actor peer", logic.flush_peers_pos or logic.pos)
         mine = [u.phase for u in m.updates] or [m.default_phase]
         for relation, peer, pos in logic.order:
             iface = self.peer_ifaces.get(peer)

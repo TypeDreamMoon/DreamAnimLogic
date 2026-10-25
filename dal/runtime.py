@@ -1458,6 +1458,7 @@ class LogicBase:
     DAL_POST_FLUSH = False        # anim logic with `post_flush`: update() and the entries leave the commands queued; post_update() hands them over
     DAL_SLOT_EVENTS = False       # actor logic with `slot_events`: the events are handled at the start of every tick slot, not only the first
     DAL_ORDER: tuple = ()         # actor logic: (relation, peer, peer logic, slots) -- in these tick slots the block runs 'before' / 'after' the peer's
+    DAL_FLUSH_PEERS = False       # actor logic with `flush_peers`: the commands a peer queued in the calls of a block run when this logic hands its own over
 
     def __init__(self, host, params: dict, peers: dict | None = None):
         from .hostapi import HostV1
@@ -1474,6 +1475,7 @@ class LogicBase:
         self._source = None           # the montage instance that raised the notify being handled (montage_stop_source)
         self._pending: list = []      # events posted by the caller
         self._cmds: list = []         # commands queued during the update
+        self._called: list = []       # `flush_peers`: the peers whose pub methods this logic called since it last handed its commands over
         known = {p[0] for p in self.DAL_PARAMS}
         unknown = sorted(set(params) - known)
         if unknown:
@@ -1543,6 +1545,8 @@ class LogicBase:
         if queued:
             other.dal_enqueue(method, args)
             return None
+        if self.DAL_FLUSH_PEERS and not any(other is p for p in self._called):
+            self._called.append(other)
         return other.dal_call(method, *args)
 
     # ---- events and commands (v1) ---------------------------------------------------------------------
@@ -1597,6 +1601,13 @@ class LogicBase:
                 fn(*args)
                 if name == "snapshot_pose":
                     self._took_snapshot(args[0])
+        called, self._called = self._called, []           # `flush_peers`: what the calls of the block made the peers queue runs now, in the order they were called
+        for other in called:
+            other.dal_flush()
+
+    def dal_flush(self) -> None:
+        """Hand the queued commands to the host now (a logic with `flush_peers` does it for the peers it called)."""
+        self._flush()
 
     def take_commands(self) -> list:
         """The commands queued since the last flush (and forget them) -- for hosts that execute them themselves."""
@@ -1604,6 +1615,9 @@ class LogicBase:
         for name, args in cmds:
             if name == "snapshot_pose":
                 self._took_snapshot(args[0])
+        called, self._called = self._called, []           # `flush_peers`: the commands the called peers queued follow
+        for other in called:
+            cmds = cmds + other.take_commands()
         return cmds
 
     def _took_snapshot(self, path: str) -> None:

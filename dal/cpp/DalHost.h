@@ -531,4 +531,20 @@ namespace DalHost
 			return C;
 		}
 	} // namespace Cmd
+
+	/** `flush_peers`: hands the commands that a peer queued in the calls of a block to the host now, with the commands of the block that called it.
+	 *  The peer is a logic with host commands and public methods (its DalFlushCommands is public); any other peer has nothing to hand over. */
+	template <typename TPeer>
+	auto FlushPeerCommands(TPeer* Peer, int) -> decltype(Peer->DalFlushCommands(), void())
+	{
+		if (Peer != nullptr)
+		{
+			Peer->DalFlushCommands();
+		}
+	}
+
+	template <typename TPeer>
+	void FlushPeerCommands(TPeer*, long)
+	{
+	}
 } // namespace DalHost

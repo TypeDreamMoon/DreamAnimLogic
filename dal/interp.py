@@ -344,6 +344,7 @@ class Interpreter:
         self._dt = 0.0
         self._pending = []
         self._cmds = []
+        self._called = []
         self._peer_queue = []
         self._begun = False
 
@@ -373,6 +374,8 @@ class Interpreter:
         if e.queued:
             other.dal_enqueue(e.method, tuple(args))
             return None
+        if self.module.flush_peers and not any(other is p for p in self._called):
+            self._called.append(other)
         result = other.dal_call(e.method, *args)
         return None if e.ty is VOID else coerce(e.ty, result)
 
@@ -407,6 +410,13 @@ class Interpreter:
                 fn(*args)
                 if name == "snapshot_pose":
                     self._took_snapshot(args[0])
+        called, self._called = self._called, []           # `flush_peers`: what the calls of the block made the peers queue runs now, in the order they were called
+        for other in called:
+            other.dal_flush()
+
+    def dal_flush(self) -> None:
+        """Hand the queued commands to the host now (a logic with `flush_peers` does it for the peers it called)."""
+        self.flush()
 
     def take_commands(self) -> list[tuple]:
         """The commands queued since the last flush (and forget them) -- for hosts that execute them themselves."""
@@ -414,6 +424,9 @@ class Interpreter:
         for name, args in cmds:
             if name == "snapshot_pose":
                 self._took_snapshot(args[0])
+        called, self._called = self._called, []           # `flush_peers`: the commands the called peers queued follow
+        for other in called:
+            cmds = cmds + other.take_commands()
         return cmds
 
     def _took_snapshot(self, path: str) -> None:
