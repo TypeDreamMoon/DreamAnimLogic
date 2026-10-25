@@ -5,9 +5,10 @@
 // VelocityBlend.ForwardAmount and calling Call(Self.RefreshGrounded): every state below has the name and type of the ALS member,
 // the `entry` functions are the UFUNCTIONs of the class, `GetControlRigInput` is the pure getter of the ControlRig node.
 //
-// Milestone M1 (als-dal-rewrite.md 7.3): everything except the parts marked "M2" -- foot lock (FeetState), the playback of the queued
-// transition / turn-in-place montages, the ground prediction sweep and the final ragdoll pose.  They keep their entries and states
-// (the .dab contract is complete but for RagdollingState.FinalRagdollPose) and carry a stub that says what is missing.
+// The whole class but the moving-base compensation (no moving bases in Blender: every `MovementBase.bHasRelativeLocation` branch of the C++ is
+// dead and left out, the places say so) and the absolute-rotation sync of the mesh for URO (AI:118-134, no counterpart).  Foot lock
+// (AI:1245-1573), the playback of the queued transition / turn-in-place montages (AI:1780-2046), the ground prediction sweep (AI:1142-1217),
+// the final ragdoll pose (AI:2064) and the notifies of the instance (Notifies/*) are in; the .dab contract is complete (82 of 82 paths).
 //
 // Frame:  NativeUpdateAnimation (game thread, AI:98) and NativeThreadSafeUpdateAnimation (worker thread, AI:170) are the two halves of
 // update(dt); the entries run after it, when the animation graph calls Call(Self.X); NativePostUpdateAnimation (AI:194), which the
@@ -17,9 +18,6 @@ logic AlsAnimationInstance : anim post_flush;
 use "als_lib.dal";
 
 param Settings: AlsAnimationInstanceSettings;                             // AI.h:40  (.dab: Defaults = { Settings = AIS_Als_Default; })
-// ALS reads Character->GetSettings()->TeleportDistanceThreshold (AI:162-164).  A peer input cannot reach into the settings of the peer
-// in the generated C++ (language gap, als-dal-rewrite.md section 7, A3), so the value is a parameter of its own; its default is CS_Als_Default's.
-param TeleportDistanceThreshold: float = 50.0;
 peer Character: AlsCharacter;                                             // AI.h:43
 
 // ---- what NativeUpdateAnimation copies from the character (AI:140-146, :381-385, :688-718, :162-164) ----------------------------------
@@ -33,11 +31,12 @@ input CharacterLocomotionAction: AlsLocomotionAction <- Character.LocomotionActi
 input CharacterLocomotion: AlsLocomotionState <- Character.LocomotionState;         // Character->GetLocomotionState()
 input CharacterView: AlsViewState <- Character.ViewState;                           // Character->GetViewState()
 input CharacterRagdollingVelocity: vec3 <- Character.RagdollingState.Velocity;      // Character->GetRagdollingState().Velocity (AI:2061)
+input TeleportDistanceThreshold: float <- Character.Settings.TeleportDistanceThreshold;   // Character->GetSettings()->TeleportDistanceThreshold (AI:164)
 
 // ---- host reads (game thread, sampled at the start of update) --------------------------------------------------------------------
 input ActorLocation: vec3 <- host.actor_location;                         // AI:745   Proxy.GetActorTransform()
 input ActorRotation: quat <- host.actor_rotation;                         // AI:747
-input ActorScale: float <- host.actor_scale;                              // AI:784   (ALS: the mesh component's scale Z)
+input MeshScale: float <- host.mesh_scale;                                // AI:784   Proxy.GetComponentTransform().GetScale3D().Z
 input CapsuleRadius: float <- host.capsule_radius;                        // AI:788
 input CapsuleHalfHeight: float <- host.capsule_half_height;               // AI:789
 input MovementMaxAcceleration: float <- host.max_acceleration;            // AI:709   CMC->GetMaxAcceleration()
@@ -45,6 +44,19 @@ input MovementMaxBrakingDeceleration: float <- host.max_braking_deceleration;   
 input MovementWalkableFloorZ: float <- host.walkable_floor_z;             // AI:711
 input ActorReady: bool <- host.actor_ready;                               // AI:227   Character->HasActorRegisteredAllComponents()
 input WorldTime: float <- host.time;                                      // AI:379   GetWorld()->GetTimeSeconds()
+input GlobalTimeDilation: float <- host.time_dilation;                    // AI:116   GetWorld()->GetWorldSettings()->GetEffectiveTimeDilation()
+input CustomTimeDilation: float <- host.actor_time_dilation;              // AI:114   Character->CustomTimeDilation
+input RealDeltaTime: float <- host.real_delta_time;                       // AI:115   GetWorld()->DeltaRealTimeSeconds
+
+// ---- the pose of the previous evaluation, read by the foot lock (AI:1245-1295, :1307) ------------------------------------------------
+input MeshTransform: transform <- host.mesh_world_transform;              // AI:1307  Proxy.GetComponentTransform(): the mesh component, now
+input PelvisBoneTransform: transform <- host.bone_component_transform("pelvis");         // AI:1250  GetSocketTransform(pelvis, RTS_Component)
+input FootLeftIkBoneTransform: transform <- host.bone_world_transform("ik_foot_l");      // AI:1279  bUseFootIkBones: GetSocketTransform(ik_foot_l)
+input FootRightIkBoneTransform: transform <- host.bone_world_transform("ik_foot_r");     // AI:1288
+// The virtual bones are called "VB foot_l" / "VB foot_r" in UE; a host argument of the language is an identifier (no space), so the
+// reads spell them VB_foot_l / VB_foot_r and the host maps the underscore back (als-dal-rewrite.md section 7, A5).
+input FootLeftVirtualBoneTransform: transform <- host.bone_world_transform("VB_foot_l"); // AI:1281  !bUseFootIkBones
+input FootRightVirtualBoneTransform: transform <- host.bone_world_transform("VB_foot_r"); // AI:1290
 
 // ---- animation curves of the previous evaluation (GetCurveValue; AI:288-375 read the same map, 0 when a curve is missing) ----------
 input CurveLayerHead: float <- host.anim_curve("LayerHead");                                          // UAlsConstants::Layer*CurveName
@@ -81,6 +93,10 @@ input CurveGroundPredictionBlock: float <- host.anim_curve("GroundPredictionBloc
 input CurveAllowTransitions: float <- host.anim_curve("AllowTransitions");
 input CurveFootPlanted: float <- host.anim_curve("FootPlanted");
 input CurveFeetCrossing: float <- host.anim_curve("FeetCrossing");
+input CurveFootLeftIk: float <- host.anim_curve("FootLeftIk");
+input CurveFootLeftLock: float <- host.anim_curve("FootLeftLock");
+input CurveFootRightIk: float <- host.anim_curve("FootRightIk");
+input CurveFootRightLock: float <- host.anim_curve("FootRightLock");
 
 // ---- state: the names and types a .dab reads (AI.h:67-143) ---------------------------------------------------------------------------
 state ViewMode: AlsViewMode = AlsViewMode.ThirdPerson;
@@ -113,15 +129,60 @@ state RagdollingState: AlsRagdollingAnimationState;
 // Indicates that the animation instance has not been updated in a long time, so its current state may not be correct (AI.h:48).
 state bPendingUpdate: bool = true;
 state DeltaTimeWithoutTimeDilation: float = 1.0;                          // AI.h:51
-state TeleportedTime: float;                                              // AI.h:58   (read by the foot lock: M2)
+state PreviousGlobalTimeDilation: float = 1.0;                            // AI.h:54
+state TeleportedTime: float;                                              // AI.h:58   (read by the foot lock)
+
+// The reference skeleton, read once (AI:50-86): from foot_l / foot_r up the parents to the bone whose parent is the pelvis, its translation in
+// the reference pose (the direction of the thigh in pelvis space).  The host gives zero when there is no such path (ALS leaves the default).
+input ThighLeftTranslation: vec3 <- host.ref_path_child_translation("foot_l", "pelvis");
+input ThighRightTranslation: vec3 <- host.ref_path_child_translation("foot_r", "pelvis");
+
+// ---- notifies (Source/ALS/Public/Notifies/*.h, Private/Notifies/*.cpp) ----------------------------------------------------------------
+// The classes keep the names of ALS's (without the U); the animation assets reference them by class and carry the properties as payload
+// (als-dal-rewrite.md 6.6).  The two other logic notifies are the character's: UAlsAnimNotifyState_SetLocomotionAction calls
+// Character->SetLocomotionAction and UAlsAnimNotifyState_SetRootMotionScale sets the root motion translation scale (AlsCharacter.dal).
+// The footstep effects (AlsAnimNotify_FootstepEffects) and the camera shake stay native project code.
+
+// UAlsAnimNotify_SetGroundedEntryMode: Notify() hands the tag to the animation instance (SetGroundedEntryMode, AI.h:382).
+notify AlsAnimNotify_SetGroundedEntryMode cpp "AlsAnimNotify_SetGroundedEntryMode" { GroundedEntryMode: AlsGroundedEntryMode; }
+
+// UAlsAnimNotifyState_EarlyBlendOut: a branching point notify state; every tick, if the character is in one of the checked states, the montage
+// the notify belongs to starts to blend out (AlsAnimNotifyState_EarlyBlendOut.h:10-37).
+notify_state AlsAnimNotifyState_EarlyBlendOut cpp "AlsAnimNotifyState_EarlyBlendOut" branching {
+    BlendOutDuration: float = 0.25;
+    bCheckInput: bool = true;
+    bCheckLocomotionMode: bool = true;
+    bCheckRotationMode: bool = true;
+    bCheckStance: bool = true;
+    LocomotionModeEquals: AlsLocomotionMode = AlsLocomotionMode.InAir;
+    RotationModeEquals: AlsRotationMode = AlsRotationMode.Aiming;
+    StanceEquals: AlsStance = AlsStance.Crouching;
+}
 
 // ---- the entry points the graph calls --------------------------------------------------------------------------------------------------
 // (the 17 `linked` entries are the forwarders of UAlsLinkedAnimationInstance, LI:58-192; the rest are called as Main.X(...) on this instance)
 
+// NativeInitializeAnimation (AI:29-88), run at NativeBeginPlay (the reference skeleton is the same): the axis of each thigh in pelvis space,
+// the direction of the first bone below the pelvis on the way from the foot up, which the foot lock limits the twist of the legs with.
+on begin_play {
+    // FVector3f::Normalize() (AI:81) leaves a vector it cannot normalize as it is, and the default stays when there is no path (AI:57, :66).
+    if (length_sq(ThighLeftTranslation) > SMALL_NUMBER) {
+        FeetState.Left.ThighAxisPelvisSpace = normalize(ThighLeftTranslation);                   // AI:85
+    }
+    if (length_sq(ThighRightTranslation) > SMALL_NUMBER) {
+        FeetState.Right.ThighAxisPelvisSpace = normalize(ThighRightTranslation);                 // AI:86
+    }
+}
+
 update(dt) {
     // ---- NativeUpdateAnimation, the game thread half (AI:98-168) ----
-    // (AI:111-134 -- time dilation and the absolute mesh rotation of URO -- have no host reads / no Blender counterpart: als-dal-rewrite.md section 7, A3)
-    DeltaTimeWithoutTimeDilation = dt;
+    // (AI:118-134, the absolute rotation of the mesh for URO, has no Blender counterpart.)
+
+    // Use the previous global time dilation because this frame's delta time may not yet be affected by the current global time
+    // dilation, so unscaling it would produce an incorrect result.
+    let time_dilation = PreviousGlobalTimeDilation * CustomTimeDilation;                  // AI:114
+    DeltaTimeWithoutTimeDilation = time_dilation > SMALL_NUMBER ? dt / time_dilation : RealDeltaTime;   // AI:115
+    PreviousGlobalTimeDilation = GlobalTimeDilation;                                      // AI:116
 
     ViewMode = CharacterViewMode;                                          // AI:140
     LocomotionMode = CharacterLocomotionMode;
@@ -139,8 +200,8 @@ update(dt) {
     refresh_view_on_game_thread();                                         // AI:156
     refresh_locomotion_on_game_thread(dt);                                 // AI:157
     refresh_in_air_on_game_thread();                                       // AI:158
-    refresh_feet_on_game_thread();                                         // AI:159  (M2)
-    refresh_ragdolling_on_game_thread();                                   // AI:160  (M2)
+    refresh_feet_on_game_thread();                                         // AI:159
+    refresh_ragdolling_on_game_thread();                                   // AI:160
 
     if (!bPendingUpdate && length_sq(LocomotionState.LocationWorldSpace - previous_location) > square(TeleportDistanceThreshold)) {
         mark_teleported();                                                 // AI:162-167
@@ -154,7 +215,7 @@ update(dt) {
     refresh_layering();                                                    // AI:187
     refresh_pose();                                                        // AI:188
     refresh_view(dt);                                                      // AI:189
-    refresh_feet(dt);                                                      // AI:190  (M2)
+    refresh_feet(dt);                                                      // AI:190
     refresh_transitions();                                                 // AI:191
 }
 
@@ -183,8 +244,23 @@ method mark_teleported() {
     TeleportedTime = WorldTime;
 }
 
-pub method SetGroundedEntryMode(NewGroundedEntryMode: AlsGroundedEntryMode) {   // AI.h:382 (the AlsAnimNotify_SetGroundedEntryMode notify, M2/L9)
+pub method SetGroundedEntryMode(NewGroundedEntryMode: AlsGroundedEntryMode) {   // AI.h:382
     GroundedEntryMode = NewGroundedEntryMode;
+}
+
+on notify AlsAnimNotify_SetGroundedEntryMode {                             // AlsAnimNotify_SetGroundedEntryMode.cpp:30
+    SetGroundedEntryMode(payload.GroundedEntryMode);
+}
+
+// AlsAnimNotifyState_EarlyBlendOut.cpp:44-69 (BranchingPointNotifyTick).  The character is read through the peer inputs, which are sampled
+// at the start of the update that handles the event.
+on notify_tick AlsAnimNotifyState_EarlyBlendOut {
+    if ((payload.bCheckInput && CharacterLocomotion.bHasInput) ||
+        (payload.bCheckLocomotionMode && CharacterLocomotionMode == payload.LocomotionModeEquals) ||
+        (payload.bCheckRotationMode && CharacterRotationMode == payload.RotationModeEquals) ||
+        (payload.bCheckStance && CharacterStance == payload.StanceEquals)) {
+        host.montage_stop_source(payload.BlendOutDuration);                // MontageInstance->Stop(the montage's own blend out with BlendTime = BlendOutDuration)
+    }
 }
 
 // ---- movement base (AI:259-286) -------------------------------------------------------------------------------------------------
@@ -497,7 +573,7 @@ method refresh_locomotion_on_game_thread(dt: float) {
                                                 ? unwind_degrees(LocomotionState.RotationWorldSpace.yaw - previous_yaw_angle) / dt   // AI:779
                                                 : 0.0;
 
-    LocomotionState.ScaleWorldSpace = ActorScale;                                                    // AI:784
+    LocomotionState.ScaleWorldSpace = MeshScale;                                                     // AI:784
     LocomotionState.CapsuleRadius = CapsuleRadius;                                                   // AI:788
     LocomotionState.CapsuleHalfHeight = CapsuleHalfHeight;
 }
@@ -705,7 +781,7 @@ entry RefreshCrouchingMovement() linked {                                       
                                   : clamp(speed / animated_speed, KINDA_SMALL_NUMBER, 2.0);          // AI:1094
 }
 
-// ---- in air (AI:1099-1243; the ground prediction sweep is M2) ---------------------------------------------------------------------------
+// ---- in air (AI:1099-1243) -------------------------------------------------------------------------------------------------------------
 method refresh_in_air_on_game_thread() {                                                             // AI:1099
     InAirState.bJumped = !bPendingUpdate && (InAirState.bJumped || InAirState.bJumpRequested);       // AI:1103
     InAirState.bJumpRequested = false;
@@ -744,10 +820,32 @@ method refresh_ground_prediction() {                                            
         return;
     }
 
-    // M2 (A6, AI:1163-1216): the capsule sweep along the velocity direction (host.sweep_capsule, a thread-safe query), the walkable
-    // test of the hit and GroundPredictionAmountCurve.eval(hit.time) * allowance_amount.  Until then nothing is predicted:
-    // the amount stays 0, so the pelvis of GetControlRigInput gets no offset in the air and the graph does not blend to landing early.
-    InAirState.GroundPredictionAmount = 0.0;
+    let sweep_start_location = LocomotionState.LocationWorldSpace;                                   // AI:1163
+
+    let min_vertical_velocity = -4000.0;                                                             // AI:1165
+    let max_vertical_velocity = -200.0;
+
+    var velocity_direction = LocomotionState.VelocityWorldSpace;                                     // AI:1168
+    velocity_direction.z = clamp(velocity_direction.z, min_vertical_velocity, max_vertical_velocity);
+    velocity_direction = normalize(velocity_direction);                                              // (the vector is at least 200 long: it can be normalized)
+
+    let min_sweep_distance = 150.0;                                                                  // AI:1172
+    let max_sweep_distance = 2000.0;
+
+    let sweep_vector = velocity_direction * map_range_clamped(max_vertical_velocity, min_vertical_velocity, min_sweep_distance, max_sweep_distance,
+                                                              InAirState.VerticalVelocityWorldSpace) * LocomotionState.ScaleWorldSpace;   // AI:1175
+
+    // A thread-safe query (the worker thread of the animation graph asks it in ALS too: GetWorld()->SweepSingleByChannel, AI:1183).
+    let ground_hit = host.sweep_capsule(sweep_start_location, sweep_start_location + sweep_vector, LocomotionState.CapsuleRadius,
+                                 LocomotionState.CapsuleHalfHeight, Settings.InAir.GroundPredictionSweepChannel,
+                                 Settings.InAir.GroundPredictionSweepResponses);
+
+    // Consider the ground valid, even if the trace started in penetration.
+    let ground_valid = ground_hit.blocking && ground_hit.normal.z >= LocomotionState.WalkableFloorAngleCos;        // AI:1190 (ImpactNormal)
+
+    InAirState.GroundPredictionAmount = ground_valid
+                                            ? Settings.InAir.GroundPredictionAmountCurve.eval(ground_hit.time) * allowance_amount   // AI:1214
+                                            : 0.0;
 }
 
 method refresh_in_air_lean(dt: float) {                                                              // AI:1219
@@ -770,22 +868,229 @@ method refresh_in_air_lean(dt: float) {                                         
     }
 }
 
-// ---- feet (AI:1245-1573): M2, the foot lock ---------------------------------------------------------------------------------------------
+// ---- feet: the foot lock (AI:1245-1573) -----------------------------------------------------------------------------------------------
+// The pelvis and the feet of the pose of the previous evaluation are read on the game thread; the worker thread half locks them.  C++ passes a
+// FAlsFootUpdateContext with a pointer to the foot; here the foot goes in and out as a value (the views below return the changed copy).
 method refresh_feet_on_game_thread() {                                                               // AI:1245
-    // M2 (A5): the pelvis and foot IK bone transforms of the previous evaluation (host.bone_*_transform), bValid / bBecameValid and
-    // the target transforms of both feet.  FeetState.bValid stays false until then, which is a valid state of ALS (it is what the
-    // first frames look like): GetControlRigInput reports bFootTransformsValid = false and the ControlRig leaves the feet alone.
+    if (bPendingUpdate) {                                                                            // AI:1252
+        FeetState.bValid = false;
+        FeetState.bBecameValid = false;
+    } else if (!FeetState.bValid) {                                                                  // AI:1257
+        // USkinnedMeshComponent::GetSocketTransform() can return an invalid transform in some cases, so we need to check this.
+        if (is_identity_no_scale(PelvisBoneTransform)) {                                             // AI:1263
+            return;
+        }
+
+        FeetState.bValid = true;
+        FeetState.bBecameValid = true;
+    } else {
+        FeetState.bBecameValid = false;                                                              // AI:1273
+    }
+
+    FeetState.PelvisRotation = PelvisBoneTransform.rotation;                                         // AI:1276
+
+    let foot_left_target_transform = Settings.General.bUseFootIkBones ? FootLeftIkBoneTransform : FootLeftVirtualBoneTransform;      // AI:1278
+    FeetState.Left.TargetLocationWorldSpace = foot_left_target_transform.location;                   // AI:1284
+    FeetState.Left.TargetRotationWorldSpace = foot_left_target_transform.rotation;
+
+    let foot_right_target_transform = Settings.General.bUseFootIkBones ? FootRightIkBoneTransform : FootRightVirtualBoneTransform;   // AI:1287
+    FeetState.Right.TargetLocationWorldSpace = foot_right_target_transform.location;                 // AI:1293
+    FeetState.Right.TargetRotationWorldSpace = foot_right_target_transform.rotation;
 }
 
 method refresh_feet(dt: float) {                                                                     // AI:1297
-    // M2 (A5): ProcessFootLockTeleport / ProcessFootLockBaseChange / RefreshFootLock / ConstrainFootLock (AI:1307-1573).
-    // ALS returns here while !bValid; the two amounts below are plain curve reads (AI:1304-1305) that the standing graph blends
-    // the legs with, so they are produced already.
-    FeetState.FootPlantedAmount = clamp(CurveFootPlanted, -1.0, 1.0);
-    FeetState.FeetCrossingAmount = clamp01(CurveFeetCrossing);
+    if (!FeetState.bValid) {                                                                         // AI:1299
+        return;
+    }
+
+    FeetState.FootPlantedAmount = clamp(CurveFootPlanted, -1.0, 1.0);                                // AI:1304
+    FeetState.FeetCrossingAmount = clamp01(CurveFeetCrossing);                                       // AI:1305
+
+    var context = AlsFootUpdateContext(ComponentTransform: MeshTransform,                            // AI:1307-1313 (Proxy.GetComponentTransform())
+                                       ComponentTransformInverse: inverse(MeshTransform),
+                                       FrameTime: dt);
+
+    context.IkAmount = clamp01(CurveFootLeftIk);                                                     // AI:1316
+    context.LockAmount = clamp01(CurveFootLeftLock);
+
+    var foot_left = process_foot_lock_teleport(FeetState.Left, context);                             // AI:1319
+    foot_left = process_foot_lock_base_change(foot_left, context);                                   // AI:1320
+    FeetState.Left = refresh_foot_lock(foot_left, context);                                          // AI:1321
+
+    context.IkAmount = clamp01(CurveFootRightIk);                                                    // AI:1324
+    context.LockAmount = clamp01(CurveFootRightLock);
+
+    var foot_right = process_foot_lock_teleport(FeetState.Right, context);                           // AI:1327
+    foot_right = process_foot_lock_base_change(foot_right, context);                                 // AI:1328
+    FeetState.Right = refresh_foot_lock(foot_right, context);                                        // AI:1329
 }
 
-// ---- transitions (AI:1575-1820; the montage playback is M2 / L9) ------------------------------------------------------------------------
+view process_foot_lock_teleport(foot: AlsFootState, context: AlsFootUpdateContext) -> AlsFootState {   // AI:1332
+    var foot_state = foot;
+
+    // Due to network smoothing, we assume that teleportation occurs over a short period of time, not in one frame, since after accepting
+    // the teleportation event, the character can still be moved for some indefinite time, and this must be taken into account in order
+    // to avoid foot lock glitches.
+    if (FeetState.bBecameValid || WorldTime - TeleportedTime > 0.2 || !is_relevant(context.IkAmount * foot_state.LockAmount)) {     // AI:1340 (TimeSince)
+        return foot_state;
+    }
+
+    foot_state.LockLocationWorldSpace = transform_position(context.ComponentTransform, foot_state.LockLocation);          // AI:1346
+    foot_state.LockRotationWorldSpace = transform_rotation(context.ComponentTransform, foot_state.LockRotation);
+
+    // (AI:1349-1357: the movement base space of the lock, dead without moving bases.)
+    return foot_state;
+}
+
+view process_foot_lock_base_change(foot: AlsFootState, context: AlsFootUpdateContext) -> AlsFootState {   // AI:1360
+    var foot_state = foot;
+
+    // (MovementBase.bBaseChanged is never true without moving bases.)
+    if (!FeetState.bBecameValid || !is_relevant(context.IkAmount * foot_state.LockAmount)) {         // AI:1364
+        return foot_state;
+    }
+
+    if (FeetState.bBecameValid) {                                                                    // AI:1370
+        foot_state.LockLocationWorldSpace = foot_state.TargetLocationWorldSpace;
+        foot_state.LockRotationWorldSpace = foot_state.TargetRotationWorldSpace;
+    }
+
+    // No movement base (AI:1376-1389): the lock in the space of the base is the origin.
+    foot_state.LockLocationMovementBaseSpace = VEC3_ZERO;
+    foot_state.LockRotationMovementBaseSpace = QUAT_IDENTITY;
+
+    foot_state.LockLocation = transform_position(context.ComponentTransformInverse, foot_state.LockLocationWorldSpace);          // AI:1391
+    foot_state.LockRotation = transform_rotation(context.ComponentTransformInverse, foot_state.LockRotationWorldSpace);
+    return foot_state;
+}
+
+view refresh_foot_lock(foot: AlsFootState, context: AlsFootUpdateContext) -> AlsFootState {          // AI:1395
+    var foot_state = foot;
+    var new_lock_amount = context.LockAmount;
+
+    if (LocomotionState.bMovingSmooth || LocomotionMode != AlsLocomotionMode.Grounded) {             // AI:1400
+        // Smoothly disable foot lock if the character is moving or in the air, instead of relying on the curve value from the animation blueprint.
+        let moving_decrease_speed = 5.0;                                                             // AI:1405
+        let not_grounded_decrease_speed = 0.6;
+
+        new_lock_amount = FeetState.bBecameValid
+                              ? 0.0
+                              : max(0.0, min(new_lock_amount, foot_state.LockAmount - context.FrameTime *
+                                             (LocomotionState.bMovingSmooth ? moving_decrease_speed : not_grounded_decrease_speed)));   // AI:1408
+    }
+
+    if (!Settings.FootLock.bAllowFootLock || !is_relevant(context.IkAmount * new_lock_amount)) {     // AI:1416
+        if (foot_state.LockAmount > 0.0) {                                                           // AI:1418
+            foot_state.LockAmount = 0.0;
+
+            foot_state.LockLocationWorldSpace = VEC3_ZERO;
+            foot_state.LockRotationWorldSpace = QUAT_IDENTITY;
+
+            foot_state.LockLocationMovementBaseSpace = VEC3_ZERO;
+            foot_state.LockRotationMovementBaseSpace = QUAT_IDENTITY;
+
+            foot_state.LockLocation = VEC3_ZERO;
+            foot_state.LockRotation = QUAT_IDENTITY;
+        }
+
+        foot_state.FinalLocation = transform_position(context.ComponentTransformInverse, foot_state.TargetLocationWorldSpace);       // AI:1432
+        foot_state.FinalRotation = transform_rotation(context.ComponentTransformInverse, foot_state.TargetRotationWorldSpace);
+        return foot_state;
+    }
+
+    let new_amount_equal_one = is_full_weight(new_lock_amount);                                      // AI:1437
+    let new_amount_greater_than_previous = new_lock_amount > foot_state.LockAmount;                  // AI:1438
+
+    // Update the foot lock amount only if the new amount is less than the current amount or equal to 1. This allows the foot to blend out
+    // from a locked location or lock to a new location, but never blend in.
+    if (new_amount_equal_one) {                                                                      // AI:1443
+        if (new_amount_greater_than_previous) {                                                      // AI:1445
+            // If the new foot lock amount is 1 and the previous amount is less than 1, then save the new foot lock location and rotation.
+            var target_location = VEC3_ZERO;
+            var target_rotation = QUAT_IDENTITY;
+
+            if (FeetState.bBecameValid) {                                                            // AI:1452
+                target_location = foot_state.TargetLocationWorldSpace;
+                target_rotation = foot_state.TargetRotationWorldSpace;
+            } else {
+                // We use the final transform here (the transform of the foot from the previous frame, but without the foot IK applied),
+                // since using the target transform may cause the foot to teleport.
+                target_location = transform_position(context.ComponentTransform, foot_state.FinalLocation);       // AI:1462
+                target_rotation = transform_rotation(context.ComponentTransform, foot_state.FinalRotation);
+            }
+
+            // No movement base (AI:1466-1479).
+            foot_state.LockLocationMovementBaseSpace = VEC3_ZERO;
+            foot_state.LockRotationMovementBaseSpace = QUAT_IDENTITY;
+
+            if (foot_state.LockAmount <= 0.9) {                                                      // AI:1481
+                // Keep the same lock location and rotation when the previous lock amount is close to 1 to get rid of the foot
+                // "teleportation" issue.
+                foot_state.LockLocationWorldSpace = target_location;                                 // AI:1486
+                foot_state.LockRotationWorldSpace = target_rotation;
+
+                foot_state.LockLocation = transform_position(context.ComponentTransformInverse, foot_state.LockLocationWorldSpace);   // AI:1489
+                foot_state.LockRotation = transform_rotation(context.ComponentTransformInverse, foot_state.LockRotationWorldSpace);
+            }
+        }
+
+        foot_state.LockAmount = 1.0;                                                                 // AI:1497
+    } else if (!new_amount_greater_than_previous) {                                                  // AI:1499
+        foot_state.LockAmount = new_lock_amount;
+    }
+
+    // (AI:1504-1510: the lock in the world from the movement base, dead without moving bases.)
+
+    foot_state.LockLocation = transform_position(context.ComponentTransformInverse, foot_state.LockLocationWorldSpace);   // AI:1512
+    foot_state.LockRotation = transform_rotation(context.ComponentTransformInverse, foot_state.LockRotationWorldSpace);
+
+    foot_state = constrain_foot_lock(foot_state);                                                    // AI:1515
+
+    let final_location = lerp(foot_state.TargetLocationWorldSpace, foot_state.LockLocationWorldSpace, foot_state.LockAmount);   // AI:1517
+
+    let final_rotation = normalize(fast_lerp(foot_state.TargetRotationWorldSpace, foot_state.LockRotationWorldSpace, foot_state.LockAmount));   // AI:1519
+
+    foot_state.FinalLocation = transform_position(context.ComponentTransformInverse, final_location);   // AI:1522
+    foot_state.FinalRotation = transform_rotation(context.ComponentTransformInverse, final_rotation);
+    return foot_state;
+}
+
+view constrain_foot_lock(foot: AlsFootState) -> AlsFootState {                                       // AI:1526
+    var foot_state = foot;
+
+    // Limit the location of the locked foot to prevent legs from twisting into a spiral when the character rotates quickly.
+    let thigh_axis = rotate(FeetState.PelvisRotation, foot_state.ThighAxisPelvisSpace);              // AI:1530
+    let thigh_delta_angle = angle_between_signed_xy(thigh_axis, foot_state.LockLocation);            // AI:1531
+
+    if (abs(thigh_delta_angle) > Settings.FootLock.ThighAngleLimit + KINDA_SMALL_NUMBER) {           // AI:1533
+        let clamped_angle = clamp(thigh_delta_angle, -Settings.FootLock.ThighAngleLimit, Settings.FootLock.ThighAngleLimit);   // AI:1535
+        let offset_rotation = quat_from_axis_angle(vec3(0.0, 0.0, 1.0), deg_to_rad(clamped_angle - thigh_delta_angle));        // AI:1536
+
+        foot_state.LockLocation = rotate(offset_rotation, foot_state.LockLocation);                  // AI:1538
+        foot_state.LockRotation = normalize(offset_rotation * foot_state.LockRotation);              // AI:1539
+
+        // The proxy's component transform of the worker thread (AI:1542) is the one of the game thread.
+        foot_state.LockLocationWorldSpace = transform_position(MeshTransform, foot_state.LockLocation);   // AI:1544
+        foot_state.LockRotationWorldSpace = transform_rotation(MeshTransform, foot_state.LockRotation);
+
+        // (AI:1547-1555: the lock in the space of the movement base, dead without moving bases.)
+    }
+
+    // Limit the rotation of the locked foot.
+    let foot_delta_angle = rad_to_deg(twist_angle(foot_state.LockRotationWorldSpace * quat_inverse(foot_state.TargetRotationWorldSpace),
+                                                  vec3(0.0, 0.0, 1.0)));                             // AI:1560
+
+    if (abs(foot_delta_angle) > Settings.FootLock.FootAngleLimit + KINDA_SMALL_NUMBER) {            // AI:1566
+        let clamped_angle = clamp(foot_delta_angle, -Settings.FootLock.FootAngleLimit, Settings.FootLock.FootAngleLimit);       // AI:1568
+        let offset_rotation = quat_from_axis_angle(vec3(0.0, 0.0, 1.0), deg_to_rad(clamped_angle - foot_delta_angle));          // AI:1569
+
+        foot_state.LockRotationWorldSpace = offset_rotation * foot_state.LockRotationWorldSpace;     // AI:1571
+    }
+
+    return foot_state;
+}
+
+// ---- transitions (AI:1575-1820) --------------------------------------------------------------------------------------------------------
 entry PlayQuickStopAnimation() {                                                                   // AI:1575  (.dab: Notifies = { StopQuick = Main.PlayQuickStopAnimation(); })
     if (RotationMode != AlsRotationMode.VelocityDirection) {                                         // AI:1582
         play_transition_left_animation(Settings.Transitions.QuickStopBlendInDuration, Settings.Transitions.QuickStopBlendOutDuration,
@@ -887,8 +1192,6 @@ entry RefreshDynamicTransitions() linked {                                      
     // Check each foot to see if the location difference between the foot lock and its desired / target location exceeds a
     // threshold. If it does, play an additive transition animation on that foot. The currently set transition plays the second
     // half of a 2 foot transition animation, so that only a single foot moves.
-    // M2 (A5): the foot lock fills FeetState.*.LockAmount / TargetLocationWorldSpace / LockLocationWorldSpace; until then every
-    // LockAmount is 0, no transition is allowed and this entry only keeps the frame delay counting.
     let foot_lock_distance_threshold_squared = square(Settings.DynamicTransitions.FootLockDistanceThreshold * LocomotionState.ScaleWorldSpace);   // AI:1717
 
     let foot_lock_left_distance_squared = length_sq(FeetState.Left.TargetLocationWorldSpace - FeetState.Left.LockLocationWorldSpace);   // AI:1721
@@ -931,9 +1234,10 @@ method play_queued_transition_animation() {                                     
         return;
     }
 
-    // M2 (A5 / L9): host.play_slot_animation(TransitionsState.QueuedTransitionSequence, "Transition", BlendIn, BlendOut, PlayRate, 1, 0.0,
-    // StartTime) -- PlaySlotAnimationAsDynamicMontage (AI:1789), the command of the dynamic montage (G22).  The queue is consumed
-    // as in ALS so that it does not keep a stale sequence.
+    // PlaySlotAnimationAsDynamicMontage (AI:1789): loop count 1, blend out trigger time 0.
+    host.play_slot_animation(TransitionsState.QueuedTransitionSequence, "Transition", TransitionsState.QueuedTransitionBlendInDuration,
+                             TransitionsState.QueuedTransitionBlendOutDuration, TransitionsState.QueuedTransitionPlayRate, 1, 0.0,
+                             TransitionsState.QueuedTransitionStartTime);
 
     TransitionsState.QueuedTransitionSequence = none;                                                // AI:1793
     TransitionsState.QueuedTransitionBlendInDuration = 0.0;
@@ -947,8 +1251,9 @@ method stop_queued_transition_and_turn_in_place_animations() {                  
         return;
     }
 
-    // M2 (A5 / L9): host.stop_montages_with_slot("Transition" / "TurnInPlaceStanding" / "TurnInPlaceCrouching",
-    // TransitionsState.QueuedStopTransitionsBlendOutDuration)  (AI:1809-1816).
+    host.stop_montages_with_slot("Transition", TransitionsState.QueuedStopTransitionsBlendOutDuration);                // AI:1809
+    host.stop_montages_with_slot("TurnInPlaceStanding", TransitionsState.QueuedStopTransitionsBlendOutDuration);      // AI:1812
+    host.stop_montages_with_slot("TurnInPlaceCrouching", TransitionsState.QueuedStopTransitionsBlendOutDuration);      // AI:1815
 
     TransitionsState.bStopTransitionsQueued = false;                                                 // AI:1818
     TransitionsState.QueuedStopTransitionsBlendOutDuration = -1.0;
@@ -1001,7 +1306,7 @@ entry RefreshRotateInPlace(dt) linked {                                         
                                       : damper_exact(RotateInPlaceState.PlayRate, play_rate, dt, play_rate_interpolation_half_life);   // AI:1887
 }
 
-// ---- turn in place (AI:1893-2046; the selection of the turn and its playback are M2) --------------------------------------------------------
+// ---- turn in place (AI:1893-2046) ------------------------------------------------------------------------------------------------------
 view is_turn_in_place_allowed() -> bool {                                                            // AI:1893 (virtual in ALS)
     return RotationMode == AlsRotationMode.ViewDirection && ViewMode != AlsViewMode.FirstPerson;
 }
@@ -1043,15 +1348,67 @@ entry RefreshTurnInPlace(dt) linked {                                           
         return;
     }
 
-    // M2 (A5, AI:1955-2009): select one of the eight turn settings (standing / crouching x 90 / 180 x left / right: bTurnLeft =
-    // remap_angle_for_counter_clockwise_rotation(ViewState.YawAngle) <= 0, 180 when abs(ViewState.YawAngle) >= Turn180AngleThreshold)
-    // and queue it with the slot name and ViewState.YawAngle; post_update plays it (play_queued_turn_in_place_animation).
+    // Select settings based on turn angle and stance.
+    let turn_left = remap_angle_for_counter_clockwise_rotation(ViewState.YawAngle) <= 0.0;          // AI:1957
+    let turn_180 = abs(ViewState.YawAngle) >= Settings.TurnInPlace.Turn180AngleThreshold;           // AI:1966 (else: 90)
+
+    // (The settings of C++ are pointers that can be null, and a null one queues nothing; the nested settings values here always exist.)
+    if (Stance == AlsStance.Standing) {                                                              // AI:1962
+        if (!turn_180) {
+            queue_turn_in_place(turn_left ? Settings.TurnInPlace.StandingTurn90Left : Settings.TurnInPlace.StandingTurn90Right,
+                                AlsTurnInPlaceSlot.TurnInPlaceStanding);                             // AI:1968
+        } else {
+            queue_turn_in_place(turn_left ? Settings.TurnInPlace.StandingTurn180Left : Settings.TurnInPlace.StandingTurn180Right,
+                                AlsTurnInPlaceSlot.TurnInPlaceStanding);                             // AI:1974
+        }
+    } else if (Stance == AlsStance.Crouching) {                                                      // AI:1979
+        if (!turn_180) {
+            queue_turn_in_place(turn_left ? Settings.TurnInPlace.CrouchingTurn90Left : Settings.TurnInPlace.CrouchingTurn90Right,
+                                AlsTurnInPlaceSlot.TurnInPlaceCrouching);                            // AI:1985
+        } else {
+            queue_turn_in_place(turn_left ? Settings.TurnInPlace.CrouchingTurn180Left : Settings.TurnInPlace.CrouchingTurn180Right,
+                                AlsTurnInPlaceSlot.TurnInPlaceCrouching);                            // AI:1991
+        }
+    }
+}
+
+method queue_turn_in_place(turn_in_place_settings: AlsTurnInPlaceSettings, turn_in_place_slot_name: AlsTurnInPlaceSlot) {   // AI:1997-2009
+    if (valid(turn_in_place_settings.Sequence)) {                                                    // IsValid(TurnInPlaceSettings) && ALS_ENSURE(IsValid(Sequence))
+        // Animation montages cannot be played in the worker thread, so queue them up to play later in the game thread.
+        TurnInPlaceState.QueuedSettings = turn_in_place_settings;                                    // AI:2001
+        TurnInPlaceState.QueuedSlotName = turn_in_place_slot_name;
+        TurnInPlaceState.QueuedTurnYawAngle = ViewState.YawAngle;
+    }
 }
 
 method play_queued_turn_in_place_animation() {                                                       // AI:2012
-    // M2 (A5 / L9, AI:2016-2045): the montage of the queued turn (PlaySlotAnimationAsDynamicMontage_WithBlendSettings, inertialized
-    // blend out) and TurnInPlaceState.PlayRate = settings.PlayRate * abs(QueuedTurnYawAngle / AnimatedTurnAngle).  There is no queue
-    // yet (RefreshTurnInPlace does not select a turn), so there is nothing to play.
+    if (TransitionsState.bStopTransitionsQueued || TurnInPlaceState.QueuedSlotName == AlsTurnInPlaceSlot.None) {   // AI:2016 (!IsValid(QueuedSettings))
+        return;
+    }
+
+    let turn_in_place_settings = TurnInPlaceState.QueuedSettings;                                    // AI:2021
+
+    // We use inertialization here to prevent blending out turn in place montages from modifying the RotationYawSpeed animation curve and
+    // therefore preventing the character from continuing to rotate in the input direction.  Blend in: standard, Settings.TurnInPlace.BlendDuration.
+    // PlaySlotAnimationAsDynamicMontage_WithBlendSettings (AI:2031): loop count 1, blend out trigger time 0.
+    if (TurnInPlaceState.QueuedSlotName == AlsTurnInPlaceSlot.TurnInPlaceStanding) {
+        host.play_slot_animation(turn_in_place_settings.Sequence, "TurnInPlaceStanding", Settings.TurnInPlace.BlendDuration,
+                                 Settings.TurnInPlace.BlendDuration, turn_in_place_settings.PlayRate, 1, 0.0, 0.0, MontageBlendMode.Inertialization);
+    } else {
+        host.play_slot_animation(turn_in_place_settings.Sequence, "TurnInPlaceCrouching", Settings.TurnInPlace.BlendDuration,
+                                 Settings.TurnInPlace.BlendDuration, turn_in_place_settings.PlayRate, 1, 0.0, 0.0, MontageBlendMode.Inertialization);
+    }
+
+    // Scale the rotation yaw delta (gets scaled in animation graph) to compensate for play rate and turn angle (if allowed).
+    TurnInPlaceState.PlayRate = turn_in_place_settings.PlayRate;                                     // AI:2036
+
+    if (turn_in_place_settings.bScalePlayRateByAnimatedTurnAngle) {                                  // AI:2038
+        TurnInPlaceState.PlayRate *= abs(TurnInPlaceState.QueuedTurnYawAngle / turn_in_place_settings.AnimatedTurnAngle);    // (a zero AnimatedTurnAngle is +inf in C++, 0 here)
+    }
+
+    // QueuedSettings = nullptr: the slot name says there is nothing queued; the copy of the settings stays but is not read any more.
+    TurnInPlaceState.QueuedSlotName = AlsTurnInPlaceSlot.None;                                       // AI:2043
+    TurnInPlaceState.QueuedTurnYawAngle = 0.0;
 }
 
 // ---- ragdolling (AI:2048-2073) -------------------------------------------------------------------------------------------------------------
@@ -1064,9 +1421,13 @@ method refresh_ragdolling_on_game_thread() {                                    
     let reference_speed = 1000.0;                                                                    // AI:2059
 
     RagdollingState.FlailPlayRate = clamp01(length(CharacterRagdollingVelocity) / reference_speed);  // AI:2061
-    // M2 (A9, AI:2064-2073): RagdollingState.FinalRagdollPose, the FPoseSnapshot SnapshotFinalRagdollPose() takes when the ragdoll
-    // stops.  It has no type in DAL yet (it needs the snapshot_pose command, L9, and a snapshot value): the one path of the 82 a
-    // .dab reads that this instance does not export (als-dal-rewrite.md section 7, A3).
+}
+
+// Save a snapshot of the current ragdoll pose for use in animation graph to blend out of the ragdoll (AI:2064).  The character calls it when
+// the ragdoll stops (AlsCharacter_Actions.cpp:1076); a call from the character arrives at the next update and the host takes the pose
+// after the graph update (the command of the frame).  The snapshot is RagdollingState.FinalRagdollPose, read by AB_Als_Ragdolling.
+pub method SnapshotFinalRagdollPose() {                                                              // AI.h:359
+    host.snapshot_pose(RagdollingState.FinalRagdollPose);                                            // AI:2070
 }
 
 // ---- ControlRig input (AI:235-257) ------------------------------------------------------------------------------------------------------------

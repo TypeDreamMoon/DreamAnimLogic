@@ -14,7 +14,8 @@ import _bootstrap  # noqa: F401
 import als_sources as A
 from dal import harness
 from dal.pybackend import generate_python, load_class
-from test_als_anim import (CHARACTER, HIPS, INSTANCE, SEQ, axis_quat, curve_data, instance_states, settings_data, tag)
+from test_als_anim import (CHARACTER, HIPS, INSTANCE, SEQ, TURNS, axis_quat, character_settings_data, curve_data, instance_states, settings_data, system_params,
+                           tag)
 
 GAIT = {k: tag("Gait", k) for k in ("Walking", "Running", "Sprinting")}
 ROT = {k: tag("RotationMode", k) for k in ("VelocityDirection", "ViewDirection", "Aiming")}
@@ -41,10 +42,12 @@ class Sim:
     TAGS = {"InViewMode": tag("ViewMode", "ThirdPerson"), "InLocomotionMode": tag("LocomotionMode", "Grounded"), "InRotationMode": tag("RotationMode", "ViewDirection"),
             "InStance": tag("Stance", "Standing"), "InGait": tag("Gait", "Walking"), "InOverlayMode": tag("OverlayMode", "Default"), "InLocomotionAction": ""}
 
-    def __init__(self, mods, params=None, dt=1 / 60):
+    def __init__(self, mods, params=None, dt=1 / 60, skeleton=None):
         self.mods, self.dt = mods, dt
         self.params = params if params is not None else {INSTANCE: {"Settings": settings_data()}}
         self.hosts = {n: harness.ScriptedHost() for n in mods}
+        for host in self.hosts.values():
+            host.skeleton = {k: dict(v) for k, v in (skeleton or {}).items()}               # the reference skeleton the thigh axes are read from at begin play
         self.objs = {n: load_class(m, generate_python(m))(self.hosts[n], **self.params.get(n, {})) for n, m in mods.items()}
         for n, m in mods.items():
             for p in m.peers:
@@ -58,7 +61,8 @@ class Sim:
         self.last = {}
 
     def step(self, calls=(), loc=None, view=None, curves=None, tags=None, yaw=0.0, location=(0.0, 0.0, 100.0), dt=None, ready=True, scale=1.0,
-             max_acc=2000.0, max_brake=1500.0, jump=False, ragdoll_velocity=(0.0, 0.0, 0.0), post=True):
+             max_acc=2000.0, max_brake=1500.0, jump=False, ragdoll_velocity=(0.0, 0.0, 0.0), post=True, host=None, events=(), floor_z=0.71):
+        """``host``: more items of the frame (``bones``, ``mesh_world_transform``, ``world``, ``time_dilation`` ...); ``events``: notify events of the frame."""
         dt = self.dt if dt is None else dt
         self.time += dt
         loc_state = dict(self.LOC)
@@ -70,9 +74,9 @@ class Sim:
                 "InRagdolling": {"Velocity": ragdoll_velocity}, **self.TAGS}
         for key, value in (tags or {}).items():
             free["In" + key] = value
-        frame = {"dt": dt, "time": self.time, "actor_location": location, "actor_rotation": axis_quat(yaw), "actor_scale": scale,
+        frame = {"dt": dt, "time": self.time, "actor_location": location, "actor_rotation": axis_quat(yaw), "mesh_scale": scale,
                  "capsule_radius": 30.0, "capsule_half_height": 90.0, "max_acceleration": max_acc, "max_braking_deceleration": max_brake,
-                 "walkable_floor_z": 0.71, "actor_ready": ready, "curves": dict(curves or {})}
+                 "walkable_floor_z": floor_z, "actor_ready": ready, "curves": dict(curves or {}), "events": list(events), **(host or {})}
         self.frames.append(frame)
         for n in self.mods:
             self.hosts[n].load(frame)
@@ -620,7 +624,7 @@ class InAirTransitionsAndMiscTests(ScenarioBase):
         air = {"LocomotionMode": tag("LocomotionMode", "InAir")}
         s = sim.step(calls=["RefreshInAir"], loc={"Velocity": (350.0, 0.0, -450.0)}, tags=air)
         self.assertEqual(s["InAirState.VerticalVelocityWorldSpace"], -450.0)
-        self.assertEqual(s["InAirState.GroundPredictionAmount"], 0.0)                           # fast fall: the sweep is M2, so no prediction yet
+        self.assertEqual(s["InAirState.GroundPredictionAmount"], 0.0)                           # fast fall, but no ground in the scene: the sweep finds nothing
         # lean amount = local velocity / 350 * curve(vertical velocity); the first frame is not smoothed. curve(-450) = 0.6 + 0.4 * 250 / 400 (AI:1227)
         self.assertAlmostEqual(s["LeanState.ForwardAmount"], 0.6 + 0.4 * 250.0 / 400.0)
         s = sim.step(calls=["RefreshInAir"], loc={"Velocity": (0.0, 175.0, 300.0)}, tags=air)
@@ -677,9 +681,12 @@ class InAirTransitionsAndMiscTests(ScenarioBase):
         s = sim.step(calls=[("PlayTransitionAnimation", {"Sequence": "A_Als_Stop_Right", "PlayRate": 1.5, "StartTime": 0.2})], post=False)
         self.assertEqual(s["TransitionsState.QueuedTransitionSequence"], "A_Als_Stop_Right")     # what the graph queued
         self.assertEqual((s["TransitionsState.QueuedTransitionPlayRate"], s["TransitionsState.QueuedTransitionStartTime"]), (1.5, 0.2))
+        sim.hosts[INSTANCE].calls.clear()
         s = sim.post()
         self.assertIsNone(s["TransitionsState.QueuedTransitionSequence"])                       # started and cleared in the same frame (AI:1789-1797)
         self.assertEqual((s["TransitionsState.QueuedTransitionPlayRate"], s["TransitionsState.QueuedTransitionStartTime"]), (1.0, 0.0))
+        # PlaySlotAnimationAsDynamicMontage(Sequence, Transition, BlendIn, BlendOut, PlayRate, 1 loop, 0 blend out trigger time, StartTime): a standard blend out
+        self.assertEqual(sim.hosts[INSTANCE].calls, [("play_slot_animation", ("A_Als_Stop_Right", "Transition", 0.2, 0.2, 1.5, 1, 0.0, 0.2, 0))])
 
     def test_a_stop_queued_in_the_same_frame_keeps_the_transition_from_playing(self):
         # PlayQueuedTransitionAnimation returns while a stop is queued (AI:1784); the stop clears its own flag: the sequence waits for the next frame
@@ -687,12 +694,18 @@ class InAirTransitionsAndMiscTests(ScenarioBase):
         s = sim.step(calls=[("PlayTransitionAnimation", {"Sequence": "A"}), ("StopTransitionAndTurnInPlaceAnimations", {"BlendOutDuration": 0.3})], post=False)
         self.assertTrue(s["TransitionsState.bStopTransitionsQueued"])
         self.assertAlmostEqual(s["TransitionsState.QueuedStopTransitionsBlendOutDuration"], 0.3)
+        sim.hosts[INSTANCE].calls.clear()
         s = sim.post()
         self.assertFalse(s["TransitionsState.bStopTransitionsQueued"])
         self.assertEqual(s["TransitionsState.QueuedStopTransitionsBlendOutDuration"], -1.0)
         self.assertEqual(s["TransitionsState.QueuedTransitionSequence"], "A")                    # not played, not dropped
+        # StopMontagesWithSlot for the three slots of ALS, with the blend out time of the call (AI:1809-1816)
+        self.assertEqual(sim.hosts[INSTANCE].calls, [("stop_montages_with_slot", ("Transition", 0.3)), ("stop_montages_with_slot", ("TurnInPlaceStanding", 0.3)),
+                                                     ("stop_montages_with_slot", ("TurnInPlaceCrouching", 0.3))])
+        sim.hosts[INSTANCE].calls.clear()
         s = sim.step()
         self.assertIsNone(s["TransitionsState.QueuedTransitionSequence"])                       # the next frame's post update plays it
+        self.assertEqual([c[0] for c in sim.hosts[INSTANCE].calls], ["play_slot_animation"])
 
     def test_the_default_blend_out_of_a_stop_is_minus_one(self):
         s = self.sim().step(calls=["StopTransitionAndTurnInPlaceAnimations"], post=False)
@@ -747,14 +760,6 @@ class InAirTransitionsAndMiscTests(ScenarioBase):
         self.assertTrue(sim.step(curves={"AllowTransitions": 0.999995})["TransitionsState.bTransitionsAllowed"])
         self.assertFalse(sim.step(curves={"AllowTransitions": 0.99998})["TransitionsState.bTransitionsAllowed"])
         self.assertFalse(sim.step()["TransitionsState.bTransitionsAllowed"])
-
-    def test_dynamic_transitions_wait_for_the_foot_lock(self):
-        # M2: no foot lock yet, every LockAmount is 0, so nothing is allowed; the frame delay still counts down once per frame
-        sim = self.sim()
-        s = sim.step(calls=["RefreshDynamicTransitions", "RefreshDynamicTransitions"], curves={"AllowTransitions": 1.0})
-        self.assertIsNone(s["TransitionsState.QueuedTransitionSequence"])
-        self.assertTrue(s["DynamicTransitionsState.bUpdatedThisFrame"])
-        self.assertEqual(s["DynamicTransitionsState.FrameDelay"], 0)
 
     def test_turn_in_place_activation_delay_counts_while_the_view_is_off_and_still(self):
         sim = self.sim()
@@ -836,12 +841,12 @@ class ControlRigInputTests(ScenarioBase):
         rig = inst.GetControlRigInput()
         self.assertTrue(rig.bUseHandIkBones)
         self.assertFalse(rig.bUseFootIkBones)                                                    # the test settings turn it off
-        self.assertFalse(rig.bFootTransformsValid)                                               # M1: no foot lock, FeetState.bValid stays false
+        self.assertFalse(rig.bFootTransformsValid)                                               # the frame has no pose: the pelvis reads as the identity, FeetState.bValid stays false
         self.assertAlmostEqual(rig.VelocityBlendForwardAmount, 0.75)                             # normalised (300, 100): 0.75 / 0.25
         self.assertAlmostEqual(rig.VelocityBlendBackwardAmount, 0.0)
         self.assertAlmostEqual(rig.SpineYawAngle, 40.0)
         self.assertAlmostEqual(rig.SpineYawAngle, inst.SpineState.FinalYawAngle)
-        self.assertAlmostEqual(rig.PelvisOffsetAmount, 0.4)                                      # in the air the offset needs a ground prediction (M1: none)
+        self.assertAlmostEqual(rig.PelvisOffsetAmount, 0.4)                                      # in the air the offset needs a ground prediction (none: no ground)
         self.assertEqual(rig.FootLeftLocation, (0.0, 0.0, 0.0))
 
     def test_pelvis_offset_uses_the_ground_prediction(self):
@@ -849,10 +854,610 @@ class ControlRigInputTests(ScenarioBase):
         sim.step(calls=["RefreshInAir"], curves={"PoseGrounded": 0.0, "PoseInAir": 1.0})
         inst, _ = sim.live()
         self.assertEqual(inst.GetControlRigInput().PelvisOffsetAmount, 0.0)                      # in the air without a predicted ground: no offset
-        inst.InAirState.GroundPredictionAmount = 0.3                                             # what the M2 sweep will write
+        inst.InAirState.GroundPredictionAmount = 0.3                                             # what the sweep of RefreshInAir writes
         self.assertAlmostEqual(inst.GetControlRigInput().PelvisOffsetAmount, 0.3)
         inst.PoseState.GroundedAmount = 0.9
         self.assertEqual(inst.GetControlRigInput().PelvisOffsetAmount, 1.0)                      # clamped to 1
+
+
+# ---- the foot lock, the ground prediction, the transitions and turns in place that are played, the notifies ------------------------------------
+
+def tr(location=(0.0, 0.0, 0.0), yaw=0.0, scale=(1.0, 1.0, 1.0)):
+    """A transform of a host item: (location, rotation quaternion, scale)."""
+    return (tuple(location), axis_quat(yaw), scale)
+
+
+def rotate_z(v, degrees):
+    c, s = math.cos(math.radians(degrees)), math.sin(math.radians(degrees))
+    return (v[0] * c - v[1] * s, v[0] * s + v[1] * c, v[2])
+
+
+def pose(left=(100.0, -10.0, 0.0), right=(100.0, 10.0, 0.0), left_yaw=0.0, right_yaw=0.0, pelvis=None):
+    """The bones the instance reads: the pelvis (component space), the IK feet and the virtual bones (world space; 5 cm above the IK ones)."""
+    pelvis = tr((0.0, 0.0, 90.0)) if pelvis is None else pelvis
+    return {"pelvis": {"component": pelvis},
+            "ik_foot_l": {"world": tr(left, left_yaw)}, "ik_foot_r": {"world": tr(right, right_yaw)},
+            "VB_foot_l": {"world": tr((left[0], left[1], left[2] + 5.0), left_yaw)}, "VB_foot_r": {"world": tr((right[0], right[1], right[2] + 5.0), right_yaw)}}
+
+
+def near(test, got, want, places=6, msg=""):
+    test.assertEqual(len(got), len(want), msg)
+    for g, w in zip(got, want):
+        test.assertAlmostEqual(g, w, places=places, msg=msg)
+
+
+class FeetSim(Sim):
+    """The simulator with the pose of the previous evaluation: ``feet(...)`` steps a frame with the bones, the mesh transform and the foot curves."""
+
+    def feet(self, left=(100.0, -10.0, 0.0), right=(100.0, 10.0, 0.0), left_yaw=0.0, right_yaw=0.0, mesh=(0.0, 0.0, 0.0), ik=(1.0, 1.0), lock=(1.0, 0.0),
+             pelvis=None, curves=None, host=None, **kw):
+        c = {"FootLeftIk": ik[0], "FootRightIk": ik[1], "FootLeftLock": lock[0], "FootRightLock": lock[1], "AllowTransitions": 1.0, **(curves or {})}
+        h = {"bones": pose(left, right, left_yaw, right_yaw, pelvis), "mesh_world_transform": tr(mesh), **(host or {})}
+        return self.step(curves=c, host=h, location=kw.pop("location", mesh), **kw)
+
+
+class FootLockTests(ScenarioBase):
+    def sim(self, use_foot_ik=True, skeleton=None, **kw):
+        sim = FeetSim(self.mods, params=system_params(use_foot_ik), skeleton=skeleton, **kw)
+        sim.time = 100.0                      # the world has run for a while: a TeleportedTime of 0 is long ago (the lock follows teleports of the last 0.2 s)
+        return sim
+
+    def valid_sim(self, **kw):
+        """A simulator after the two frames it takes to get a valid pose: the left foot locked at (100, -10, 0), the right one not."""
+        sim = self.sim(**kw)
+        sim.feet()
+        sim.feet()
+        return sim
+
+    def test_the_feet_are_valid_from_the_second_frame_on(self):
+        sim = self.sim()
+        s = sim.feet()
+        self.assertEqual((s["FeetState.bValid"], s["FeetState.bBecameValid"]), (False, False))        # the first update is pending (AI:1252)
+        self.assertEqual(s["FeetState.FootPlantedAmount"], 0.0)                                          # nothing is read while the feet are not valid (AI:1299)
+        s = sim.feet(curves={"FootPlanted": 0.7, "FeetCrossing": 1.4})
+        self.assertEqual((s["FeetState.bValid"], s["FeetState.bBecameValid"]), (True, True))
+        self.assertEqual((s["FeetState.FootPlantedAmount"], s["FeetState.FeetCrossingAmount"]), (0.7, 1.0))     # the curves, FeetCrossing clamped to [0, 1]
+        s = sim.feet(curves={"FootPlanted": -3.0})
+        self.assertEqual((s["FeetState.bValid"], s["FeetState.bBecameValid"]), (True, False))
+        self.assertEqual(s["FeetState.FootPlantedAmount"], -1.0)                                          # clamped to [-1, 1]
+
+    def test_a_pelvis_that_reads_as_the_identity_is_not_a_pose(self):
+        sim = self.sim()
+        sim.feet()
+        for pelvis in (tr((0.0, 0.0, 0.0)), ((0.00005, 0.0, 0.0), (0.0, 0.0, 0.0, -1.0), (1.0, 1.0, 1.0)), ((0.0, -0.00005, 0.0), (0.00005, 0.0, 0.0, 1.0), (3.0, 3.0, 3.0))):
+            s = sim.feet(pelvis=pelvis)                                  # KINDA_SMALL_NUMBER, q and -q are the same rotation, the scale is not compared
+            self.assertFalse(s["FeetState.bValid"], pelvis)
+        self.assertTrue(sim.feet(pelvis=((0.0002, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0)))["FeetState.bValid"])       # 2e-4 is a pose
+        sim = self.sim()
+        sim.feet()
+        self.assertTrue(sim.feet(pelvis=tr((0.0, 0.0, 0.0), yaw=1.0))["FeetState.bValid"])               # a rotation is a pose too
+
+    def test_the_targets_are_the_ik_bones_or_the_virtual_bones(self):
+        pelvis = tr((0.0, 0.0, 90.0), yaw=30.0)
+        sim = self.sim(use_foot_ik=True)
+        sim.feet()
+        s = sim.feet(pelvis=pelvis, left=(100.0, -10.0, 0.0), left_yaw=20.0)
+        near(self, s["FeetState.Left.TargetLocationWorldSpace"], (100.0, -10.0, 0.0))
+        near(self, s["FeetState.Left.TargetRotationWorldSpace"], axis_quat(20.0))
+        near(self, s["FeetState.Right.TargetLocationWorldSpace"], (100.0, 10.0, 0.0))
+        near(self, s["FeetState.PelvisRotation"], axis_quat(30.0))
+        sim = self.sim(use_foot_ik=False)
+        sim.feet()
+        s = sim.feet(left=(100.0, -10.0, 0.0), left_yaw=20.0)
+        near(self, s["FeetState.Left.TargetLocationWorldSpace"], (100.0, -10.0, 5.0))                  # the virtual bone VB foot_l (five centimetres above in the test pose)
+        near(self, s["FeetState.Left.TargetRotationWorldSpace"], axis_quat(20.0))
+
+    def test_the_thigh_axes_come_from_the_reference_skeleton(self):
+        skeleton = {"pelvis": {"parent": None, "translation": (0.0, 0.0, 90.0)},
+                    "thigh_l": {"parent": "pelvis", "translation": (3.0, -9.0, -4.0)}, "calf_l": {"parent": "thigh_l", "translation": (0.0, 0.0, -40.0)},
+                    "foot_l": {"parent": "calf_l", "translation": (0.0, 0.0, -40.0)}}
+        sim = self.sim(skeleton=skeleton)
+        n = math.sqrt(9.0 + 81.0 + 16.0)
+        near(self, sim.live()[0].FeetState.Left.ThighAxisPelvisSpace, (3.0 / n, -9.0 / n, -4.0 / n))   # AI:85: the direction of the thigh, normalised
+        near(self, sim.live()[0].FeetState.Right.ThighAxisPelvisSpace, (0.0, 0.0, 1.0))                # no foot_r in the skeleton: the default (AI.h: ZAxis)
+        near(self, self.sim().live()[0].FeetState.Left.ThighAxisPelvisSpace, (0.0, 0.0, -1.0))
+
+    def test_a_foot_that_is_locked_stays_where_it_was_while_the_character_moves(self):
+        sim = self.valid_sim()
+        s = sim.last
+        self.assertEqual((s["FeetState.Left.LockAmount"], s["FeetState.Right.LockAmount"]), (1.0, 0.0))
+        near(self, s["FeetState.Left.LockLocationWorldSpace"], (100.0, -10.0, 0.0))                     # the lock is where the foot target was when it locked
+        near(self, s["FeetState.Left.FinalLocation"], (100.0, -10.0, 0.0))
+        near(self, s["FeetState.Right.FinalLocation"], (100.0, 10.0, 0.0))                              # not locked: the target in the space of the component
+        s = sim.feet(left=(160.0, -10.0, 0.0), mesh=(30.0, 0.0, 0.0))                                   # the animation moved the foot on, the mesh moved 30 cm
+        near(self, s["FeetState.Left.LockLocationWorldSpace"], (100.0, -10.0, 0.0))                     # ... the lock did not
+        near(self, s["FeetState.Left.LockLocation"], (70.0, -10.0, 0.0))                                # in the space of the component it is 30 cm back
+        near(self, s["FeetState.Left.FinalLocation"], (70.0, -10.0, 0.0))                               # full lock: the final foot is the lock (AI:1517)
+        near(self, s["FeetState.Right.FinalLocation"], (70.0, 10.0, 0.0))                               # the right foot is the target (100 in the world) in the space of a mesh at 30
+        for foot in ("Left", "Right"):
+            near(self, s[f"FeetState.{foot}.LockLocationMovementBaseSpace"], (0.0, 0.0, 0.0))            # no moving base
+            near(self, s[f"FeetState.{foot}.LockRotationMovementBaseSpace"], (0.0, 0.0, 0.0, 1.0))
+
+    def test_the_lock_blends_out_while_the_character_moves(self):
+        sim = self.valid_sim()
+        moving = {"bHasInput": True, "bHasVelocity": True, "Speed": 200.0, "bMoving": True}
+        s = sim.feet(left=(160.0, -10.0, 0.0), loc=moving)                                               # bMovingSmooth: 5 per second (AI:1405)
+        amount = 1.0 - 5.0 / 60.0
+        self.assertAlmostEqual(s["FeetState.Left.LockAmount"], amount)
+        near(self, s["FeetState.Left.FinalLocation"], (160.0 + (100.0 - 160.0) * amount, -10.0, 0.0))    # lerp(target, lock, amount)
+        s = sim.feet(left=(160.0, -10.0, 0.0), loc=moving, dt=1 / 30)
+        self.assertAlmostEqual(s["FeetState.Left.LockAmount"], amount - 5.0 / 30.0)
+        s = sim.feet(left=(160.0, -10.0, 0.0), loc=moving, dt=1.0)
+        self.assertEqual(s["FeetState.Left.LockAmount"], 0.0)                                            # not below zero: released (AI:1416)
+        near(self, s["FeetState.Left.LockLocationWorldSpace"], (0.0, 0.0, 0.0))
+        near(self, s["FeetState.Left.FinalLocation"], (160.0, -10.0, 0.0))
+
+    def test_in_the_air_the_lock_blends_out_slowly(self):
+        sim = self.valid_sim()
+        s = sim.feet(tags={"LocomotionMode": tag("LocomotionMode", "InAir")})
+        self.assertAlmostEqual(s["FeetState.Left.LockAmount"], 1.0 - 0.6 / 60.0)                          # AI:1406
+
+    def test_the_lock_is_released_when_the_curve_or_the_setting_says_so(self):
+        sim = self.valid_sim()
+        s = sim.feet(lock=(0.0, 0.0), left=(140.0, -10.0, 0.0))
+        self.assertEqual(s["FeetState.Left.LockAmount"], 0.0)
+        for name in ("LockLocationWorldSpace", "LockLocation"):
+            near(self, s[f"FeetState.Left.{name}"], (0.0, 0.0, 0.0))
+        near(self, s["FeetState.Left.LockRotationWorldSpace"], (0.0, 0.0, 0.0, 1.0))
+        near(self, s["FeetState.Left.FinalLocation"], (140.0, -10.0, 0.0))
+        sim = self.valid_sim()
+        s = sim.feet(ik=(0.0, 1.0), left=(140.0, -10.0, 0.0))                                            # the IK curve at 0 means the same (IkAmount * LockAmount)
+        self.assertEqual(s["FeetState.Left.LockAmount"], 0.0)
+        data = settings_data(True)
+        data["FootLock"]["bAllowFootLock"] = False
+        sim = FeetSim(self.mods, params={INSTANCE: {"Settings": data}})
+        sim.feet()
+        s = sim.feet()
+        self.assertEqual(s["FeetState.Left.LockAmount"], 0.0)                                            # the setting turns the lock off however the curve stands
+        near(self, s["FeetState.Left.FinalLocation"], (100.0, -10.0, 0.0))
+
+    def test_a_lock_never_blends_in(self):
+        sim = self.sim()
+        sim.feet(lock=(0.5, 0.0))
+        s = sim.feet(lock=(0.5, 0.0), left=(140.0, -10.0, 0.0))                                           # a partial lock amount from nothing: still nothing (AI:1440)
+        self.assertEqual(s["FeetState.Left.LockAmount"], 0.0)
+        near(self, s["FeetState.Left.FinalLocation"], (140.0, -10.0, 0.0))
+        s = sim.feet(lock=(1.0, 0.0), left=(140.0, -10.0, 0.0))                                           # ... but a full one locks where the foot is
+        self.assertEqual(s["FeetState.Left.LockAmount"], 1.0)
+        near(self, s["FeetState.Left.LockLocationWorldSpace"], (140.0, -10.0, 0.0))
+
+    def test_a_relock_keeps_the_old_place_when_the_lock_was_almost_full(self):
+        for previous, same_place in ((0.95, True), (0.9, False), (0.8, False)):
+            sim = self.valid_sim()
+            inst, _ = sim.live()
+            foot = inst.FeetState.Left
+            foot.LockAmount = previous                                                           # the state the previous frame left: a lock on its way out
+            foot.FinalLocation = Vec3(120.0, -10.0, 0.0)
+            s = sim.feet(left=(140.0, -10.0, 0.0), lock=(1.0, 0.0))
+            self.assertEqual(s["FeetState.Left.LockAmount"], 1.0)
+            # <= 0.9: the final location of the previous frame (not the target: it may teleport) becomes the lock (AI:1481); more: the old lock stays
+            near(self, s["FeetState.Left.LockLocationWorldSpace"], (100.0, -10.0, 0.0) if same_place else (120.0, -10.0, 0.0), msg=str(previous))
+
+    def test_the_lock_follows_a_teleport_but_not_a_walk(self):
+        sim = self.valid_sim()
+        s = sim.feet(left=(100.0, -10.0, 0.0), mesh=(30.0, 0.0, 0.0))                                    # 30 cm: under the threshold (50), no teleport
+        near(self, s["FeetState.Left.LockLocationWorldSpace"], (100.0, -10.0, 0.0))
+        sim = self.valid_sim()
+        s = sim.feet(left=(100.0, -10.0, 0.0), mesh=(500.0, 0.0, 0.0))                                   # 500 cm: the update detects the teleport
+        self.assertGreater(s["TeleportedTime"], 0.0)
+        # the lock in the space of the component (100, -10, 0 for the mesh at the origin) goes along: it is at (600, -10, 0) now, not left at 100
+        near(self, s["FeetState.Left.LockLocationWorldSpace"], (600.0, -10.0, 0.0))
+        near(self, s["FeetState.Left.LockLocation"], (100.0, -10.0, 0.0))
+        # a teleport that the character reports (MarkTeleported) is followed for 0.2 s: a mesh that moved 30 cm takes the lock along ...
+        sim = self.valid_sim()
+        sim.live()[0].MarkTeleported()
+        s = sim.feet(mesh=(30.0, 0.0, 0.0))
+        near(self, s["FeetState.Left.LockLocationWorldSpace"], (130.0, -10.0, 0.0))
+        # ... and after it the lock stays in the world
+        sim = self.valid_sim()
+        sim.live()[0].MarkTeleported()
+        for _ in range(12):
+            sim.feet()
+        s = sim.feet(mesh=(30.0, 0.0, 0.0))                                                       # 13 / 60 s after the mark: over
+        near(self, s["FeetState.Left.LockLocationWorldSpace"], (100.0, -10.0, 0.0))
+
+    def test_the_thigh_angle_is_limited(self):
+        skeleton = {"pelvis": {"parent": None, "translation": (0.0, 0.0, 90.0)}, "thigh_l": {"parent": "pelvis", "translation": (0.0, -10.0, 0.0)},
+                    "foot_l": {"parent": "thigh_l", "translation": (0.0, 0.0, -80.0)}}
+        sim = self.sim(skeleton=skeleton)
+        sim.feet(left=(70.0, 10.0, 0.0))
+        s = sim.feet(left=(70.0, 10.0, 0.0))
+        # the thigh points to -Y; the lock is 98.13 degrees away from it (atan2 of the cross and the dot product), the limit is 60 (the test settings)
+        angle = math.degrees(math.acos(-10.0 / math.hypot(70.0, 10.0)))
+        self.assertAlmostEqual(angle, 98.13, places=2)
+        want = rotate_z((70.0, 10.0, 0.0), 60.0 - angle)
+        near(self, s["FeetState.Left.LockLocation"], want)
+        near(self, s["FeetState.Left.LockLocationWorldSpace"], want)                                     # the mesh is at the origin
+        near(self, s["FeetState.Left.FinalLocation"], want)
+        # within the limit nothing changes
+        sim = self.sim(skeleton=skeleton)
+        sim.feet(left=(30.0, -40.0, 0.0))
+        s = sim.feet(left=(30.0, -40.0, 0.0))
+        near(self, s["FeetState.Left.LockLocation"], (30.0, -40.0, 0.0))
+
+    def test_the_foot_angle_is_limited(self):
+        sim = self.sim()
+        sim.feet(left_yaw=50.0)
+        sim.feet(left_yaw=50.0)                                                                      # locks with the foot turned 50 degrees
+        near(self, sim.last["FeetState.Left.LockRotationWorldSpace"], axis_quat(50.0))
+        s = sim.feet(left_yaw=0.0)                                                                   # the animation turns it back; the lock may be 30 degrees off at most
+        near(self, s["FeetState.Left.LockRotationWorldSpace"], axis_quat(30.0))
+        near(self, s["FeetState.Left.FinalRotation"], axis_quat(30.0), msg="locked: the final rotation is the lock")
+        s = sim.feet(left_yaw=-10.0)                                                                 # 40 degrees from the lock, the limit moves it to 20
+        near(self, s["FeetState.Left.LockRotationWorldSpace"], axis_quat(20.0))
+        s = sim.feet(left_yaw=0.0)
+        near(self, s["FeetState.Left.LockRotationWorldSpace"], axis_quat(20.0))                      # inside the limit: kept
+
+    def test_the_final_rotation_blends_with_the_shortest_route_and_stays_a_unit_quaternion(self):
+        sim = self.valid_sim()
+        s = sim.feet(left_yaw=20.0, loc={"bHasInput": True, "bHasVelocity": True, "Speed": 200.0}, dt=1 / 30)       # lock 1 - 5/30 = 0.8333, lock rotation 0 (yaw), target yaw 20
+        q = s["FeetState.Left.FinalRotation"]
+        self.assertAlmostEqual(sum(c * c for c in q), 1.0, places=9)
+        self.assertAlmostEqual(2.0 * math.degrees(math.atan2(q[2], q[3])), 20.0 * (1.0 - s["FeetState.Left.LockAmount"]), places=0)
+
+    def test_a_pose_that_comes_back_after_a_pending_update_locks_where_the_foot_is(self):
+        sim = self.valid_sim()
+        s = sim.feet(left=(140.0, -10.0, 0.0), ready=False)                                         # the actor loses its components: the next update is pending
+        self.assertTrue(s["bPendingUpdate"])
+        s = sim.feet(left=(140.0, -10.0, 0.0))
+        self.assertFalse(s["FeetState.bValid"])                                                      # pending: the feet are invalid for the frame (AI:1252)
+        s = sim.feet(left=(140.0, -10.0, 0.0))
+        self.assertEqual((s["FeetState.bValid"], s["FeetState.bBecameValid"]), (True, True))
+        # became valid with a lock that was relevant: the lock starts at the target (AI:1370), without the blend out of a moving character
+        near(self, s["FeetState.Left.LockLocationWorldSpace"], (140.0, -10.0, 0.0))
+        self.assertEqual(s["FeetState.Left.LockAmount"], 1.0)
+
+    def test_the_pose_goes_into_the_control_rig_input(self):
+        sim = self.valid_sim()
+        sim.feet(left=(160.0, -10.0, 0.0), mesh=(30.0, 0.0, 0.0))
+        rig = sim.live()[0].GetControlRigInput()
+        self.assertTrue(rig.bFootTransformsValid)
+        near(self, rig.FootLeftLocation, (70.0, -10.0, 0.0))
+        near(self, rig.FootRightLocation, (70.0, 10.0, 0.0))
+        self.assertAlmostEqual(sum(c * c for c in rig.FootLeftRotation), 1.0)
+
+
+class DynamicTransitionTests(ScenarioBase):
+    def locked(self, **kw):
+        sim = FeetSim(self.mods, params=system_params(True))
+        sim.time = 100.0
+        sim.feet(lock=(1.0, 1.0))
+        sim.feet(lock=(1.0, 1.0), **kw)
+        return sim
+
+    def run_entry(self, sim, left, right, lock=(1.0, 1.0), **kw):
+        """One frame in which the targets are ``left`` and ``right`` (the locks are at (100, -10, 0) and (100, 10, 0)) and the graph asks for the dynamic transitions."""
+        sim.hosts[INSTANCE].calls.clear()
+        s = sim.feet(left=left, right=right, lock=lock, calls=["RefreshDynamicTransitions"], **kw)
+        return s, list(sim.hosts[INSTANCE].calls)
+
+    def test_a_foot_that_the_lock_holds_too_far_from_its_target_plays_a_transition(self):
+        sim = self.locked()
+        s, calls = self.run_entry(sim, (120.0, -10.0, 0.0), (100.0, 10.0, 0.0))                       # 20 cm on the left: over the 8 of the settings
+        self.assertEqual(calls, [("play_slot_animation", (SEQ["DynStandL"], "Transition", 0.2, 0.2, 1.5, 1, 0.0, 0.0, 0))])
+        self.assertEqual(s["DynamicTransitionsState.FrameDelay"], 2)
+        self.assertIsNone(s["TransitionsState.QueuedTransitionSequence"])                             # played and cleared by the post update
+        s, calls = self.run_entry(sim, (120.0, -10.0, 0.0), (100.0, 10.0, 0.0))
+        self.assertEqual((calls, s["DynamicTransitionsState.FrameDelay"]), ([], 1))                   # two frames of rest for the animation graph (AI:1761)
+        s, calls = self.run_entry(sim, (120.0, -10.0, 0.0), (100.0, 10.0, 0.0))
+        self.assertEqual((calls, s["DynamicTransitionsState.FrameDelay"]), ([], 0))
+        s, calls = self.run_entry(sim, (120.0, -10.0, 0.0), (100.0, 10.0, 0.0))
+        self.assertEqual(len(calls), 1)                                                               # and then it plays again
+
+    def test_the_foot_with_the_greater_distance_wins(self):
+        for left, right, want in (((120.0, -10.0, 0.0), (130.0, 10.0, 0.0), "DynStandR"), ((130.0, -10.0, 0.0), (120.0, 10.0, 0.0), "DynStandL"),
+                                  ((120.0, -10.0, 0.0), (120.0, 10.0, 0.0), "DynStandL"), ((100.0, -10.0, 0.0), (112.0, 10.0, 0.0), "DynStandR")):
+            _, calls = self.run_entry(self.locked(), left, right)
+            self.assertEqual([c[1][0] for c in calls], [SEQ[want]], (left, right))
+
+    def test_nothing_plays_inside_the_threshold_or_when_transitions_are_not_allowed(self):
+        _, calls = self.run_entry(self.locked(), (107.0, -10.0, 0.0), (100.0, 17.0, 0.0))
+        self.assertEqual(calls, [])                                                                   # 7 cm: under 8
+        _, calls = self.run_entry(self.locked(), (120.0, -10.0, 0.0), (100.0, 10.0, 0.0), curves={"AllowTransitions": 0.0})
+        self.assertEqual(calls, [])
+        sim = FeetSim(self.mods, params=system_params(True))
+        sim.feet(lock=(0.0, 0.0))
+        sim.feet(lock=(0.0, 0.0))
+        _, calls = self.run_entry(sim, (160.0, -10.0, 0.0), (160.0, 10.0, 0.0), lock=(0.0, 0.0))     # no lock at all (a lock amount of 0 is not relevant)
+        self.assertEqual(calls, [])
+
+    def test_the_threshold_scales_with_the_mesh(self):
+        _, calls = self.run_entry(self.locked(), (112.0, -10.0, 0.0), (100.0, 10.0, 0.0), scale=2.0)   # 12 cm: more than 8, less than 8 * 2
+        self.assertEqual(calls, [])
+        _, calls = self.run_entry(self.locked(), (120.0, -10.0, 0.0), (100.0, 10.0, 0.0), scale=2.0)
+        self.assertEqual(len(calls), 1)
+
+    def test_a_crouching_character_plays_the_crouching_transitions(self):
+        _, calls = self.run_entry(self.locked(), (120.0, -10.0, 0.0), (100.0, 10.0, 0.0), tags={"Stance": tag("Stance", "Crouching")})
+        self.assertEqual([c[1][0] for c in calls], [SEQ["DynCrouchL"]])
+        _, calls = self.run_entry(self.locked(), (100.0, -10.0, 0.0), (125.0, 10.0, 0.0), tags={"Stance": tag("Stance", "Crouching")})
+        self.assertEqual([c[1][0] for c in calls], [SEQ["DynCrouchR"]])
+
+    def test_the_entry_runs_once_per_frame(self):
+        sim = self.locked()
+        s, calls = self.run_entry(sim, (120.0, -10.0, 0.0), (100.0, 10.0, 0.0))
+        sim.hosts[INSTANCE].calls.clear()
+        s = sim.feet(left=(120.0, -10.0, 0.0), lock=(1.0, 1.0), calls=["RefreshDynamicTransitions"] * 3)
+        self.assertEqual(s["DynamicTransitionsState.FrameDelay"], 1)                                  # the delay of the previous play counted down once, not three times
+
+
+class GroundPredictionTests(ScenarioBase):
+    AIR = {"LocomotionMode": tag("LocomotionMode", "InAir")}
+
+    def fall(self, velocity=(300.0, 0.0, -600.0), z=300.0, ground=0.0, block=0.0, floor_z=0.71, scale=1.0, world=None, **kw):
+        sim = self.sim()
+        host = {"world": world if world is not None else {"ground_z": ground}}
+        s = sim.step(calls=["RefreshInAir"], loc={"Velocity": velocity}, location=(0.0, 0.0, z), tags=self.AIR, floor_z=floor_z, scale=scale, host=host,
+                     curves={"PoseGrounded": 0.0, "PoseInAir": 1.0, "GroundPredictionBlock": block}, **kw)
+        return s, sim
+
+    def curve(self, t):
+        """CF_GroundPrediction of the test settings: (0, 1), (0.4, 0.8), (1, 0)."""
+        return 1.0 + (0.8 - 1.0) * t / 0.4 if t <= 0.4 else 0.8 - 0.8 * (t - 0.4) / 0.6
+
+    def test_the_sweep_runs_along_the_velocity_and_the_hit_time_goes_through_the_curve(self):
+        s, _ = self.fall(block=0.25)
+        vz = -600.0
+        distance = 150.0 + (2000.0 - 150.0) * (vz - -200.0) / (-4000.0 - -200.0)                     # 344.74 cm: the faster the fall the longer the sweep
+        length = math.hypot(300.0, 600.0)
+        drop = distance * 600.0 / length                                                              # how far the sweep goes down
+        t = (300.0 - 60.0 - 30.0) / drop                                                              # the lowest sphere of the capsule (60 below the centre) meets the ground at r = 30
+        self.assertAlmostEqual(t, 0.68105, places=4)
+        self.assertAlmostEqual(s["InAirState.GroundPredictionAmount"], self.curve(t) * 0.75, places=9)
+
+    def test_a_vertical_fall_hits_a_sphere_with_its_slope(self):
+        # a sphere of radius 100 at the origin, the capsule falls straight down 80 cm beside the top: the contact normal (80, 0, 102.5) / 130 has z = 0.788
+        world = {"ground_z": None, "spheres": [((0.0, 0.0, 0.0), 100.0)]}
+        kw = dict(velocity=(0.0, 0.0, -1000.0), world=world)
+        distance = 150.0 + 1850.0 * 800.0 / 3800.0
+        contact = math.sqrt(130.0 ** 2 - 80.0 ** 2)
+        t = (400.0 - 60.0 - contact) / distance
+        sim = self.sim()
+
+        def amount(floor_z):
+            s = sim.step(calls=["RefreshInAir"], loc={"Velocity": kw["velocity"]}, location=(80.0, 0.0, 400.0), tags=self.AIR, floor_z=floor_z,
+                         host={"world": world}, curves={"PoseGrounded": 0.0, "PoseInAir": 1.0})
+            return s["InAirState.GroundPredictionAmount"]
+
+        self.assertAlmostEqual(math.sqrt(130.0 ** 2 - 80.0 ** 2) / 130.0, 0.78822, places=4)
+        self.assertAlmostEqual(amount(0.71), self.curve(t), places=9)                                 # 0.788 >= 0.71: walkable ground
+        self.assertAlmostEqual(amount(0.78), self.curve(t), places=9)
+        self.assertEqual(amount(0.79), 0.0)                                                           # 0.788 < 0.79: a wall (AI:1190)
+
+    def test_a_trace_that_starts_inside_the_ground_counts(self):
+        s, _ = self.fall(z=80.0, block=0.0)                                                           # the lowest sphere (z = 20) is closer to the ground than its radius
+        self.assertEqual(s["InAirState.GroundPredictionAmount"], 1.0)                                 # time 0: the top of the curve (AI:1188: consider the ground valid)
+
+    def test_no_prediction_when_the_fall_is_slow_or_nothing_is_below(self):
+        s, _ = self.fall(velocity=(300.0, 0.0, -199.0))
+        self.assertEqual(s["InAirState.GroundPredictionAmount"], 0.0)                                 # AI:1150: > -200
+        s, _ = self.fall(velocity=(0.0, 0.0, -200.0), z=130.0)
+        self.assertGreater(s["InAirState.GroundPredictionAmount"], 0.0)                               # exactly -200 is predicted (a 150 cm sweep reaches the ground)
+        s, _ = self.fall(z=3000.0)
+        self.assertEqual(s["InAirState.GroundPredictionAmount"], 0.0)                                 # the ground is out of reach
+        s, _ = self.fall(ground=None)
+        self.assertEqual(s["InAirState.GroundPredictionAmount"], 0.0)
+
+    def test_the_block_curve_allows_less_prediction(self):
+        full, _ = self.fall()
+        half, _ = self.fall(block=0.5)
+        self.assertAlmostEqual(half["InAirState.GroundPredictionAmount"], full["InAirState.GroundPredictionAmount"] * 0.5, places=9)
+        blocked, _ = self.fall(block=1.0)
+        self.assertEqual(blocked["InAirState.GroundPredictionAmount"], 0.0)
+        barely, _ = self.fall(block=0.99999)
+        self.assertEqual(barely["InAirState.GroundPredictionAmount"], 0.0)                            # an allowance under KINDA_SMALL_NUMBER is none (AI:1157)
+
+    def test_the_sweep_length_scales_with_the_mesh(self):
+        s, _ = self.fall(velocity=(0.0, 0.0, -1000.0), z=500.0)                                       # 539.5 cm of sweep, 410 to the ground... reaches
+        self.assertGreater(s["InAirState.GroundPredictionAmount"], 0.0)
+        s, _ = self.fall(velocity=(0.0, 0.0, -1000.0), z=700.0)                                       # 610 to the ground
+        self.assertEqual(s["InAirState.GroundPredictionAmount"], 0.0)
+        s, _ = self.fall(velocity=(0.0, 0.0, -1000.0), z=700.0, scale=1.2)                            # ... 647 cm of sweep for a mesh 1.2 times as big
+        self.assertGreater(s["InAirState.GroundPredictionAmount"], 0.0)
+
+    def test_the_prediction_offsets_the_pelvis_in_the_air(self):
+        s, sim = self.fall(block=0.25)
+        rig = sim.live()[0].GetControlRigInput()
+        self.assertAlmostEqual(rig.PelvisOffsetAmount, s["InAirState.GroundPredictionAmount"], places=9)     # InAirAmount 1 * GroundPredictionAmount
+
+    def test_the_grounded_character_does_not_sweep(self):
+        sim = self.sim()
+        sim.step(calls=["RefreshGrounded"], loc={"Velocity": (0.0, 0.0, -600.0)}, host={"world": {"ground_z": 0.0}}, location=(0.0, 0.0, 300.0))
+        self.assertEqual(sim.last["InAirState.GroundPredictionAmount"], 1.0)                          # untouched: RefreshInAir was not asked (the state's default is 1)
+
+
+class PlayedTransitionTests(ScenarioBase):
+    def test_a_quick_stop_notify_plays_the_transition_in_the_same_frame(self):
+        sim = self.sim()
+        sim.step()
+        sim.hosts[INSTANCE].calls.clear()
+        sim.step(calls=["PlayQuickStopAnimation"], tags={"RotationMode": ROT["ViewDirection"]})
+        self.assertEqual(sim.hosts[INSTANCE].calls, [("play_slot_animation", (SEQ["StandL"], "Transition", 0.1, 0.2, 1.75, 1, 0.0, 0.3, 0))])
+
+    def test_a_transition_that_is_stopped_is_not_played_and_the_stop_waits_one_frame(self):
+        sim = self.sim()
+        sim.step()
+        sim.hosts[INSTANCE].calls.clear()
+        sim.step(calls=[("PlayTransitionRightAnimation", {"PlayRate": 2.0}), "StopTransitionAndTurnInPlaceAnimations"])
+        self.assertEqual([c[0] for c in sim.hosts[INSTANCE].calls], ["stop_montages_with_slot"] * 3)
+        self.assertEqual([c[1] for c in sim.hosts[INSTANCE].calls], [("Transition", -1.0), ("TurnInPlaceStanding", -1.0), ("TurnInPlaceCrouching", -1.0)])
+
+
+class TurnInPlaceTests(ScenarioBase):
+    VIEW = ROT["ViewDirection"]
+
+    def turn(self, view_yaw, stance="Standing", frames=40, **kw):
+        """Frames with the view ``view_yaw`` degrees off the actor (still view, transitions allowed) until a turn is played; the commands that played it."""
+        sim = self.sim()
+        for i in range(frames):
+            sim.hosts[INSTANCE].calls.clear()
+            s = sim.step(calls=["RefreshTurnInPlace"], view={"Rotation": (0.0, view_yaw, 0.0), "YawSpeed": 0.0}, curves={"AllowTransitions": 1.0},
+                         tags={"RotationMode": self.VIEW, "Stance": tag("Stance", stance.capitalize())}, post=False, **kw)
+            before = dict(s)
+            s = sim.post()
+            if sim.hosts[INSTANCE].calls:
+                return i, before, s, list(sim.hosts[INSTANCE].calls)
+        return None, None, None, []
+
+    def table(self, stance, angle, side):
+        return next(t for t in TURNS if t[0] == f"{stance}_{angle}_{side}")
+
+    def test_the_delay_depends_on_the_angle_and_the_turn_is_played_after_it(self):
+        frame, before, after, calls = self.turn(100.0)
+        # the delay at 100 degrees: the test settings map (45 .. 180) to (0.1 .. 0.5) s: 0.263; it has to be exceeded (AI:1950), a frame is 1/60 s
+        delay = 0.1 + 0.4 * (100.0 - 45.0) / 135.0
+        self.assertEqual(frame, int(delay * 60.0))                                                    # the first frame whose sum of dt is above it: (frame + 1) / 60 > delay
+        self.assertEqual(before["TurnInPlaceState.QueuedSlotName"], 1)                                # TurnInPlaceStanding, queued by the graph, played by the post update
+        self.assertAlmostEqual(before["TurnInPlaceState.QueuedTurnYawAngle"], 100.0)
+        self.assertEqual(after["TurnInPlaceState.QueuedSlotName"], 0)
+        self.assertEqual(after["TurnInPlaceState.QueuedTurnYawAngle"], 0.0)
+
+    def test_a_90_degree_turn_to_the_right(self):
+        _, _, after, calls = self.turn(100.0)
+        _, _, sequence, rate, scale, animated = self.table("standing", 90, "right")
+        # PlaySlotAnimationAsDynamicMontage_WithBlendSettings: blend in and out 0.15, the settings' play rate, one loop, inertialization when it blends out
+        self.assertEqual(calls, [("play_slot_animation", (sequence, "TurnInPlaceStanding", 0.15, 0.15, rate, 1, 0.0, 0.0, 1))])
+        self.assertAlmostEqual(after["TurnInPlaceState.PlayRate"], rate * abs(100.0 / animated))       # scaled by the turn angle / the animated angle (AI:2038)
+
+    def test_the_turn_to_the_left_and_the_180_degree_turns(self):
+        for view_yaw, stance, angle, side in ((-100.0, "standing", 90, "left"), (-135.0, "standing", 180, "left"), (135.0, "standing", 180, "right"),
+                                              (80.0, "crouching", 90, "right"), (-80.0, "crouching", 90, "left"), (-170.0, "crouching", 180, "left"),
+                                              (170.0, "crouching", 180, "right")):
+            _, _, after, calls = self.turn(view_yaw, stance)
+            _, _, sequence, rate, scale, animated = self.table(stance, angle, side)
+            slot = "TurnInPlaceStanding" if stance == "standing" else "TurnInPlaceCrouching"
+            self.assertEqual(calls, [("play_slot_animation", (sequence, slot, 0.15, 0.15, rate, 1, 0.0, 0.0, 1))], (view_yaw, stance))
+            self.assertAlmostEqual(after["TurnInPlaceState.PlayRate"], rate * abs(view_yaw / animated) if scale else rate, msg=str((view_yaw, stance)))
+
+    def test_near_180_degrees_the_character_turns_counter_clockwise(self):
+        # RemapAngleForCounterClockwiseRotation: from 175 degrees on, +176 is -184 (AI:1957)
+        _, _, _, calls = self.turn(176.0)
+        self.assertEqual(calls[0][1][0], self.table("standing", 180, "left")[2])
+        _, _, _, calls = self.turn(174.0)
+        self.assertEqual(calls[0][1][0], self.table("standing", 180, "right")[2])
+
+    def test_the_180_threshold_is_130_degrees(self):
+        _, _, _, calls = self.turn(129.0)
+        self.assertEqual(calls[0][1][0], self.table("standing", 90, "right")[2])
+        _, _, _, calls = self.turn(130.0)
+        self.assertEqual(calls[0][1][0], self.table("standing", 180, "right")[2])
+
+    def test_no_turn_inside_the_angle_threshold(self):
+        frame, _, _, calls = self.turn(44.0, frames=80)
+        self.assertEqual((frame, calls), (None, []))
+
+    def test_a_turn_that_is_stopped_waits_for_the_next_frame(self):
+        sim = self.sim()
+        args = dict(view={"Rotation": (0.0, 100.0, 0.0), "YawSpeed": 0.0}, curves={"AllowTransitions": 1.0}, tags={"RotationMode": self.VIEW})
+        for _ in range(15):
+            sim.step(calls=["RefreshTurnInPlace"], **args)
+        sim.hosts[INSTANCE].calls.clear()
+        s = sim.step(calls=["RefreshTurnInPlace", "StopTransitionAndTurnInPlaceAnimations"], post=False, **args)
+        self.assertEqual(s["TurnInPlaceState.QueuedSlotName"], 1)
+        s = sim.post()
+        self.assertEqual([c[0] for c in sim.hosts[INSTANCE].calls], ["stop_montages_with_slot"] * 3)
+        self.assertEqual(s["TurnInPlaceState.QueuedSlotName"], 1)                                      # still queued: PlayQueuedTurnInPlaceAnimation returned (AI:2016)
+        sim.hosts[INSTANCE].calls.clear()
+        sim.step(calls=["RefreshTurnInPlace"], **args)
+        self.assertEqual([c[0] for c in sim.hosts[INSTANCE].calls], ["play_slot_animation"])
+
+
+class NotifyTests(ScenarioBase):
+    def stops(self, sim):
+        return [c for c in sim.hosts[INSTANCE].calls if c[0] == "montage_stop_source"]
+
+    def test_the_grounded_entry_mode_notify_sets_the_tag(self):
+        sim = self.sim()
+        sim.step()
+        s = sim.step(events=[("notify", "AlsAnimNotify_SetGroundedEntryMode", {"GroundedEntryMode": "Als.GroundedEntryMode.FromRoll"})])
+        self.assertEqual(s["GroundedEntryMode"], "Als.GroundedEntryMode.FromRoll")
+        s = sim.step(events=[("notify", "AlsAnimNotify_SetGroundedEntryMode", {})])                    # a notify without the property: the empty tag
+        self.assertEqual(s["GroundedEntryMode"], "")
+
+    def test_early_blend_out_stops_the_montage_it_belongs_to(self):
+        def early(payload=None, **frame):
+            sim = self.sim()
+            sim.step()
+            sim.hosts[INSTANCE].calls.clear()
+            sim.step(events=[("notify_tick", "AlsAnimNotifyState_EarlyBlendOut", payload or {}, 3)], **frame)
+            return self.stops(sim)
+
+        self.assertEqual(early(), [])                                                                    # standing, on the ground, view direction, no input: nothing to blend out for
+        self.assertEqual(early(loc={"bHasInput": True}), [("montage_stop_source", (3, 0.25))])           # input: the instance id of the notify and the default blend out time
+        self.assertEqual(early({"bCheckInput": False}, loc={"bHasInput": True}), [])
+        self.assertEqual(early({"BlendOutDuration": 0.1}, loc={"bHasInput": True}), [("montage_stop_source", (3, 0.1))])
+        self.assertEqual(len(early(tags={"LocomotionMode": tag("LocomotionMode", "InAir")})), 1)         # InAir is the default of LocomotionModeEquals
+        self.assertEqual(early({"bCheckLocomotionMode": False}, tags={"LocomotionMode": tag("LocomotionMode", "InAir")}), [])
+        self.assertEqual(len(early(tags={"RotationMode": ROT["Aiming"]})), 1)
+        self.assertEqual(len(early(tags={"Stance": tag("Stance", "Crouching")})), 1)
+        self.assertEqual(early({"StanceEquals": tag("Stance", "Standing")}, tags={"Stance": tag("Stance", "Crouching")}), [])
+        self.assertEqual(len(early({"StanceEquals": tag("Stance", "Standing")})), 1)
+        self.assertEqual(early({"RotationModeEquals": tag("RotationMode", "VelocityDirection")}, tags={"RotationMode": ROT["Aiming"]}), [])
+
+    def test_the_notifies_are_declared_with_the_properties_of_the_ALS_classes(self):
+        notifies = {n.name: n for n in self.mods[INSTANCE].notifies}
+        self.assertEqual(sorted(notifies), ["AlsAnimNotifyState_EarlyBlendOut", "AlsAnimNotify_SetGroundedEntryMode"])
+        self.assertEqual([f.name for f in notifies["AlsAnimNotifyState_EarlyBlendOut"].struct.fields],
+                         ["BlendOutDuration", "bCheckInput", "bCheckLocomotionMode", "bCheckRotationMode", "bCheckStance", "LocomotionModeEquals",
+                          "RotationModeEquals", "StanceEquals"])
+        self.assertTrue(notifies["AlsAnimNotifyState_EarlyBlendOut"].branching)
+        self.assertEqual([f.name for f in notifies["AlsAnimNotify_SetGroundedEntryMode"].struct.fields], ["GroundedEntryMode"])
+
+
+class TimeDilationAndSnapshotTests(ScenarioBase):
+    def test_the_delta_time_without_time_dilation(self):
+        sim = self.sim()
+        s = sim.step(dt=0.01, host={"time_dilation": 0.5, "actor_time_dilation": 0.5, "real_delta_time": 0.02})
+        self.assertAlmostEqual(s["DeltaTimeWithoutTimeDilation"], 0.02)                                # the previous global dilation (1) * the actor's (0.5): 0.01 / 0.5
+        self.assertEqual(s["PreviousGlobalTimeDilation"], 0.5)                                        # ... kept for the next frame (AI:116)
+        s = sim.step(dt=0.01, host={"time_dilation": 0.5, "actor_time_dilation": 0.5, "real_delta_time": 0.02})
+        self.assertAlmostEqual(s["DeltaTimeWithoutTimeDilation"], 0.04)                                # 0.5 * 0.5 now: 0.01 / 0.25
+        s = sim.step(dt=0.01, host={"time_dilation": 1.0, "actor_time_dilation": 0.0, "real_delta_time": 0.031})
+        self.assertAlmostEqual(s["DeltaTimeWithoutTimeDilation"], 0.031)                               # a dilation of 0: the real delta time
+        self.assertEqual(s["PreviousGlobalTimeDilation"], 1.0)
+
+    def test_the_first_person_head_uses_the_time_without_dilation(self):
+        def head(actor_dilation):
+            sim = self.sim()
+            first = {"ViewMode": tag("ViewMode", "FirstPerson"), "RotationMode": ROT["ViewDirection"]}
+            sim.step(calls=["InitializeHead", "RefreshHead"], tags=first, view={"Rotation": (0.0, 0.0, 0.0)})
+            return sim.step(calls=["RefreshHead"], tags=first, view={"Rotation": (30.0, 0.0, 0.0)}, host={"actor_time_dilation": actor_dilation})["HeadState.PitchAngle"]
+
+        # the pitch follows the view with a half life of 0.01 s measured in the time the dilation does not touch: the second frame (the dilation of the frame
+        # before is 1) divides the frame time by 1.0 * 0.5 = 0.5, which makes the step twice as long
+        dilated, plain = head(0.5), head(1.0)
+        self.assertGreater(dilated, plain)
+
+    def test_snapshot_of_the_final_ragdoll_pose(self):
+        sim = self.sim()
+        sim.step()
+        inst, _ = sim.live()
+        self.assertIsNone(sim.last["RagdollingState.FinalRagdollPose"])
+        sim.hosts[INSTANCE].calls.clear()
+        inst.SnapshotFinalRagdollPose()                                                              # the character calls it when the ragdoll stops
+        s = sim.step()
+        self.assertEqual(sim.hosts[INSTANCE].calls, [("snapshot_pose", ("RagdollingState.FinalRagdollPose",))])
+        self.assertIsNotNone(s["RagdollingState.FinalRagdollPose"])                                   # valid from now on: the graph blends out of it
+        sim.hosts[INSTANCE].calls.clear()
+        sim.step()
+        self.assertEqual(sim.hosts[INSTANCE].calls, [])                                               # one command per call
+
+    def test_the_teleport_distance_is_the_one_of_the_characters_settings(self):
+        for threshold, moved, teleported in ((50.0, 49.0, False), (50.0, 51.0, True), (200.0, 120.0, False), (10.0, 11.0, True)):
+            params = system_params(False, threshold)
+            sim = Sim(self.mods, params=params)
+            sim.step(location=(0.0, 0.0, 100.0))
+            s = sim.step(location=(moved, 0.0, 100.0))
+            self.assertEqual(s["TeleportedTime"] > 0.0, teleported, (threshold, moved))
+
+    def test_the_scale_is_the_one_of_the_mesh(self):
+        sim = self.sim()
+        s = sim.step(scale=1.5, host={"actor_scale": 3.0})                                            # the capsule's scale is not what AI:784 reads
+        self.assertEqual(s["LocomotionState.ScaleWorldSpace"], 1.5)
+
+
+from dal.runtime import Vec3  # noqa: E402  (the foot state is set by hand in one test)
+
 
 
 PACK = os.environ.get("DAL_ALS_PACK", r"G:\DCC\AlsPack")

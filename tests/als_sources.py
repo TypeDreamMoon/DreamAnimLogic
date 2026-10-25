@@ -41,6 +41,7 @@ input InLocomotion: AlsLocomotionState;
 input InView: AlsViewState;
 input InRagdolling: AlsRagdollingState;
 input DoJump: bool;
+input DoSnapshot: bool;
 state ViewMode: AlsViewMode = AlsViewMode.ThirdPerson;
 state LocomotionMode: AlsLocomotionMode = AlsLocomotionMode.Grounded;
 state RotationMode: AlsRotationMode = AlsRotationMode.ViewDirection;
@@ -64,6 +65,9 @@ update(dt) in after_movement {
     RagdollingState = InRagdolling;
     if (DoJump) {
         Anim.Jump();
+    }
+    if (DoSnapshot) {
+        Anim.SnapshotFinalRagdollPose();
     }
 }
 """

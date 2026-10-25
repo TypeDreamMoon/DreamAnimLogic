@@ -434,9 +434,10 @@ def default_value(text):
 class HeaderContractTests(Case):
     """The library's structs and settings types against the C++ headers: member names, their order and the plain defaults."""
 
-    # members the DAL types do not carry (and why): no networking, no moving bases, no pose snapshots, no UObject references
+    # members the DAL types do not carry (and why): no networking, no moving bases.  The queued turn in place settings (a copy of the settings value
+    # and the slot as an enum) and the final ragdoll pose (the snapshot value type) are in the library since the animation instance plays turns
+    # and takes the snapshot.
     SKIPPED = {"AlsViewNetworkSmoothingState": None, "AlsMovementBaseState": {"MovementBaseInterfaceData", "BoneName"},
-               "AlsTurnInPlaceState": {"QueuedSettings", "QueuedSlotName"}, "AlsRagdollingAnimationState": {"FinalRagdollPose"},
                "AlsViewState": {"NetworkSmoothing"}}
     RENAMED = {"UAlsTurnInPlaceSettings": "AlsTurnInPlaceSettings", "FAlsGeneralTurnInPlaceSettings": "AlsGeneralTurnInPlaceSettings"}
 

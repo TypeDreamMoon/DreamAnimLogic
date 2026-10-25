@@ -1,20 +1,23 @@
-"""Independent Python port of UAlsAnimationInstance (ALS-Refactored, MIT, Sixze): the parts AlsAnimationInstance.dal ports in M1.
+"""Independent Python port of UAlsAnimationInstance (ALS-Refactored, MIT, Sixze): AlsAnimationInstance.dal's counterpart.
 
-Source: Source/ALS/Private/AlsAnimationInstance.cpp (line numbers "AI:" below), Public/AlsAnimationInstance.h, State/*.h,
+Source: Source/ALS/Private/AlsAnimationInstance.cpp (line numbers "AI:" below), Public/AlsAnimationInstance.h, State/*.h, Notifies/*,
 Utility/AlsMath.h, AlsRotation.h, AlsVector.h.
 
 This file deliberately does not import the dal package (``als_lean_oracle`` is its only neighbour: UE math re-derived there).
 It is written like the C++ -- one function per ALS function, the same state structs (as dicts of dicts), double precision,
-the frame order of the engine: NativeUpdateAnimation, NativeThreadSafeUpdateAnimation, the graph's Call(Self.X) entries,
-NativePostUpdateAnimation -- so it also checks the way the .dal runs the post-update of a frame at the start of the next one.
+the frame order of the engine: events of the notifies, NativeUpdateAnimation, NativeThreadSafeUpdateAnimation, the graph's
+Call(Self.X) entries, NativePostUpdateAnimation -- so it also checks the way the .dal runs the post-update of a frame.
 
-Not ported (M2, as in the .dal): foot lock, the montage playback of the queued transitions, the ground prediction sweep,
-the turn-in-place selection, the final ragdoll pose snapshot.  Movement-base compensation is dead without moving bases.
+The host commands the C++ issues (PlaySlotAnimationAsDynamicMontage, StopMontagesWithSlot, SnapshotPose, Montage stop of the early
+blend out) are collected in ``commands`` as ``(name, args)``, the form the scripted host of the tests records them in.
+Movement-base compensation is dead without moving bases (``MovementBase.bHasRelativeLocation`` is never true) and left out, as in the
+.dal.  The thread rules, which the .dal gets from the language, are not modelled: every function runs where the frame puts it.
 """
 
 from __future__ import annotations
 
 import math
+from collections import Counter
 
 from oracles.als_lean_oracle import UE_KINDA_SMALL_NUMBER, UE_LN2, UE_SMALL_NUMBER, dot, inv_exp_approx, quat_unrotate_vector, quat_yaw_degrees, unwind_degrees
 
@@ -25,6 +28,13 @@ TAGS = {
     "ViewMode": "Als.ViewMode.", "LocomotionMode": "Als.LocomotionMode.", "RotationMode": "Als.RotationMode.", "Stance": "Als.Stance.",
     "Gait": "Als.Gait.", "OverlayMode": "Als.OverlayMode.", "LocomotionAction": "Als.LocomotionAction.", "GroundedEntryMode": "Als.GroundedEntryMode.",
 }
+
+SLOT_NONE, SLOT_STANDING, SLOT_CROUCHING = 0, 1, 2                      # the FName slots of the turn in place state (the .dal's enum AlsTurnInPlaceSlot)
+MONTAGE_BLEND_INERTIALIZATION = 1                                       # EMontageBlendMode::Inertialization
+
+EARLY_BLEND_OUT_DEFAULTS = dict(BlendOutDuration=0.25, bCheckInput=True, bCheckLocomotionMode=True, bCheckRotationMode=True, bCheckStance=True,
+                                LocomotionModeEquals="Als.LocomotionMode.InAir", RotationModeEquals="Als.RotationMode.Aiming",
+                                StanceEquals="Als.Stance.Crouching")        # AlsAnimNotifyState_EarlyBlendOut.h:13-37
 
 
 def tag(kind, member):
@@ -131,12 +141,28 @@ def v_sub(a, b):
     return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
 
 
+def v_add(a, b):
+    return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+
+
 def v_len_sq(a):
     return a[0] * a[0] + a[1] * a[1] + a[2] * a[2]
 
 
 def v_scale(a, s):
     return (a[0] * s, a[1] * s, a[2] * s)
+
+
+def v_lerp(a, b, t):                                        # FMath::Lerp(FVector, FVector, float)
+    return (a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]), a[2] + t * (b[2] - a[2]))
+
+
+def v_normalize_in_place(v):                                # FVector::Normalize(): SquareSum > SMALL_NUMBER, else the vector is left as it is
+    sq = v_len_sq(v)
+    if sq > UE_SMALL_NUMBER:
+        s = 1.0 / math.sqrt(sq)
+        return (v[0] * s, v[1] * s, v[2] * s)
+    return v
 
 
 def rotator_of(q):
@@ -153,6 +179,108 @@ def rotator_of(q):
     return (pitch, yaw, roll)
 
 
+# ---- FQuat / FTransform re-derived (a transform is (location, rotation quaternion xyzw, scale)) -------------------------------
+
+QUAT_ID = (0.0, 0.0, 0.0, 1.0)
+UP = (0.0, 0.0, 1.0)
+
+
+def q_mul(a, b):                                            # FQuat::operator*: b is applied first
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return (aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz)
+
+
+def q_inverse(q):                                           # FQuat::Inverse (normalized quaternions)
+    return (-q[0], -q[1], -q[2], q[3])
+
+
+def q_rotate(q, v):                                         # FQuat::RotateVector: V + W * T + Q ^ T with T = 2 * (Q ^ V)
+    qv = (q[0], q[1], q[2])
+    t = v_scale(_cross(qv, v), 2.0)
+    c = _cross(qv, t)
+    return (v[0] + q[3] * t[0] + c[0], v[1] + q[3] * t[1] + c[1], v[2] + q[3] * t[2] + c[2])
+
+
+def _cross(a, b):
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+
+def q_normalize(q):                                         # FQuat::Normalize(): identity when the square sum is below SMALL_NUMBER
+    sq = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]
+    if sq >= UE_SMALL_NUMBER:
+        s = 1.0 / math.sqrt(sq)
+        return (q[0] * s, q[1] * s, q[2] * s, q[3] * s)
+    return QUAT_ID
+
+
+def q_from_axis_angle(axis, rad):                           # FQuat(Axis, AngleRad)
+    s, c = math.sin(0.5 * rad), math.cos(0.5 * rad)
+    return (s * axis[0], s * axis[1], s * axis[2], c)
+
+
+def q_twist_angle(q, axis):                                 # FQuat::GetTwistAngle: UnwindRadians(2 atan2(axis . xyz, w))
+    a = 2.0 * math.atan2(axis[0] * q[0] + axis[1] * q[1] + axis[2] * q[2], q[3])
+    while a > math.pi:
+        a -= 2.0 * math.pi
+    while a < -math.pi:
+        a += 2.0 * math.pi
+    return a
+
+
+def q_fast_lerp(a, b, alpha):                               # FQuat::FastLerp: B * Alpha + A * (Bias * (1 - Alpha)), Bias = sign of A | B (>= 0: +1)
+    d = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+    bias = 1.0 if d >= 0.0 else -1.0
+    return tuple(b[i] * alpha + a[i] * (bias * (1.0 - alpha)) for i in range(4))
+
+
+def q_equals(a, b, tol=UE_KINDA_SMALL_NUMBER):              # FQuat::Equals: component-wise within the tolerance, or the same with the sign of B flipped
+    return (all(abs(a[i] - b[i]) <= tol for i in range(4))) or (all(abs(a[i] + b[i]) <= tol for i in range(4)))
+
+
+def t_position(t, v):                                       # FTransform::TransformPosition: Rotation.RotateVector(Scale3D * V) + Translation
+    return v_add(q_rotate(t[1], (t[2][0] * v[0], t[2][1] * v[1], t[2][2] * v[2])), t[0])
+
+
+def t_rotation(t, q):                                       # FTransform::TransformRotation: Rotation * Q
+    return q_mul(t[1], q)
+
+
+def t_inverse(t):                                           # FTransform::Inverse
+    inv_rotation = q_inverse(t[1])
+    inv_scale = tuple((1.0 / s) if abs(s) > UE_SMALL_NUMBER else 0.0 for s in t[2])           # GetSafeScaleReciprocal
+    inv_translation = q_rotate(inv_rotation, tuple(inv_scale[i] * -t[0][i] for i in range(3)))
+    return (inv_translation, inv_rotation, inv_scale)
+
+
+def t_equals_no_scale_identity(t):                          # FTransform::EqualsNoScale(Identity): rotation and translation within KINDA_SMALL_NUMBER
+    return q_equals(t[1], QUAT_ID) and all(abs(c) <= UE_KINDA_SMALL_NUMBER for c in t[0])
+
+
+def angle_between_signed_xy(frm, to):                       # UAlsVector::AngleBetweenSignedXY (AlsVector.h:179): FVector2f::Normalize leaves a tiny vector alone
+    def norm2(v):
+        sq = v[0] * v[0] + v[1] * v[1]
+        if sq > UE_SMALL_NUMBER:
+            k = 1.0 / math.sqrt(sq)
+            return (v[0] * k, v[1] * k)
+        return (v[0], v[1])
+
+    a, b = norm2(frm), norm2(to)
+    d = a[0] * b[0] + a[1] * b[1]
+    cross = a[0] * b[1] - a[1] * b[0]
+    return math.degrees(math.acos(max(-1.0, min(1.0, d)))) * sign(cross)
+
+
+def new_foot(thigh):
+    return dict(LockAmount=0.0, ThighAxisPelvisSpace=thigh, TargetLocationWorldSpace=(0.0, 0.0, 0.0), TargetRotationWorldSpace=QUAT_ID,
+                LockLocationWorldSpace=(0.0, 0.0, 0.0), LockRotationWorldSpace=QUAT_ID, LockLocationMovementBaseSpace=(0.0, 0.0, 0.0),
+                LockRotationMovementBaseSpace=QUAT_ID, LockLocation=(0.0, 0.0, 0.0), LockRotation=QUAT_ID, FinalLocation=(0.0, 0.0, 0.0),
+                FinalRotation=QUAT_ID)
+
+
 # ---- the instance -------------------------------------------------------------------------------------------------------------
 
 class AlsAnimOracle:
@@ -163,13 +291,15 @@ class AlsAnimOracle:
     grounded: velocity_blend_hl, yaw_offset_curves (forward, backward, left, right)
     standing: animated_walk, animated_run, animated_sprint, stride_walk, stride_run, pivot_threshold
     crouching: animated_speed, stride
-    in_air: lean_curve
+    in_air: lean_curve, ground_prediction_curve
+    foot_lock: allow, thigh_angle_limit, foot_angle_limit
     rotate_in_place: view_yaw_threshold, fp_view_yaw_threshold, reference_view_yaw_speed (2), play_rate (2)
     transitions: quick_stop_blend_in, quick_stop_blend_out, quick_stop_play_rate (2), quick_stop_start_time,
                  standing_left, standing_right, crouching_left, crouching_right (sequence names)
     dynamic_transitions: foot_lock_distance_threshold, blend_duration, play_rate, standing/crouching left/right
-    turn_in_place: view_yaw_angle_threshold, view_yaw_speed_threshold, activation_delay (2)
-    teleport_distance_threshold
+    turn_in_place: view_yaw_angle_threshold, view_yaw_speed_threshold, view_yaw_angle_to_activation_delay (2), turn_180_angle_threshold,
+                   blend_duration, turns: {"standing_90_left" ... "crouching_180_right": {sequence, play_rate, scale_by_angle, animated_turn_angle}}
+    teleport_distance_threshold   (Character->GetSettings())
     """
 
     def __init__(self, settings):
@@ -200,27 +330,46 @@ class AlsAnimOracle:
                              SprintAccelerationAmount=0.0, bPivotActive=False)
         s["Crouching"] = dict(StrideBlendAmount=0.0, PlayRate=1.0)
         s["InAir"] = dict(VerticalVelocityWorldSpace=0.0, bJumpRequested=False, bJumped=False, JumpPlayRate=1.0, GroundPredictionAmount=1.0)
-        s["Feet"] = dict(FootPlantedAmount=0.0, FeetCrossingAmount=0.0, bValid=False)
+        s["Feet"] = dict(PelvisRotation=QUAT_ID, FootPlantedAmount=0.0, FeetCrossingAmount=0.0, bValid=False, bBecameValid=False,
+                         Left=new_foot((0.0, 0.0, -1.0)), Right=new_foot((0.0, 0.0, 1.0)))       # AlsFeetState.h:48
         s["Transitions"] = dict(bTransitionsAllowed=False, QueuedTransitionSequence=None, QueuedTransitionBlendInDuration=0.0,
                                 QueuedTransitionBlendOutDuration=0.0, QueuedTransitionPlayRate=1.0, QueuedTransitionStartTime=0.0,
                                 bStopTransitionsQueued=False, QueuedStopTransitionsBlendOutDuration=-1.0)
         s["DynamicTransitions"] = dict(bUpdatedThisFrame=False, FrameDelay=0)
         s["RotateInPlace"] = dict(bUpdatedThisFrame=False, bRotatingLeft=False, bRotatingRight=False, PlayRate=1.0)
-        s["TurnInPlace"] = dict(bUpdatedThisFrame=False, ActivationDelay=0.0, PlayRate=1.0)
-        s["Ragdolling"] = dict(FlailPlayRate=1.0)
+        s["TurnInPlace"] = dict(bUpdatedThisFrame=False, ActivationDelay=0.0, QueuedSettings=None, QueuedSlotName=SLOT_NONE, QueuedTurnYawAngle=0.0, PlayRate=1.0)
+        s["Ragdolling"] = dict(FlailPlayRate=1.0, bFinalRagdollPoseValid=False)
         self.s = s
         self.bPendingUpdate = True
         self.TeleportedTime = 0.0
+        self.DeltaTimeWithoutTimeDilation = 1.0
+        self.PreviousGlobalTimeDilation = 1.0
         self.f = None          # the inputs of the frame being processed
         self.before_post = {}
         self.dt = 1.0
+        self.commands = []     # the host commands of the frame so far: (name, args)
+        self.hits = Counter()  # how often each interesting branch ran (the tests check that the random sequences get into them)
+        self._snapshot_requested = False
+
+    # ---- NativeInitializeAnimation (AI:29-88) ---------------------------------------------------------------------------
+    def native_initialize_animation(self, thigh_left, thigh_right):
+        """``thigh_*``: the reference-pose translation of the first bone below the pelvis on the way up from the foot, None without a path."""
+        for foot, thigh in ((self.s["Feet"]["Left"], thigh_left), (self.s["Feet"]["Right"], thigh_right)):
+            if thigh is not None:
+                foot["ThighAxisPelvisSpace"] = v_normalize_in_place(thigh)         # AI:80-81
 
     # ---- the frame, in the engine's order -------------------------------------------------------------------------------
-    def frame(self, f, calls=()):
-        """One frame in the engine's order: NativeUpdateAnimation + NativeThreadSafeUpdateAnimation, the graph's entry calls
-        ``[(name, kwargs)]``, NativePostUpdateAnimation.  Returns ``flat()`` after all of it; ``before_post`` is what the graph left."""
+    def frame(self, f, calls=(), peer_calls=()):
+        """One frame in the engine's order: the calls of the character (``peer_calls``, method names: they were queued during its tick), the
+        notify events, NativeUpdateAnimation + NativeThreadSafeUpdateAnimation, the graph's entry calls ``[(name, kwargs)]``,
+        NativePostUpdateAnimation.  Returns ``flat()`` after all of it; ``before_post`` is what the graph left."""
         self.f = f
         self.dt = f["dt"]
+        self.commands = []
+        for name in peer_calls:
+            getattr(self, name)()
+        for ev in f.get("events", ()):
+            self.notify_event(*ev)
         self.native_update_animation(f["dt"])
         self.native_thread_safe_update_animation(f["dt"])
         for name, kwargs in calls:
@@ -232,6 +381,9 @@ class AlsAnimOracle:
     def native_update_animation(self, dt):                  # AI:98
         s, c, f = self.s, self.f["char"], self.f
         t = s["tags"]
+        time_dilation = self.PreviousGlobalTimeDilation * f["actor_time_dilation"]                     # AI:114
+        self.DeltaTimeWithoutTimeDilation = dt / time_dilation if time_dilation > UE_SMALL_NUMBER else f["real_delta_time"]   # AI:115
+        self.PreviousGlobalTimeDilation = f["time_dilation"]                                           # AI:116
         t["ViewMode"], t["LocomotionMode"], t["RotationMode"] = c["view_mode"], c["locomotion_mode"], c["rotation_mode"]
         t["Stance"], t["Gait"], t["OverlayMode"] = c["stance"], c["gait"], c["overlay_mode"]
         if t["LocomotionAction"] != c["locomotion_action"]:
@@ -246,7 +398,7 @@ class AlsAnimOracle:
         ia = s["InAir"]
         ia["bJumped"] = (not self.bPendingUpdate) and (ia["bJumped"] or ia["bJumpRequested"])
         ia["bJumpRequested"] = False
-        # RefreshFeetOnGameThread: M2
+        self.refresh_feet_on_game_thread()
         if t["LocomotionAction"] == tag("LocomotionAction", "Ragdolling"):                  # RefreshRagdollingOnGameThread, AI:2048
             rv = c["ragdoll_velocity"]
             s["Ragdolling"]["FlailPlayRate"] = clamp01(math.sqrt(dot(rv, rv)) / 1000.0)
@@ -261,23 +413,45 @@ class AlsAnimOracle:
         self.refresh_layering()
         self.refresh_pose()
         self.refresh_view(dt)
-        self.refresh_feet()
+        self.refresh_feet(dt)
         s["Transitions"]["bTransitionsAllowed"] = is_full_weight(self.curve("AllowTransitions"))    # RefreshTransitions, AI:1675
 
     def native_post_update_animation(self):                 # AI:194
-        # PlayQueuedTransitionAnimation, PlayQueuedTurnInPlaceAnimation, StopQueued...: the montage commands are M2; the queues are consumed
-        tr = self.s["Transitions"]
-        if not tr["bStopTransitionsQueued"] and tr["QueuedTransitionSequence"] is not None:
-            tr.update(QueuedTransitionSequence=None, QueuedTransitionBlendInDuration=0.0, QueuedTransitionBlendOutDuration=0.0,
-                      QueuedTransitionPlayRate=1.0, QueuedTransitionStartTime=0.0)
-        if tr["bStopTransitionsQueued"]:
-            tr["bStopTransitionsQueued"] = False
-            tr["QueuedStopTransitionsBlendOutDuration"] = -1.0
+        self.play_queued_transition_animation()
+        self.play_queued_turn_in_place_animation()
+        self.stop_queued_transition_and_turn_in_place_animations()
+        if self._snapshot_requested:                        # the SnapshotPose command of the frame has run
+            self._snapshot_requested = False
+            self.s["Ragdolling"]["bFinalRagdollPoseValid"] = True
         self.bPendingUpdate = not self.f["actor_ready"]
 
-    # ---- public calls of the character -----------------------------------------------------------------------------------
+    # ---- public calls of the character and the notifies ------------------------------------------------------------------
     def jump(self):                                         # AI.h:402 (the .dal queues it: it arrives at the start of the next update)
         self.s["InAir"]["bJumpRequested"] = True
+
+    def snapshot_final_ragdoll_pose(self):                  # AI:2064
+        self.hits["snapshot"] += 1
+        self.commands.append(("snapshot_pose", ("RagdollingState.FinalRagdollPose",)))
+        self._snapshot_requested = True
+
+    def set_grounded_entry_mode(self, new_mode):            # AI.h:382
+        self.s["tags"]["GroundedEntryMode"] = new_mode
+
+    def notify_event(self, kind, name, payload=None, instance=None):
+        """The events the notifies raise (AlsAnimNotify_SetGroundedEntryMode.cpp:30, AlsAnimNotifyState_EarlyBlendOut.cpp:44)."""
+        payload = payload or {}
+        if kind == "notify" and name == "AlsAnimNotify_SetGroundedEntryMode":
+            self.hits["grounded_entry_mode_notify"] += 1
+            self.set_grounded_entry_mode(payload.get("GroundedEntryMode", ""))
+        elif kind == "notify_tick" and name == "AlsAnimNotifyState_EarlyBlendOut":
+            p = {**EARLY_BLEND_OUT_DEFAULTS, **payload}
+            c = self.f["char"]
+            if ((p["bCheckInput"] and c["loc"]["bHasInput"]) or
+                    (p["bCheckLocomotionMode"] and c["locomotion_mode"] == p["LocomotionModeEquals"]) or
+                    (p["bCheckRotationMode"] and c["rotation_mode"] == p["RotationModeEquals"]) or
+                    (p["bCheckStance"] and c["stance"] == p["StanceEquals"])):
+                self.hits["early_blend_out"] += 1
+                self.commands.append(("montage_stop_source", (instance, p["BlendOutDuration"])))
 
     # ---- helpers ------------------------------------------------------------------------------------------------------------
     def curve(self, name):
@@ -406,7 +580,7 @@ class AlsAnimOracle:
             H["bInitializationRequired"] = False
             H["PitchAngle"], H["YawAngle"], H["YawVelocity"], H["bSwitchingLookSides"] = target_pitch, target_yaw, 0.0, False
         else:
-            effective_dt = self.f["dt_without_time_dilation"] if first_person else dt
+            effective_dt = self.DeltaTimeWithoutTimeDilation if first_person else dt
             H["PitchAngle"] = damper_exact_angle(H["PitchAngle"], target_pitch, effective_dt,
                                                  S["fp_pitch_hl"] if first_person else S["pitch_hl"])
             if ready_to_switch:
@@ -568,8 +742,34 @@ class AlsAnimOracle:
             ia["bJumped"] = False
             ia["JumpPlayRate"] = lerp_clamped(1.2, 1.5, loco["Speed"] / 600.0)
         ia["VerticalVelocityWorldSpace"] = loco["VelocityWorldSpace"][2]
-        ia["GroundPredictionAmount"] = 0.0                  # M2: the sweep; the early outs and the stub give 0
-        lean = s["Lean"]
+        self.refresh_ground_prediction()
+        self.refresh_in_air_lean()
+
+    def refresh_ground_prediction(self):                    # AI:1142
+        s = self.s
+        ia, loco = s["InAir"], s["Loco"]
+        if ia["VerticalVelocityWorldSpace"] > -200.0:       # AI:1150
+            ia["GroundPredictionAmount"] = 0.0
+            return
+        allowance_amount = 1.0 - self.curve01("GroundPredictionBlock")
+        if allowance_amount <= UE_KINDA_SMALL_NUMBER:
+            ia["GroundPredictionAmount"] = 0.0
+            return
+        start = loco["LocationWorldSpace"]
+        min_vertical_velocity, max_vertical_velocity = -4000.0, -200.0
+        direction = (loco["VelocityWorldSpace"][0], loco["VelocityWorldSpace"][1],
+                     clamp(loco["VelocityWorldSpace"][2], min_vertical_velocity, max_vertical_velocity))
+        direction = v_normalize_in_place(direction)
+        distance = mapped_range_clamped(max_vertical_velocity, min_vertical_velocity, 150.0, 2000.0, ia["VerticalVelocityWorldSpace"])
+        sweep_vector = v_scale(direction, distance * loco["ScaleWorldSpace"])
+        hit = self.f["sweep"](start, v_add(start, sweep_vector), loco["CapsuleRadius"], loco["CapsuleHalfHeight"])
+        ground_valid = hit["blocking"] and hit["normal"][2] >= loco["WalkableFloorAngleCos"]       # AI:1190
+        self.hits["ground_prediction_hit" if ground_valid else ("ground_prediction_wall" if hit["blocking"] else "ground_prediction_miss")] += 1
+        ia["GroundPredictionAmount"] = self.S["in_air"]["ground_prediction_curve"](hit["time"]) * allowance_amount if ground_valid else 0.0
+
+    def refresh_in_air_lean(self):                          # AI:1219
+        s = self.s
+        ia, lean = s["InAir"], s["Lean"]
         v = self.get_velocity()
         k = self.S["in_air"]["lean_curve"](ia["VerticalVelocityWorldSpace"]) / 350.0
         target = (v[0] * k, v[1] * k)
@@ -581,12 +781,141 @@ class AlsAnimOracle:
             lean["RightAmount"] = lerp(lean["RightAmount"], target[1], a)
             lean["ForwardAmount"] = lerp(lean["ForwardAmount"], target[0], a)
 
-    # ---- feet, transitions ---------------------------------------------------------------------------------------------------------------
-    def refresh_feet(self):                                 # M2 stub: the two curve reads of AI:1304 (only while bValid in ALS)
+    # ---- feet ------------------------------------------------------------------------------------------------------------------------
+    def refresh_feet_on_game_thread(self):                  # AI:1245
         F = self.s["Feet"]
+        f = self.f
+        pelvis = f["pelvis"]
+        if self.bPendingUpdate:
+            F["bValid"] = False
+            F["bBecameValid"] = False
+        elif not F["bValid"]:
+            if t_equals_no_scale_identity(pelvis):          # AI:1263
+                return
+            F["bValid"] = True
+            F["bBecameValid"] = True
+        else:
+            F["bBecameValid"] = False
+        F["PelvisRotation"] = pelvis[1]
+        use_ik = self.S["general"]["use_foot_ik"]
+        left = f["feet"]["ik_l" if use_ik else "vb_l"]
+        right = f["feet"]["ik_r" if use_ik else "vb_r"]
+        F["Left"]["TargetLocationWorldSpace"], F["Left"]["TargetRotationWorldSpace"] = left[0], left[1]
+        F["Right"]["TargetLocationWorldSpace"], F["Right"]["TargetRotationWorldSpace"] = right[0], right[1]
+
+    def refresh_feet(self, dt):                             # AI:1297
+        F = self.s["Feet"]
+        if not F["bValid"]:
+            return
         F["FootPlantedAmount"] = clamp(self.curve("FootPlanted"), -1.0, 1.0)
         F["FeetCrossingAmount"] = self.curve01("FeetCrossing")
+        component = self.f["mesh_transform"]
+        for foot, ik, lock in ((F["Left"], "FootLeftIk", "FootLeftLock"), (F["Right"], "FootRightIk", "FootRightLock")):
+            context = dict(ComponentTransform=component, ComponentTransformInverse=t_inverse(component), foot=foot,
+                           IkAmount=self.curve01(ik), LockAmount=self.curve01(lock), DeltaTime=dt)
+            self.process_foot_lock_teleport(context)
+            self.process_foot_lock_base_change(context)
+            self.refresh_foot_lock(context)
 
+    def process_foot_lock_teleport(self, c):                # AI:1332
+        foot = c["foot"]
+        if self.s["Feet"]["bBecameValid"] or self.f["time"] - self.TeleportedTime > 0.2 or not is_relevant(c["IkAmount"] * foot["LockAmount"]):
+            return
+        self.hits["foot_lock_teleport"] += 1
+        foot["LockLocationWorldSpace"] = t_position(c["ComponentTransform"], foot["LockLocation"])
+        foot["LockRotationWorldSpace"] = t_rotation(c["ComponentTransform"], foot["LockRotation"])
+
+    def process_foot_lock_base_change(self, c):             # AI:1360
+        foot = c["foot"]
+        F = self.s["Feet"]
+        if not F["bBecameValid"] or not is_relevant(c["IkAmount"] * foot["LockAmount"]):        # (bBaseChanged is false without bases)
+            return
+        if F["bBecameValid"]:
+            self.hits["foot_lock_became_valid"] += 1
+            foot["LockLocationWorldSpace"] = foot["TargetLocationWorldSpace"]
+            foot["LockRotationWorldSpace"] = foot["TargetRotationWorldSpace"]
+        foot["LockLocationMovementBaseSpace"] = (0.0, 0.0, 0.0)
+        foot["LockRotationMovementBaseSpace"] = QUAT_ID
+        foot["LockLocation"] = t_position(c["ComponentTransformInverse"], foot["LockLocationWorldSpace"])
+        foot["LockRotation"] = t_rotation(c["ComponentTransformInverse"], foot["LockRotationWorldSpace"])
+
+    def refresh_foot_lock(self, c):                         # AI:1395
+        foot = c["foot"]
+        s = self.s
+        F = s["Feet"]
+        inv = c["ComponentTransformInverse"]
+        new_lock_amount = c["LockAmount"]
+        if s["Loco"]["bMovingSmooth"] or s["tags"]["LocomotionMode"] != tag("LocomotionMode", "Grounded"):
+            moving_decrease_speed, not_grounded_decrease_speed = 5.0, 0.6
+            self.hits["foot_lock_decrease_moving" if s["Loco"]["bMovingSmooth"] else "foot_lock_decrease_in_air"] += 1
+            new_lock_amount = 0.0 if F["bBecameValid"] else max(0.0, min(new_lock_amount, foot["LockAmount"] - c["DeltaTime"] * (
+                moving_decrease_speed if s["Loco"]["bMovingSmooth"] else not_grounded_decrease_speed)))
+        if not self.S["foot_lock"]["allow"] or not is_relevant(c["IkAmount"] * new_lock_amount):
+            if foot["LockAmount"] > 0.0:
+                self.hits["foot_lock_released"] += 1
+                foot["LockAmount"] = 0.0
+                foot["LockLocationWorldSpace"] = (0.0, 0.0, 0.0)
+                foot["LockRotationWorldSpace"] = QUAT_ID
+                foot["LockLocationMovementBaseSpace"] = (0.0, 0.0, 0.0)
+                foot["LockRotationMovementBaseSpace"] = QUAT_ID
+                foot["LockLocation"] = (0.0, 0.0, 0.0)
+                foot["LockRotation"] = QUAT_ID
+            foot["FinalLocation"] = t_position(inv, foot["TargetLocationWorldSpace"])
+            foot["FinalRotation"] = t_rotation(inv, foot["TargetRotationWorldSpace"])
+            return
+        new_amount_equal_one = is_full_weight(new_lock_amount)
+        new_amount_greater_than_previous = new_lock_amount > foot["LockAmount"]
+        if new_amount_equal_one:
+            if new_amount_greater_than_previous:
+                self.hits["foot_lock_new_lock"] += 1
+                if F["bBecameValid"]:
+                    target_location, target_rotation = foot["TargetLocationWorldSpace"], foot["TargetRotationWorldSpace"]
+                else:
+                    # the final transform of the previous frame, without the foot IK (AI:1459)
+                    target_location = t_position(c["ComponentTransform"], foot["FinalLocation"])
+                    target_rotation = t_rotation(c["ComponentTransform"], foot["FinalRotation"])
+                foot["LockLocationMovementBaseSpace"] = (0.0, 0.0, 0.0)
+                foot["LockRotationMovementBaseSpace"] = QUAT_ID
+                if foot["LockAmount"] <= 0.9:
+                    self.hits["foot_lock_new_location"] += 1
+                    foot["LockLocationWorldSpace"] = target_location
+                    foot["LockRotationWorldSpace"] = target_rotation
+                    foot["LockLocation"] = t_position(inv, foot["LockLocationWorldSpace"])
+                    foot["LockRotation"] = t_rotation(inv, foot["LockRotationWorldSpace"])
+            foot["LockAmount"] = 1.0
+        elif not new_amount_greater_than_previous:
+            self.hits["foot_lock_blend_out"] += 1
+            foot["LockAmount"] = new_lock_amount
+        foot["LockLocation"] = t_position(inv, foot["LockLocationWorldSpace"])
+        foot["LockRotation"] = t_rotation(inv, foot["LockRotationWorldSpace"])
+        self.constrain_foot_lock(foot)
+        final_location = v_lerp(foot["TargetLocationWorldSpace"], foot["LockLocationWorldSpace"], foot["LockAmount"])
+        final_rotation = q_normalize(q_fast_lerp(foot["TargetRotationWorldSpace"], foot["LockRotationWorldSpace"], foot["LockAmount"]))
+        foot["FinalLocation"] = t_position(inv, final_location)
+        foot["FinalRotation"] = t_rotation(inv, final_rotation)
+
+    def constrain_foot_lock(self, foot):                    # AI:1526
+        F = self.s["Feet"]
+        S = self.S["foot_lock"]
+        thigh_axis = q_rotate(F["PelvisRotation"], foot["ThighAxisPelvisSpace"])
+        thigh_delta_angle = angle_between_signed_xy(thigh_axis, foot["LockLocation"])
+        if abs(thigh_delta_angle) > S["thigh_angle_limit"] + UE_KINDA_SMALL_NUMBER:
+            self.hits["thigh_angle_clamped"] += 1
+            clamped = clamp(thigh_delta_angle, -S["thigh_angle_limit"], S["thigh_angle_limit"])
+            offset = q_from_axis_angle(UP, math.radians(clamped - thigh_delta_angle))
+            foot["LockLocation"] = q_rotate(offset, foot["LockLocation"])
+            foot["LockRotation"] = q_normalize(q_mul(offset, foot["LockRotation"]))
+            component = self.f["mesh_transform"]
+            foot["LockLocationWorldSpace"] = t_position(component, foot["LockLocation"])
+            foot["LockRotationWorldSpace"] = t_rotation(component, foot["LockRotation"])
+        foot_delta_angle = math.degrees(q_twist_angle(q_mul(foot["LockRotationWorldSpace"], q_inverse(foot["TargetRotationWorldSpace"])), UP))
+        if abs(foot_delta_angle) > S["foot_angle_limit"] + UE_KINDA_SMALL_NUMBER:
+            self.hits["foot_angle_clamped"] += 1
+            clamped = clamp(foot_delta_angle, -S["foot_angle_limit"], S["foot_angle_limit"])
+            offset = q_from_axis_angle(UP, math.radians(clamped - foot_delta_angle))
+            foot["LockRotationWorldSpace"] = q_mul(offset, foot["LockRotationWorldSpace"])
+
+    # ---- transitions ---------------------------------------------------------------------------------------------------------------------
     def play_transition_animation(self, Sequence, BlendInDuration=0.2, BlendOutDuration=0.2, PlayRate=1.0, StartTime=0.0, bFromStandingIdleOnly=False):
         loco, t = self.s["Loco"], self.s["Transitions"]      # AI:1614
         if bFromStandingIdleOnly and (loco["bMoving"] or self.s["tags"]["Stance"] != tag("Stance", "Standing")):
@@ -624,13 +953,55 @@ class AlsAnimOracle:
         else:
             self.play_transition_right_animation(S["quick_stop_blend_in"], S["quick_stop_blend_out"], rate, S["quick_stop_start_time"])
 
-    def refresh_dynamic_transitions(self):                  # AI:1682 (the foot lock is M2: every LockAmount is 0, nothing is allowed)
-        D = self.s["DynamicTransitions"]
+    def refresh_dynamic_transitions(self):                  # AI:1682
+        s, S = self.s, self.S["dynamic_transitions"]
+        D, F, T = s["DynamicTransitions"], s["Feet"], s["Transitions"]
         if D["bUpdatedThisFrame"]:
             return
         D["bUpdatedThisFrame"] = True
         if D["FrameDelay"] > 0:
             D["FrameDelay"] -= 1
+            return
+        if not T["bTransitionsAllowed"]:
+            return
+        threshold_squared = (S["foot_lock_distance_threshold"] * s["Loco"]["ScaleWorldSpace"]) ** 2
+        left_squared = v_len_sq(v_sub(F["Left"]["TargetLocationWorldSpace"], F["Left"]["LockLocationWorldSpace"]))
+        right_squared = v_len_sq(v_sub(F["Right"]["TargetLocationWorldSpace"], F["Right"]["LockLocationWorldSpace"]))
+        left_allowed = is_relevant(F["Left"]["LockAmount"]) and left_squared > threshold_squared
+        right_allowed = is_relevant(F["Right"]["LockAmount"]) and right_squared > threshold_squared
+        if not left_allowed and not right_allowed:
+            return
+        crouching = s["tags"]["Stance"] == tag("Stance", "Crouching")
+        self.hits["dynamic_transition_both" if left_allowed and right_allowed else ("dynamic_transition_left" if left_allowed else "dynamic_transition_right")] += 1
+        sequence = None
+        # If both transitions are allowed, choose the one with a greater lock distance.
+        if not left_allowed or (right_allowed and left_squared < right_squared):
+            sequence = S["crouching_right"] if crouching else S["standing_right"]
+        elif not right_allowed or left_squared >= right_squared:
+            sequence = S["crouching_left"] if crouching else S["standing_left"]
+        if sequence is not None:
+            D["FrameDelay"] = 2
+            T.update(QueuedTransitionSequence=sequence, QueuedTransitionBlendInDuration=S["blend_duration"],
+                     QueuedTransitionBlendOutDuration=S["blend_duration"], QueuedTransitionPlayRate=S["play_rate"], QueuedTransitionStartTime=0.0)
+
+    def play_queued_transition_animation(self):             # AI:1780
+        T = self.s["Transitions"]
+        if T["bStopTransitionsQueued"] or T["QueuedTransitionSequence"] is None:
+            return
+        self.commands.append(("play_slot_animation", (T["QueuedTransitionSequence"], "Transition", T["QueuedTransitionBlendInDuration"],
+                                                      T["QueuedTransitionBlendOutDuration"], T["QueuedTransitionPlayRate"], 1, 0.0,
+                                                      T["QueuedTransitionStartTime"], 0)))
+        T.update(QueuedTransitionSequence=None, QueuedTransitionBlendInDuration=0.0, QueuedTransitionBlendOutDuration=0.0,
+                 QueuedTransitionPlayRate=1.0, QueuedTransitionStartTime=0.0)
+
+    def stop_queued_transition_and_turn_in_place_animations(self):    # AI:1800
+        T = self.s["Transitions"]
+        if not T["bStopTransitionsQueued"]:
+            return
+        for slot in ("Transition", "TurnInPlaceStanding", "TurnInPlaceCrouching"):
+            self.commands.append(("stop_montages_with_slot", (slot, T["QueuedStopTransitionsBlendOutDuration"])))
+        T["bStopTransitionsQueued"] = False
+        T["QueuedStopTransitionsBlendOutDuration"] = -1.0
 
     # ---- rotate in place / turn in place -----------------------------------------------------------------------------------------------------
     def refresh_rotate_in_place(self):                      # AI:1827
@@ -657,7 +1028,7 @@ class AlsAnimOracle:
     def initialize_turn_in_place(self):                     # AI:1898
         self.s["TurnInPlace"]["ActivationDelay"] = 0.0
 
-    def refresh_turn_in_place(self):                        # AI:1903 up to the selection (M2)
+    def refresh_turn_in_place(self):                        # AI:1903
         s, S = self.s, self.S["turn_in_place"]
         T, V = s["TurnInPlace"], s["View"]
         if T["bUpdatedThisFrame"]:
@@ -672,15 +1043,55 @@ class AlsAnimOracle:
             T["ActivationDelay"] = 0.0
             return
         T["ActivationDelay"] += self.dt
+        delay = S["view_yaw_angle_to_activation_delay"]
+        activation_delay = mapped_range_clamped(S["view_yaw_angle_threshold"], 180.0, delay[0], delay[1], abs(V["YawAngle"]))
+        if T["ActivationDelay"] <= activation_delay:
+            return
+        # Select settings based on turn angle and stance.
+        turn_left = remap_angle_ccw(V["YawAngle"]) <= 0.0
+        turns = S["turns"]
+        chosen, slot = None, SLOT_NONE
+        if t["Stance"] == tag("Stance", "Standing"):
+            slot = SLOT_STANDING
+            ninety = abs(V["YawAngle"]) < S["turn_180_angle_threshold"]
+            chosen = turns[("standing_90_" if ninety else "standing_180_") + ("left" if turn_left else "right")]
+        elif t["Stance"] == tag("Stance", "Crouching"):
+            slot = SLOT_CROUCHING
+            ninety = abs(V["YawAngle"]) < S["turn_180_angle_threshold"]
+            chosen = turns[("crouching_90_" if ninety else "crouching_180_") + ("left" if turn_left else "right")]
+        if chosen is not None and chosen["sequence"] is not None:      # IsValid(TurnInPlaceSettings) && IsValid(Sequence)
+            self.hits[("turn_" + ("left" if turn_left else "right") + ("_90" if ninety else "_180") + ("_standing" if slot == SLOT_STANDING else "_crouching"))] += 1
+            T["QueuedSettings"] = chosen
+            T["QueuedSlotName"] = slot
+            T["QueuedTurnYawAngle"] = V["YawAngle"]
+
+    def play_queued_turn_in_place_animation(self):          # AI:2012
+        s, S = self.s, self.S["turn_in_place"]
+        T = s["TurnInPlace"]
+        if s["Transitions"]["bStopTransitionsQueued"] or T["QueuedSlotName"] == SLOT_NONE:
+            return
+        q = T["QueuedSettings"]
+        slot = "TurnInPlaceStanding" if T["QueuedSlotName"] == SLOT_STANDING else "TurnInPlaceCrouching"
+        self.commands.append(("play_slot_animation", (q["sequence"], slot, S["blend_duration"], S["blend_duration"], q["play_rate"], 1, 0.0, 0.0,
+                                                      MONTAGE_BLEND_INERTIALIZATION)))
+        T["PlayRate"] = q["play_rate"]
+        self.hits["turn_played"] += 1
+        if q["scale_by_angle"]:
+            T["PlayRate"] *= abs(T["QueuedTurnYawAngle"] / q["animated_turn_angle"]) if q["animated_turn_angle"] != 0.0 else 0.0
+        T["QueuedSlotName"] = SLOT_NONE
+        T["QueuedTurnYawAngle"] = 0.0
 
     # ---- ControlRig input -------------------------------------------------------------------------------------------------------------------
     def get_control_rig_input(self):                        # AI:235
         s = self.s
         pelvis = clamp01(s["Pose"]["GroundedAmount"] + s["Pose"]["InAirAmount"] * s["InAir"]["GroundPredictionAmount"])
-        return dict(bUseHandIkBones=self.S["general"]["use_hand_ik"], bUseFootIkBones=self.S["general"]["use_foot_ik"], bFootTransformsValid=s["Feet"]["bValid"],
+        F = s["Feet"]
+        return dict(bUseHandIkBones=self.S["general"]["use_hand_ik"], bUseFootIkBones=self.S["general"]["use_foot_ik"], bFootTransformsValid=F["bValid"],
                     VelocityBlendForwardAmount=s["Grounded"]["VelocityBlend"]["ForwardAmount"],
                     VelocityBlendBackwardAmount=s["Grounded"]["VelocityBlend"]["BackwardAmount"],
-                    SpineYawAngle=s["Spine"]["FinalYawAngle"], PelvisOffsetAmount=pelvis)
+                    SpineYawAngle=s["Spine"]["FinalYawAngle"], PelvisOffsetAmount=pelvis,
+                    FootLeftLocation=F["Left"]["FinalLocation"], FootLeftRotation=F["Left"]["FinalRotation"],
+                    FootRightLocation=F["Right"]["FinalLocation"], FootRightRotation=F["Right"]["FinalRotation"])
 
     # ---- the flat view the tests compare ----------------------------------------------------------------------------------------------------------
     def flat(self):
@@ -689,8 +1100,9 @@ class AlsAnimOracle:
         roots = {"LayeringState": s["Layering"], "PoseState": s["Pose"], "ViewState": s["View"], "SpineState": s["Spine"], "HeadState": s["Head"],
                  "LocomotionState": s["Loco"], "LeanState": s["Lean"], "GroundedState": s["Grounded"], "StandingState": s["Standing"],
                  "CrouchingState": s["Crouching"], "InAirState": s["InAir"], "FeetState": s["Feet"], "TransitionsState": s["Transitions"],
-                 "DynamicTransitionsState": s["DynamicTransitions"], "RotateInPlaceState": s["RotateInPlace"], "TurnInPlaceState": s["TurnInPlace"],
-                 "RagdollingState": s["Ragdolling"]}
+                 "DynamicTransitionsState": s["DynamicTransitions"], "RotateInPlaceState": s["RotateInPlace"],
+                 "TurnInPlaceState": {k: v for k, v in s["TurnInPlace"].items() if k != "QueuedSettings"},        # QueuedSettings is a pointer in C++ and a copy in the .dal
+                 "RagdollingState": {"FlailPlayRate": s["Ragdolling"]["FlailPlayRate"]}}
 
         def walk(prefix, d):
             for k, v in d.items():
@@ -701,6 +1113,9 @@ class AlsAnimOracle:
 
         for name, d in roots.items():
             walk(name + ".", d)
+        out["RagdollingState.FinalRagdollPose"] = s["Ragdolling"]["bFinalRagdollPoseValid"]       # a snapshot: only whether it was taken
         out["bPendingUpdate"] = self.bPendingUpdate
         out["TeleportedTime"] = self.TeleportedTime
+        out["DeltaTimeWithoutTimeDilation"] = self.DeltaTimeWithoutTimeDilation
+        out["PreviousGlobalTimeDilation"] = self.PreviousGlobalTimeDilation
         return out

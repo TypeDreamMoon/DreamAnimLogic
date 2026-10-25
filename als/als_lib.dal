@@ -12,8 +12,9 @@
 //     are channel lists here: the channels that block, which is what the exported container data says.  The data loads without a
 //     warning; the two lists next to them (...ResponseChannels) hold the same channels.
 //   * UAlsTurnInPlaceSettings is an Instanced UObject in C++ (null = not set); here it is a nested settings value.
-//   * FAlsTurnInPlaceState::QueuedSettings / QueuedSlotName and FAlsRagdollingAnimationState::FinalRagdollPose have no DAL type
-//     (a settings reference, a name, a pose snapshot); the animation instance decides how to carry them.
+//   * FAlsTurnInPlaceState::QueuedSettings is a copy of the settings value (C++: a pointer to the UAlsTurnInPlaceSettings object) and
+//     QueuedSlotName is the enum AlsTurnInPlaceSlot (C++: an FName; None = nothing queued, which is what a null QueuedSettings says).
+//   * FAlsRagdollingAnimationState::FinalRagdollPose is the `snapshot` value type (0.4.0), filled by host.snapshot_pose.
 //   * the view network smoothing members of FAlsViewState and the movement base state of the character are not declared (no
 //     networking, no moving bases).
 
@@ -246,13 +247,18 @@ struct AlsRotateInPlaceState {                                                  
     bRotatingRight: bool;
     PlayRate: float = 1.0;
 }
-struct AlsTurnInPlaceState {                                                                            // AlsTurnInPlaceState.h:8 (QueuedSettings / QueuedSlotName: see the header)
+struct AlsTurnInPlaceState {                                                                            // AlsTurnInPlaceState.h:8
     bUpdatedThisFrame: bool;
     ActivationDelay: float;
+    QueuedSettings: AlsTurnInPlaceSettings;                                                             // a copy; only meaningful while QueuedSlotName is not None
+    QueuedSlotName: AlsTurnInPlaceSlot;
     QueuedTurnYawAngle: float;
     PlayRate: float = 1.0;
 }
-struct AlsRagdollingAnimationState { FlailPlayRate: float = 1.0; }                                      // AlsRagdollingAnimationState.h:7 (FinalRagdollPose: see the header)
+struct AlsRagdollingAnimationState {                                                                    // AlsRagdollingAnimationState.h:7
+    FinalRagdollPose: snapshot;
+    FlailPlayRate: float = 1.0;
+}
 struct AlsMovementBaseState {                                                                           // AlsMovementBaseState.h:7: the .dab only reads bHasRelativeLocation; no moving bases
     bBaseChanged: bool;
     bHasRelativeLocation: bool;
@@ -622,4 +628,24 @@ fn is_relevant(weight: float) -> bool { return weight > ZERO_ANIMWEIGHT_THRESH; 
 fn movement_direction_cache(d: AlsMovementDirection) -> AlsMovementDirectionCache {               // AlsMovementDirection.h:25 FAlsMovementDirectionCache(EAlsMovementDirection)
     return AlsMovementDirectionCache(bForward: d == AlsMovementDirection.Forward, bBackward: d == AlsMovementDirection.Backward,
                                      bLeft: d == AlsMovementDirection.Left, bRight: d == AlsMovementDirection.Right);
+}
+
+// ---- foot lock and turn in place (AlsAnimationInstance.dal) ------------------------------------------------------------------
+enum AlsTurnInPlaceSlot { None, TurnInPlaceStanding, TurnInPlaceCrouching }                      // the FName slots of UAlsConstants (AlsConstants.h:30-31); None = nothing queued
+
+struct AlsFootUpdateContext {                                                                      // FAlsFootUpdateContext (AlsFeetState.h:76); the foot itself is passed next to it
+    ComponentTransform: transform;
+    ComponentTransformInverse: transform;
+    IkAmount: float;
+    LockAmount: float;
+    FrameTime: float;
+}
+
+// FTransform::EqualsNoScale(FTransform::Identity) with the default tolerance, as AlsAnimationInstance.cpp:1263 asks it: FQuat::Equals is true for q and -q.
+fn is_identity_no_scale(t: transform) -> bool {
+    let q = t.rotation;
+    let l = t.location;
+    let same = abs(q.x) <= KINDA_SMALL_NUMBER && abs(q.y) <= KINDA_SMALL_NUMBER && abs(q.z) <= KINDA_SMALL_NUMBER && abs(q.w - 1.0) <= KINDA_SMALL_NUMBER;
+    let opposite = abs(q.x) <= KINDA_SMALL_NUMBER && abs(q.y) <= KINDA_SMALL_NUMBER && abs(q.z) <= KINDA_SMALL_NUMBER && abs(q.w + 1.0) <= KINDA_SMALL_NUMBER;
+    return (same || opposite) && abs(l.x) <= KINDA_SMALL_NUMBER && abs(l.y) <= KINDA_SMALL_NUMBER && abs(l.z) <= KINDA_SMALL_NUMBER;
 }

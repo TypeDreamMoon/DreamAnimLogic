@@ -4,8 +4,8 @@ A .dab (``Parent = AlsAnimationInstance``) reads ``Main.GroundedState.VelocityBl
 ``Main.PlayTransitionAnimation(Sequence = ..., PlayRate = ...)`` and ``Self.GetControlRigInput()``.  This test scans the 26 ALS corpus
 files and checks the instance against what they use:
 
-* the 82 state paths (22 roots) all exist in the exported state, with the type the ALS C++ header gives them -- except
-  ``RagdollingState.FinalRagdollPose`` (a ``FPoseSnapshot``), which DAL cannot declare yet (a recorded language gap: KNOWN_GAPS);
+* the 82 state paths (22 roots) all exist in the exported state, with the type the ALS C++ header gives them
+  (``RagdollingState.FinalRagdollPose`` is a ``FPoseSnapshot`` in C++ and the ``snapshot`` value type here);
 * every ``Call`` target is an ``entry`` with the parameters (names, types, defaults) of the ALS function, the 17 of them the linked
   instance forwards are marked ``linked`` and ``AlsLinkedAnimationInstance.dal`` forwards exactly those;
 * ``GetControlRigInput`` is a ``pub view`` returning the struct the Control Rig reads, member for member (21 scalar leaves);
@@ -52,11 +52,8 @@ TAGS = {"Gait": "AlsGait", "GroundedEntryMode": "AlsGroundedEntryMode", "Locomot
 ENUMS = {"GroundedState.HipsDirection": "AlsHipsDirection"}
 POSE_SNAPSHOT = "RagdollingState.FinalRagdollPose"
 
-# Paths a .dab reads that the instance cannot export yet, with the reason (the report and als-dal-rewrite.md 7 list them as language gaps).
-KNOWN_GAPS = {
-    POSE_SNAPSHOT: "FAlsRagdollingAnimationState::FinalRagdollPose is an FPoseSnapshot (SnapshotPose, AI:2064): DAL has no pose snapshot value "
-                   "and no snapshot_pose command until L9",
-}
+# Paths a .dab reads that the instance cannot export (none since the snapshot value type and the snapshot_pose command of 0.4.0).
+KNOWN_GAPS: dict = {}
 
 
 def expected_type(path):
@@ -67,7 +64,7 @@ def expected_type(path):
     if path in BOOLS:
         return "bool"
     if path == POSE_SNAPSHOT:
-        return "FPoseSnapshot"
+        return "snapshot"
     return "float"
 
 
@@ -281,7 +278,7 @@ class ContractTests(unittest.TestCase):
                 wrong.append((path, type_name(ty), expected_type(path)))
         self.assertEqual(missing, [])
         self.assertEqual(wrong, [])
-        self.assertEqual(len(paths) - len(set(KNOWN_GAPS) & set(paths)), 81)         # 81 of the 82, the rest is a recorded gap
+        self.assertEqual(len(paths) - len(set(KNOWN_GAPS) & set(paths)), 82)         # all of the 82
 
     def test_the_known_gaps_are_exactly_the_paths_that_are_not_exported(self):
         paths = self.contract_paths()
@@ -452,7 +449,7 @@ class ContractTests(unittest.TestCase):
                 leaves.extend(v)
             else:
                 self.assertEqual(len(v), 4, name)
-                self.assertAlmostEqual(sum(c * c for c in v), 1.0, places=9, msg=name)       # a unit quaternion, also before the foot lock exists
+                self.assertAlmostEqual(sum(c * c for c in v), 1.0, places=9, msg=name)       # a unit quaternion, also while the feet are not valid
                 leaves.extend(v)
         self.assertEqual(len(leaves), 21)
 
@@ -462,7 +459,7 @@ class ContractTests(unittest.TestCase):
 
     def test_pub_methods_the_character_and_the_notifies_call(self):
         pub = {m.name: m for m in self.inst.methods if m.pub and not m.is_view}
-        self.assertEqual(sorted(pub), ["Jump", "MarkTeleported", "SetGroundedEntryMode"])
+        self.assertEqual(sorted(pub), ["Jump", "MarkTeleported", "SetGroundedEntryMode", "SnapshotFinalRagdollPose"])
         self.assertEqual([(n, t.name) for n, t in pub["SetGroundedEntryMode"].params], [("NewGroundedEntryMode", "AlsGroundedEntryMode")])
 
 
@@ -520,7 +517,7 @@ class AgainstTheCppHeadersTests(unittest.TestCase):
         for path in BOOLS | set(TAGS) | set(ENUMS) | {POSE_SNAPSHOT}:
             want = expected_type(path)
             got = classes[types[path]]
-            self.assertEqual({"bool": "bool", "FPoseSnapshot": "FPoseSnapshot"}.get(want, "tag" if want in TAGS.values() else "enum"), got, path)
+            self.assertEqual({"bool": "bool", "snapshot": "FPoseSnapshot"}.get(want, "tag" if want in TAGS.values() else "enum"), got, path)
             checked += 1
         self.assertEqual(checked, 13 + 6 + 1 + 1)
         if HAVE_CORPUS:
