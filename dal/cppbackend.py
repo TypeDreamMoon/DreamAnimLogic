@@ -807,7 +807,8 @@ class CppGen:
         self.has_events = bool(self.event_handlers)
         self.hook_handlers = [h for h in module.handlers if h.event in HOOK_EVENTS]
         self.notify_handlers = [h for h in module.handlers if h.params and isinstance(h.params[0][1], StructType) and h.params[0][1].is_notify]
-        self.sink = bool(self.hook_handlers or self.notify_handlers)     # the class receives events through DalHost::FEventRouter (hooks, declared notifies)
+        self.hook_slots = [u.phase for u in module.updates if u.phase in ir.HOOK_SLOTS]            # slots the movement component runs itself (DalRunHook)
+        self.sink = bool(self.hook_handlers or self.notify_handlers or self.hook_slots)     # the class receives events through DalHost::FEventRouter (hooks, declared notifies, hook slots)
         self.post = module.kind == "anim" and (module.post_update is not None or module.post_flush)   # a proxy hook runs post_update (and flushes the commands)
         self.post_flush = module.kind == "anim" and module.post_flush
         self.declared_notifies = {n.name for n in module.notifies}
@@ -1195,6 +1196,9 @@ class CppGen:
                Method("void", "DalSetupTickOrder", external=True, doc="Order the tick functions around the movement component, the controller and the mesh.")]
         out.append(Method("FActorComponentTickFunction&", "DalGetPhaseTick", "const int32 Slot", [], "const int32 Slot", access="public", external=True,
                           doc="The tick function of an update block (the other logics of the actor order theirs around it)."))
+        if self.hook_slots:
+            out.append(Method("void", "DalRunHook", "FName DalHook, float DeltaSeconds", [], "const FName DalHook, const float DeltaSeconds", override=True, access="public", external=True,
+                              doc="DalHost::IEventSink: the movement component runs a hook slot (" + ", ".join(self.hook_slots) + ") where it happens."))
         for slot in self.slots:
             out.append(Method("void", f"DalUpdate_{camel(slot)}", "float DeltaSeconds", external=True, doc=f"update in {slot}"))
         return out
@@ -1216,6 +1220,8 @@ class CppGen:
         blocks.append(reg)
         need = {"owner": False, "pawn": False, "move": False, "mesh": False, "ctrl": False}
         for slot in self.slots:
+            if slot in ir.HOOK_SLOTS:
+                continue
             if slot == "pre_movement":
                 need.update(owner=True, pawn=True, move=True, ctrl=True)
             elif slot == "after_movement":
@@ -1231,6 +1237,8 @@ class CppGen:
         if need["mesh"]:
             so.append(f"{T}USkeletalMeshComponent* DalMesh = DalOwner->FindComponentByClass<USkeletalMeshComponent>();")
         for i, slot in enumerate(self.slots):
+            if slot in ir.HOOK_SLOTS:
+                continue                                                  # (run by the movement component, no tick function to order)
             so.append("")
             so.append(f"{T}// update in {slot}")
             if slot == "pre_movement":
@@ -1282,6 +1290,12 @@ class CppGen:
             rp.append(f"{T}DalFlushCommands();")
         rp.append("}")
         blocks.append(rp)
+        if self.hook_slots:
+            rh = [f"void {cls}::DalRunHook(const FName DalHook, const float DeltaSeconds)", "{"]
+            for slot in self.hook_slots:
+                rh += [f"{T}if (DalHook == FName(TEXT(\"{slot}\")))", f"{T}{{", f"{T}{T}DalRunPhase({self.slots.index(slot)}, DeltaSeconds);", f"{T}}}"]
+            rh.append("}")
+            blocks.append(rh)
         return blocks
 
     def peer_methods(self) -> list[Method]:
@@ -1451,6 +1465,8 @@ class CppGen:
     def receive_body(self) -> list[str]:
         """DalReceiveEvent: queue an event the router posted.  The events of a notify class carry its declared name: they are queued
         under the id this logic gave it (and dropped when the logic does not handle that notify)."""
+        if not self.has_events:
+            return ["static_cast<void>(DalEvent);                    // (this logic only has hook slots: nothing to queue)"]
         if not self.notify_handlers:
             return ["DalPostEvent(DalEvent);"]
         return ["DalHost::FEvent DalQueued = DalEvent;",
@@ -2706,7 +2722,7 @@ class CppGen:
                 for i, slot in enumerate(self.slots):
                     ctor += [f"{T}DalPhaseTicks[{i}].Target = this;",
                              f"{T}DalPhaseTicks[{i}].Phase = {i};",
-                             f"{T}DalPhaseTicks[{i}].bCanEverTick = true;",
+                             f"{T}DalPhaseTicks[{i}].bCanEverTick = {'false' if slot in ir.HOOK_SLOTS else 'true'};" + ("                // a hook slot: the movement component runs it" if slot in ir.HOOK_SLOTS else ""),
                              f"{T}DalPhaseTicks[{i}].TickGroup = {'TG_PostPhysics' if slot == 'after_anim' else 'TG_PrePhysics'};"]
                 ctor.append("}")
                 blocks.append(ctor)

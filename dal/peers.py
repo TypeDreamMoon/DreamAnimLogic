@@ -34,7 +34,7 @@ def actor_slots(unit) -> list[str]:
     """The tick slots of an actor logic from its declarations: the slot of every ``update`` (the logic's own, then ``pre_movement``, when it names none)."""
     from . import syntax as S
 
-    order = ("pre_movement", "after_movement", "after_anim")
+    order = ("pre_movement", "after_movement", "after_anim", "physics_walking")
     logic = next((d for d in unit.decls if isinstance(d, S.LogicDecl)), None)
     own = logic.phase if logic is not None else None
     found = {(d.phase or own or "pre_movement") for d in unit.decls if isinstance(d, S.UpdateDecl)}

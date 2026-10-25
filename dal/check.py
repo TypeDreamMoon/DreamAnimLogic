@@ -610,7 +610,7 @@ class Checker:
             return None
         return ir.PeerUse(b.peer, tuple(b.path), first in iface.settings_assets)
 
-    PHASE_ORDER = ("pre_movement", "after_movement", "after_anim")
+    PHASE_ORDER = ("pre_movement", "after_movement", "after_anim", "physics_walking")
 
     def check_updates(self, updates: list[S.UpdateDecl], logic: S.LogicDecl | None) -> None:
         m = self.module
@@ -618,11 +618,11 @@ class Checker:
         if self.kind == "anim":
             for x, pos in [(logic, logic.phase_pos)] if (logic is not None and logic.phase) else []:
                 self.focus(logic)
-                self.err("DAL5064", "tick slots (in pre_movement / after_movement / after_anim) are for actor logic; an anim logic has one update", pos or logic.pos)
+                self.err("DAL5064", "tick slots (in pre_movement / after_movement / after_anim / physics_walking) are for actor logic; an anim logic has one update", pos or logic.pos)
             for d in updates:
                 if d.phase:
                     self.focus(d)
-                    self.err("DAL5064", "tick slots (in pre_movement / after_movement / after_anim) are for actor logic; an anim logic has one update", d.phase_pos or d.pos)
+                    self.err("DAL5064", "tick slots (in pre_movement / after_movement / after_anim / physics_walking) are for actor logic; an anim logic has one update", d.phase_pos or d.pos)
             logic_phase = None
         m.phases_explicit = bool(logic_phase) or any(d.phase for d in updates if self.kind == "actor")
         seen: dict[str, S.UpdateDecl] = {}
@@ -670,7 +670,7 @@ class Checker:
             if any(o.peer == peer for o in m.order):
                 self.err("DAL5069", f"the order against '{peer}' is declared twice", pos)
                 continue
-            common = tuple(s for s in mine if s in iface.slots)
+            common = tuple(s for s in mine if s in iface.slots and s not in ir.HOOK_SLOTS)
             if not common:
                 self.warn("DAL5095", f"{iface.logic} has no update block in a tick slot of this logic ({', '.join(mine)}): `{relation} {peer}` orders nothing", pos)
             m.order.append(ir.OrderDef(relation, peer, iface.logic, common))

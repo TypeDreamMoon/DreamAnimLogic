@@ -231,6 +231,12 @@ void UDalCharacterMovementComponent::CalcVelocity(const float DeltaTime, const f
 
 void UDalCharacterMovementComponent::PhysWalking(const float DeltaTime, const int32 IterationsCount)
 {
+	// ALS-CMC.cpp:333-335: PhysWalking starts with RefreshGroundedMovementSettings.  The logic's `update(dt) in physics_walking` block is that, so it
+	// sees the state of this very step: a stance that OnStartCrouch changed a moment ago, the mode the character has just landed in, the velocity
+	// the walking move is about to start with.  The events the movement component raised so far in this step have been handled by then (sync_events: when it raised them; slot_events: first thing in the block).
+	static const FName PhysicsWalkingHook(TEXT("physics_walking"));
+	DalHost::FEventRouter::RunHook(CharacterOwner, PhysicsWalkingHook, DeltaTime);
+
 	bWalkingMoveVelocityRecorded = false;
 	bInPhysWalking = true;
 	MaxAccelerationWalkingApplied = MaxAccelerationWalking;       // ALS-CMC.cpp:335: the settings refresh at the start of PhysWalking

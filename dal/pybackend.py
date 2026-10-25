@@ -663,10 +663,13 @@ class PyGen:
             L.append(f"{INDENT}def update(self, dt):")
             L.append(f'{INDENT*2}"""One frame of every tick slot, in order (a host that interleaves the slots with other work calls update_phase)."""')
             for name in slot_names:
-                L.append(f"{INDENT*2}self.update_phase({name!r}, dt)")
+                if name not in ir.HOOK_SLOTS:                        # a hook slot is run by the host, where it happens
+                    L.append(f"{INDENT*2}self.update_phase({name!r}, dt)")
+            if all(name in ir.HOOK_SLOTS for name in slot_names):
+                L.append(f"{INDENT*2}pass")
             L.append("")
             L.append(f"{INDENT}def update_phase(self, phase, dt):")
-            L.append(f'{INDENT*2}"""One tick slot: pre_movement, after_movement or after_anim (a slot the logic does not use does nothing)."""')
+            L.append(f'{INDENT*2}"""One tick slot: pre_movement, after_movement, after_anim or physics_walking (a slot the logic does not use does nothing)."""')
             for k, name in enumerate(slot_names):
                 L.append(f"{INDENT*2}{'if' if k == 0 else 'elif'} phase == {name!r}:")
                 L.append(f"{INDENT*3}self._u_{name}(dt)")

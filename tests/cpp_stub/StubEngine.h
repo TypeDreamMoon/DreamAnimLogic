@@ -1178,7 +1178,7 @@ public:
 	virtual void EndPlay(const EEndPlayReason::Type) {}
 	virtual void TickComponent(float, ELevelTick, FActorComponentTickFunction*) {}
 	virtual void RegisterComponentTickFunctions(bool) {}
-	bool SetupActorComponentTickFunction(FTickFunction* TickFunction) { TickFunction->bStubRegistered = true; return true; }
+	bool SetupActorComponentTickFunction(FTickFunction* TickFunction) { if (!TickFunction->bCanEverTick) { return false; } TickFunction->bStubRegistered = true; return true; }
 };
 
 struct UGameplayStatics

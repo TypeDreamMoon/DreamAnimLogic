@@ -158,7 +158,9 @@ def make_system_driver(modules: dict[str, ir.Module], frames: list[dict], schedu
                 L.append("\t\t" + cd.hook_event(ev))
             g = gens[n]
             if modules[n].kind == "actor":
-                if g.phased:
+                if g.phased and slot in ir.HOOK_SLOTS:                       # the movement component runs it, through the router
+                    L.append(f'\t\tDalHost::FEventRouter::RunHook(&Pawn, FName(TEXT("{slot}")), {dt});')
+                elif g.phased:
                     L.append(f"\t\tL_{n}.DalRunPhase({g.slots.index(slot)}, {dt});")
                 else:
                     L.append(f"\t\tL_{n}.TickComponent({dt}, LEVELTICK_All, nullptr);")

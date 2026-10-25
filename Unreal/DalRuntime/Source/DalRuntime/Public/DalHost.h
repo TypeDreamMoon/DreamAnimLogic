@@ -97,6 +97,9 @@ namespace DalHost
 		virtual ~IEventSink() = default;
 		virtual const AActor* DalSinkOwner() const = 0;
 		virtual void DalReceiveEvent(const FEvent& Event) = 0;
+		/** A hook slot (`update(dt) in physics_walking { ... }`): the movement component of the actor runs the block itself, at the point the slot is
+		 *  named after (the start of its walking physics), with the delta time of that step.  A logic without such a slot does nothing. */
+		virtual void DalRunHook(const FName Hook, const float DeltaTime) { (void)Hook; (void)DeltaTime; }
 	};
 
 	/** The sinks of the running logics.  Post() is called by the movement component and the notify classes (game thread);
@@ -112,6 +115,7 @@ namespace DalHost
 		static void Register(IEventSink* Sink);
 		static void Unregister(IEventSink* Sink);
 		static void Post(const AActor* Owner, const FEvent& Event);
+		static void RunHook(const AActor* Owner, const FName Hook, const float DeltaTime);
 		static void PostNotify(const AActor* Owner, const EEventKind Kind, const FName& Name, const UObject* Source, const int32 MontageInstance);
 	};
 #else
@@ -146,6 +150,26 @@ namespace DalHost
 			for (IEventSink* Sink : Targets)
 			{
 				Sink->DalReceiveEvent(Event);
+			}
+		}
+
+		/** The movement component runs the hook slot `Hook` of the logics of `Owner` (see IEventSink::DalRunHook). */
+		static void RunHook(const AActor* Owner, const FName Hook, const float DeltaTime)
+		{
+			TArray<IEventSink*> Targets;
+			{
+				FScopeLock Lock(&Guard());
+				for (IEventSink* Sink : Sinks())
+				{
+					if (Sink->DalSinkOwner() == Owner)
+					{
+						Targets.Add(Sink);
+					}
+				}
+			}
+			for (IEventSink* Sink : Targets)
+			{
+				Sink->DalRunHook(Hook, DeltaTime);
 			}
 		}
 

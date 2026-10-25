@@ -48,6 +48,25 @@ void DalHost::FEventRouter::Post(const AActor* Owner, const FEvent& Event)
 	}
 }
 
+void DalHost::FEventRouter::RunHook(const AActor* Owner, const FName Hook, const float DeltaTime)
+{
+	TArray<IEventSink*> Targets;
+	{
+		FScopeLock Lock(&Guard());
+		for (IEventSink* Sink : Sinks())
+		{
+			if (Sink->DalSinkOwner() == Owner)
+			{
+				Targets.Add(Sink);
+			}
+		}
+	}
+	for (IEventSink* Sink : Targets)
+	{
+		Sink->DalRunHook(Hook, DeltaTime);
+	}
+}
+
 void DalHost::FEventRouter::PostNotify(const AActor* Owner, const EEventKind Kind, const FName& Name, const UObject* Source, const int32 MontageInstance)
 {
 	if (Owner == nullptr)

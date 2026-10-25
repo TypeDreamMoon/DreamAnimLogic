@@ -529,7 +529,8 @@ class Interpreter:
         sample inputs, collect events, tick timers, run handlers, run the body, flush the commands."""
         slots = [u.phase for u in self.module.updates] or [self.module.default_phase]
         for phase in slots:
-            self.update_phase(phase, dt)
+            if phase not in ir.HOOK_SLOTS:                       # a hook slot is run by the host, where it happens
+                self.update_phase(phase, dt)
 
     def update_phase(self, phase: str, dt: float) -> None:
         """One tick slot.  The first slot of the logic also takes the queued peer calls, the events and the timers."""

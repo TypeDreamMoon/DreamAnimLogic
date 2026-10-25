@@ -16,7 +16,7 @@ ASSIGN_OPS = ("=", "+=", "-=", "*=", "/=")
 HOOK_EVENTS = ("movement_mode_changed", "jumped", "landed", "crouch_started", "crouch_ended", "teleported", "physics_rotation")     # `on jumped { ... }`: no name
 HANDLER_EVENTS = ("notify", "notify_begin", "notify_end", "notify_tick", "montage_ended", "montage_blending_out", "input") + HOOK_EVENTS
 LIFECYCLE_EVENTS = ("begin_play", "end_play")         # `on begin_play { ... }`: no name, not an event of the queue
-PHASES = ("pre_movement", "after_movement", "after_anim")
+PHASES = ("pre_movement", "after_movement", "after_anim", "physics_walking")     # physics_walking: a hook slot, the movement component runs it itself (ir.HOOK_SLOTS)
 INPUT_PHASES = ("started", "triggered", "ongoing", "completed", "canceled")
 LOGIC_KINDS = ("anim", "actor")
 
@@ -350,7 +350,7 @@ class Parser:
                            slot_events, slot_events_pos, order, name_pos=name.pos, flush_peers=flush_peers, flush_peers_pos=flush_peers_pos)
 
     def parse_phase(self) -> tuple[str | None, Pos | None]:
-        """Optional `in pre_movement | after_movement | after_anim`."""
+        """Optional `in pre_movement | after_movement | after_anim | physics_walking`."""
         if not self.tok.is_kw("in"):
             return None, None
         self.advance()
