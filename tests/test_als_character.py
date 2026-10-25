@@ -227,11 +227,22 @@ class Rig:
     def anim(self):
         return self.objs["AlsAnimationInstance"]
 
-    def step(self, events=(), curves=None, dt=None, **host):
-        """One frame: ``host`` values replace the scripted ones from now on, ``events`` reach AlsInput (``(action, phase, value)``)."""
+    def step(self, events=(), curves=None, dt=None, hooks=(), auto_hooks=True, **host):
+        """One frame: ``host`` values replace the scripted ones from now on, ``events`` reach AlsInput (``(action, phase, value)``).
+
+        ``hooks`` are the events the movement component raises while it moves the character, between the pre_movement and the after_movement
+        slot (``("jumped",)``, ``("landed", hit)``, ``("notify_begin", name, payload, instance)`` ...); with ``auto_hooks`` a change of the host
+        values ``movement_mode`` / ``is_crouching`` raises ``movement_mode_changed`` / ``crouch_started`` / ``crouch_ended`` by itself."""
         if dt is not None:
             host["dt"] = dt
+        previous = (self.host.get("movement_mode"), self.host.get("is_crouching"))
         self.host.update(host)
+        raised = list(hooks)
+        if auto_hooks:
+            if self.host.get("movement_mode") != previous[0]:
+                raised.append(("movement_mode_changed", previous[0], self.host.get("movement_mode")))
+            if self.host.get("is_crouching") != previous[1]:
+                raised.append(("crouch_started",) if self.host.get("is_crouching") else ("crouch_ended",))
         f = self._frame([("input", a, ph, v) for a, ph, v in events], curves)
         for n in self.mods:
             self.hosts[n].load(f)
@@ -243,6 +254,8 @@ class Rig:
                 for h in self.hosts.values():             # the reads of the blocks before it consumed the scripted one, so arm it again
                     h.pre_penetration_velocity = f.get("pre_penetration_velocity", rt.VEC3_ZERO)
                     h.pre_penetration_velocity_valid = f.get("pre_penetration_velocity_valid", False)
+                for h in self.hosts.values():             # and the hooks it raised while it moved reach every logic that listens
+                    h.events.extend(tuple(e) for e in raised)
             before = len(self.hosts[n].calls)
             if slot is None:
                 self.objs[n].update(f["dt"])
@@ -300,7 +313,8 @@ class Case(unittest.TestCase):
 # ---- the files follow the C++ ---------------------------------------------------------------------------------------------------------
 
 CITATION = re.compile(r"(\w+\.(?:h|cpp):\d+|\b(?:C|CA|CMC|EX|AI|RMS):\d+|//\s*:\d+)")
-DECLARATION = re.compile(r"^(?:pub\s+)?(?:method|view)\s+(\w+)|^fn\s+(\w+)|^update\(dt\)|^on begin_play|^on timer\s+(\w+)|^on input\s+(\w+)")
+DECLARATION = re.compile(r"^(?:pub\s+)?(?:method|view)\s+(\w+)|^fn\s+(\w+)|^update\(dt\)|^on begin_play|^on timer\s+(\w+)|^on input\s+(\w+)"
+                         r"|^on (?:movement_mode_changed|jumped|crouch_started|crouch_ended)")
 
 
 class FilesTests(Case):
@@ -333,6 +347,10 @@ class FilesTests(Case):
         self.assertEqual(harness.phases_of(inp), ["pre_movement"])
         self.assertEqual([(p.name, p.logic) for p in char.peers], [("Anim", "AlsAnimationInstance")])
         self.assertEqual([(p.name, p.logic) for p in inp.peers], [("Character", "AlsCharacter")])
+        self.assertTrue(char.slot_events)                                                           # the hooks of the movement component reach the Tick of the same tick
+        self.assertEqual([(o.relation, o.peer, o.slots) for o in inp.order], [("before", "Character", ("pre_movement",))])      # its calls are flushed by the character's block
+        self.assertEqual(sorted(h.event for h in char.handlers if h.event in ("movement_mode_changed", "jumped", "crouch_started", "crouch_ended")),
+                         ["crouch_ended", "crouch_started", "jumped", "movement_mode_changed"])
         pub = sorted(x.name for x in char.methods if x.pub)
         for name in ("Jump", "SetDesiredGait", "SetDesiredStance", "SetDesiredAiming", "SetDesiredRotationMode", "SetViewMode", "SetOverlayMode",
                      "SetLocomotionAction", "StartMantling", "StartRagdolling", "StopRagdolling", "StartRolling", "StartRollingGrounded"):
@@ -767,12 +785,31 @@ class LocomotionTests(Case):
         for rig in rigs():
             rig.step(velocity=velocity(100.0, 0.0), pre_penetration_velocity=velocity(200.0, 90.0), pre_penetration_velocity_valid=True)
             s = rig.s
-            self.assertClose((s["LocomotionState.VelocityYawAngle"], s["DesiredVelocityYawAngle"]), (0.0, 90.0))
+            # the character starts to move: the initial velocity yaw angle is the desired one, for the velocity yaw as well (C:1425, C:1458-1459)
+            self.assertClose((s["LocomotionState.VelocityYawAngle"], s["DesiredVelocityYawAngle"]), (90.0, 90.0))
             self.assertTrue(s["bHasDesiredVelocity"])
+            rig.step(velocity=velocity(100.0, 0.0), pre_penetration_velocity=velocity(200.0, 90.0), pre_penetration_velocity_valid=True)
+            s = rig.s                                                                     # moving already: the velocity yaw is the velocity's, the desired one the recorded
+            self.assertClose((s["LocomotionState.VelocityYawAngle"], s["DesiredVelocityYawAngle"]), (0.0, 90.0))
             rig.step(velocity=velocity(100.0, 0.0), pre_penetration_velocity=velocity(200.0, 90.0), pre_penetration_velocity_valid=False)
             self.assertClose(rig.s["DesiredVelocityYawAngle"], 0.0)                       # nothing recorded: the velocity itself (C:1415)
             rig.step(velocity=velocity(100.0, 0.0), pre_penetration_velocity=velocity(0.5, 90.0), pre_penetration_velocity_valid=True)
             self.assertClose(rig.s["DesiredVelocityYawAngle"], 0.0)                       # below the speed threshold: not used
+
+    def test_a_character_that_starts_to_move_may_rotate_towards_the_last_input_direction_again(self):
+        # AlsCharacter.cpp:1425-1431 + 1449-1462 run on the authority too: the recorded takes of the UE character show it (a roll starts a
+        # velocity without any input and the rotation block is lifted in the same frame)
+        for rig in rigs():
+            rig.step()
+            self.assertTrue(rig.s["LocomotionState.bRotationTowardsLastInputDirectionBlocked"])
+            rig.step(velocity=velocity(30.0, 45.0))
+            self.assertFalse(rig.s["LocomotionState.bRotationTowardsLastInputDirectionBlocked"])
+            self.assertClose(rig.s["LocomotionState.VelocityYawAngle"], 45.0)
+            rig.step(velocity=velocity(30.0, 45.0), hooks=[("movement_mode_changed", WALKING_MODE, FALLING_MODE)], movement_mode=FALLING_MODE, auto_hooks=False)
+            rig.step(movement_mode=WALKING_MODE, hooks=[("movement_mode_changed", FALLING_MODE, WALKING_MODE)], velocity=(0.0, 0.0, -500.0), auto_hooks=False)
+            self.assertTrue(rig.s["LocomotionState.bRotationTowardsLastInputDirectionBlocked"])         # the landing blocks it (C:546-549) ...
+            rig.step(velocity=velocity(30.0, 45.0))
+            self.assertFalse(rig.s["LocomotionState.bRotationTowardsLastInputDirectionBlocked"])        # ... and moving again lifts it
         off = dict(CHARACTER_SETTINGS, bRotateTowardsDesiredVelocityInVelocityDirectionRotationMode=False)
         for rig in rigs(settings=off):
             rig.step(velocity=velocity(100.0, 0.0), pre_penetration_velocity=velocity(200.0, 90.0), pre_penetration_velocity_valid=True)
@@ -1012,22 +1049,29 @@ class LandingAndJumpTests(Case):
             rig.step(events=[("Jump", "triggered", True)])
             self.assertEqual(rig.commands("jump"), [()])
             self.assertEqual(rig.anim.snapshot()["Jumps"], 0)                                                 # not yet: the movement component has not started it
-            rig.step(movement_mode=FALLING_MODE, is_grounded=False, velocity=(0.0, 0.0, 420.0))               # OnJumped
-            self.assertEqual(rig.anim.snapshot()["Jumps"], 1)
+            rig.step(movement_mode=FALLING_MODE, is_grounded=False, velocity=(0.0, 0.0, 420.0), hooks=[("jumped",)])      # OnJumped, then the mode changes
+            self.assertEqual(rig.anim.snapshot()["Jumps"], 1)                                                 # `on jumped` -> Anim.Jump()
             self.assertEqual(rig.s["LocomotionMode"], IN_AIR)
             rig.step(events=[("Jump", "triggered", False)])
             self.assertEqual(rig.commands("stop_jumping", "AlsInput"), [()])                                  # StopJumping() (EX:180)
             rig.step(movement_mode=WALKING_MODE, is_grounded=True, velocity=(0.0, 0.0, 0.0))
-            rig.step(movement_mode=FALLING_MODE, is_grounded=False, velocity=(0.0, 0.0, -10.0))               # walking off a ledge is not a jump
+            rig.step(movement_mode=FALLING_MODE, is_grounded=False, velocity=(0.0, 0.0, -10.0))               # walking off a ledge is not a jump: no `jumped` event
             self.assertEqual(rig.anim.snapshot()["Jumps"], 1)
 
-    def test_a_jump_that_does_not_happen_is_forgotten_after_two_frames(self):
+    def test_a_jump_key_without_a_jump_of_the_movement_component_tells_the_animation_nothing(self):
+        # the old workaround counted two frames after the key; the hook says what really happened
         for rig in rigs():
             rig.step(events=[("Jump", "triggered", True)])
-            rig.step()
-            rig.step()
+            rig.run(3)
             rig.step(movement_mode=FALLING_MODE, is_grounded=False, velocity=(0.0, 0.0, -10.0))
             self.assertEqual(rig.anim.snapshot()["Jumps"], 0)
+
+    def test_the_hooks_are_handled_in_the_slot_after_the_movement_of_the_same_tick(self):
+        for rig in rigs():
+            rig.step(movement_mode=FALLING_MODE, is_grounded=False, velocity=(0.0, 0.0, -100.0))
+            self.assertEqual(rig.s["LocomotionMode"], IN_AIR)                                                 # the tick that raised the hook has seen its effect
+            rig.step(is_crouching=True)
+            self.assertEqual(rig.s["Stance"], CROUCH)
 
     def test_no_jump_while_an_action_runs_or_in_the_air(self):
         for rig in rigs():
@@ -1207,13 +1251,26 @@ def system_params(seed, polyline=False):
 
 
 def system_frames(count, seed, real_anim=False):
-    """Random frames for the system: host values, input events of AlsInput, and the animation curves the character reads."""
+    """Random frames for the system: host values, input events of AlsInput, the animation curves the character reads, and the hooks the movement
+    component raises between the two slots (a change of the movement mode, of the crouch, a jump)."""
     mods = modules(real_anim)
     frames = harness.random_system_frames(mods, count, seed)
     rng = random.Random(seed * 31 + 7)
+    step = next(i for i, (n, slot) in enumerate(harness.default_schedule(mods)) if (n, slot) == ("AlsCharacter", "after_movement"))
+    mode, crouching = 1, False
     for f in frames:
         f["curves"] = {"RotationYawSpeed": rng.choice([0.0, rng.uniform(-120.0, 120.0)]), "RotationYawOffset": rng.choice([0.0, rng.uniform(-40.0, 40.0)])}
         f["control_rotation"] = (rng.uniform(-60.0, 60.0), rng.uniform(-180.0, 180.0), 0.0)
+        hooks = []
+        if f["movement_mode"] != mode:
+            hooks.append(("movement_mode_changed", mode, f["movement_mode"]))
+            mode = f["movement_mode"]
+        if f["is_crouching"] != crouching:
+            hooks.append(("crouch_started",) if f["is_crouching"] else ("crouch_ended",))
+            crouching = f["is_crouching"]
+        if rng.random() < 0.08:
+            hooks.append(("jumped",))
+        f["step_events"] = {step: hooks} if hooks else {}
     return frames
 
 
@@ -1239,7 +1296,10 @@ def run_system(mods, frames, backend, params, schedule=None):
     for f in frames:
         for n in mods:
             hosts[n].load(f)
-        for n, slot in steps:
+        for si, (n, slot) in enumerate(steps):
+            for ev in f.get("step_events", {}).get(si, []):          # the hooks the movement component raised between the slots
+                for h in hosts.values():
+                    h.events.append(tuple(ev))
             if slot is None:
                 objs[n].update(f["dt"])
             else:

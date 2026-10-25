@@ -19,10 +19,9 @@
 // ...: language gap G19) and the extension points RefreshCustom*Rotation.
 //
 // Differences that follow from DAL (each one is listed in als-dal-rewrite.md section 7):
-//   * the hooks of the engine (OnMovementModeChanged, OnStartCrouch / OnEndCrouch, OnJumped) are polled in poll_hooks() from the host
-//     reads movement_mode / is_crouching and from the jump request.  The `on movement_mode_changed` & co. handlers run at the start of the
-//     logic's next update, one frame after the movement component calls the C++ hook, while the ALS Tick reads the new locomotion mode and
-//     stance in the same frame; polling at the start of the after_movement block keeps that order;
+//   * the hooks of the engine (OnMovementModeChanged, OnStartCrouch / OnEndCrouch, OnJumped) are `on` handlers, and the logic is
+//     `slot_events`: an event the movement component raises inside its tick is handled at the start of the next tick slot of the same
+//     tick, which is the order of the C++ (the hook ran inside the movement component, before AAlsCharacter::Tick);
 //   * the host commands run after the update block, so SetActorRotation is mirrored in ActorRotationNow, which the rest of the block reads
 //     where the C++ calls GetActorRotation() after having rotated the actor;
 //   * the movement component keeps a copy of the rotation mode, the stance and the gait settings: here they are this logic's own
@@ -33,7 +32,7 @@
 use "als_lib.dal";
 
 peer Anim: AlsAnimationInstance;                       // AlsCharacter.h:57 AnimationInstance: Jump() is called on it (queued)
-logic AlsCharacter : actor in after_movement;          // the ALS Tick runs after the movement component (als-dal-rewrite.md 1.9)
+logic AlsCharacter : actor slot_events in after_movement;   // the ALS Tick runs after the movement component (als-dal-rewrite.md 1.9)
 
 param Settings: AlsCharacterSettings;                  // AlsCharacter.h:31
 param MovementSettings: AlsMovementSettings;           // AlsCharacter.h:34
@@ -47,8 +46,6 @@ input PrePenetrationVelocityValid: bool <- host.pre_penetration_velocity_valid;
 input ControlRotation: rotator <- host.control_rotation;                         // Super::GetViewRotation()                 C:101, C:1252
 input ActorRotation: quat <- host.actor_rotation;                                // GetActorRotation()                       C:110
 input IsGrounded: bool <- host.is_grounded;                                      // IsMovingOnGround()                       CMC:333 (PhysWalking only runs on the ground)
-input IsCrouching: bool <- host.is_crouching;                                    // bIsCrouched: OnStartCrouch / OnEndCrouch C:834, C:855
-input CharacterMovementMode: MovementMode <- host.movement_mode;                 // OnMovementModeChanged                    C:469
 input HasAnyRootMotion: bool <- host.has_root_motion;                            // HasAnyRootMotion()                       C:1521
 input RotationYawSpeedCurve: float <- host.anim_curve("RotationYawSpeed");       // GetCurveValue(RotationYawSpeedCurveName) C:1814 (AlsConstants.h:81)
 input RotationYawOffsetCurve: float <- host.anim_curve("RotationYawOffset");     // GetCurveValue(RotationYawOffsetCurveName) C:1650
@@ -80,9 +77,6 @@ state GaitAmount: float;                                                        
 // ---- bookkeeping of this rewrite -----------------------------------------------------------------------------------------------
 state ActorRotationNow: rotator;                                                 // GetActorRotation() as this update has changed it (host commands run after the block)
 state NewActorRotation: rotator;                                                 // the `FRotator& ActorRotation` that ConstrainAimingRotation edits (C:1680, C:1718)
-state PreviousMovementMode: MovementMode;                                        // poll_hooks(): the last mode the movement component had
-state bPreviousCrouched: bool;                                                   // poll_hooks(): the last crouched state
-state JumpRequestFrames: int;                                                    // Jump() issued the host command; the jump happens in the movement component, OnJumped follows
 timer BrakingFrictionFactorResetTimer = 0.5;                                     // C:538-544 (ResetDelay)
 
 // ================================================================================================================================
@@ -90,9 +84,8 @@ timer BrakingFrictionFactorResetTimer = 0.5;                                    
 // ================================================================================================================================
 
 fn rotators_equal(a: rotator, b: rotator) -> bool {                              // FRotator::Equals with the default tolerance KINDA_SMALL_NUMBER (used by C:1132)
-    return abs(normalize_axis(a.pitch - b.pitch)) <= KINDA_SMALL_NUMBER
-        && abs(normalize_axis(a.yaw - b.yaw)) <= KINDA_SMALL_NUMBER
-        && abs(normalize_axis(a.roll - b.roll)) <= KINDA_SMALL_NUMBER;
+    let d = normalize_rotator(a - b);                                            // rotator arithmetic (0.4.0): the difference, each axis in (-180, 180]
+    return abs(d.pitch) <= KINDA_SMALL_NUMBER && abs(d.yaw) <= KINDA_SMALL_NUMBER && abs(d.roll) <= KINDA_SMALL_NUMBER;
 }
 
 // SetActorRotation(Rotation, Teleport) as called at C:1715, C:1820, C:1901, C:1913, C:1923: the command runs after the block, the rest of the
@@ -118,8 +111,6 @@ on begin_play {                                                                 
     set_target_yaw_angle(ActorRotationNow.yaw);                                         // :110-112
     LocomotionState.InputYawAngle = ActorRotationNow.yaw;                               // :114
     LocomotionState.VelocityYawAngle = ActorRotationNow.yaw;                            // :115
-    PreviousMovementMode = CharacterMovementMode;                                       // the movement component's first mode is not a change
-    bPreviousCrouched = IsCrouching;
     // BeginPlay: update the states to use the initial desired values     C:168-178
     apply_desired_stance();                                                             // :170
     refresh_gait();                                                                     // :174 (the CMC copies of Stance / RotationMode :172, :178 are this logic's own)
@@ -135,15 +126,13 @@ on timer BrakingFrictionFactorResetTimer {                                      
 // the tick: AAlsCharacter::Tick, C:266-300
 // ================================================================================================================================
 
-// Before the movement component (FAlsRootMotionSource_Mantling::PrepareRootMotion, RMS:37, goes here, a later milestone).  The block exists so that the host
-// commands queued by the calls of AlsInput (Jump, SetDesiredStance ...) are handed to the host before the movement component runs.
+// The block is empty on purpose.  AlsInput runs before this logic in the slot (`before Character`), and the commands that its calls into this
+// logic (Jump, SetDesiredStance ...) leave in this logic's queue are flushed at the end of this logic's next block: this one, in front of the
+// movement component.  (FAlsRootMotionSource_Mantling::PrepareRootMotion, RMS:37, will be prepared here.)
 update(dt) in pre_movement {
 }
 
 update(dt) in after_movement {                                                   // C:266-300
-    poll_hooks();                                                                // OnMovementModeChanged, OnStartCrouch, OnEndCrouch, OnJumped: they ran inside the movement component
-    ActorRotationNow = normalize_rotator(to_rotator(ActorRotation));
-
     // RefreshMovementBase();                                                    // :277 (no moving bases)
     // RefreshMeshProperties();                                                  // :279 (mesh tick options)
     refresh_input();                                                             // :281
@@ -157,33 +146,30 @@ update(dt) in after_movement {                                                  
     // Super::Tick(DeltaTime);                                                   // :297
     refresh_locomotion_late();                                                   // :299
     push_movement_settings();                                                    // CMC:335, see the header
-
-    if (JumpRequestFrames > 0) { JumpRequestFrames -= 1; }                       // a jump that did not start within two frames was not allowed
 }
 
-// What the engine would have told AAlsCharacter during the movement of this frame (C:469 OnMovementModeChanged, C:834 / C:855 OnStartCrouch /
-// OnEndCrouch, C:1473 OnJumped), taken from the host reads.
-method poll_hooks() {
-    // OnMovementModeChanged, C:469-491
-    if (CharacterMovementMode != PreviousMovementMode) {
-        PreviousMovementMode = CharacterMovementMode;
-        if (CharacterMovementMode == MovementMode.Walking || CharacterMovementMode == MovementMode.NavWalking) {
-            set_locomotion_mode(AlsLocomotionMode.Grounded);                     // :476-479
-        } else if (CharacterMovementMode == MovementMode.Falling) {
-            set_locomotion_mode(AlsLocomotionMode.InAir);                        // :481-483
-            if (JumpRequestFrames > 0) {                                         // OnJumped_Implementation, C:1473-1485 -> OnJumpedNetworked C:1496-1502
-                JumpRequestFrames = 0;
-                Anim.Jump();
-            }
-        } else {
-            set_locomotion_mode(AlsLocomotionMode.None);                         // :485-488
-        }
+// The overrides of the engine's hooks.  The movement component raises them while it moves the character, before AAlsCharacter::Tick, so
+// `slot_events` handles them at the start of the after_movement slot of the same tick (the order of the C++).
+on movement_mode_changed(previous_movement_mode, movement_mode) {                // C:469-491 OnMovementModeChanged (GetCharacterMovement()->MovementMode is the new mode)
+    if (movement_mode == MovementMode.Walking || movement_mode == MovementMode.NavWalking) {
+        set_locomotion_mode(AlsLocomotionMode.Grounded);                         // :476-479
+    } else if (movement_mode == MovementMode.Falling) {
+        set_locomotion_mode(AlsLocomotionMode.InAir);                            // :481-483
+    } else {
+        set_locomotion_mode(AlsLocomotionMode.None);                             // :485-488
     }
-    // OnStartCrouch / OnEndCrouch, C:834-871
-    if (IsCrouching != bPreviousCrouched) {
-        bPreviousCrouched = IsCrouching;
-        set_stance(IsCrouching ? AlsStance.Crouching : AlsStance.Standing);      // :852, :870
-    }
+}
+
+on jumped {                                                                      // C:1473-1502 OnJumped_Implementation -> OnJumpedNetworked
+    Anim.Jump();                                                                 // :1498-1501 (queued: the animation instance runs it at the start of its next update)
+}
+
+on crouch_started {                                                              // C:834-853 OnStartCrouch (the network smoothing patch :836-848 is dropped)
+    set_stance(AlsStance.Crouching);                                             // :852
+}
+
+on crouch_ended {                                                                // C:855-871 OnEndCrouch (the network smoothing patch :857-866 is dropped)
+    set_stance(AlsStance.Standing);                                              // :870
 }
 
 // ================================================================================================================================
@@ -352,8 +338,7 @@ method refresh_gait() {                                                         
     // Update the character max walk speed to the configured speeds based on the currently max allowed gait.
     MaxAllowedGait = max_allowed_gait;                                           // :953 CMC->SetMaxAllowedGait
 
-    let actual_gait = calculate_actual_gait(max_allowed_gait);                   // :955
-    set_gait(actual_gait);                                                       // :957
+    set_gait(calculate_actual_gait(max_allowed_gait));                           // :955-957 (a call inside the arguments of a call: 0.4.0)
 }
 
 view calculate_max_allowed_gait() -> AlsGait {                                   // C:960-977
@@ -438,6 +423,8 @@ method refresh_locomotion_early() {                                             
 }
 
 method refresh_locomotion() {                                                    // C:1372-1437
+    let bHadVelocity = LocomotionState.bHasVelocity;                             // :1374
+
     LocomotionState.Velocity = Velocity;                                         // :1376
 
     // The speed equals the length of the horizontal velocity, so it does not take vertical movement into account.   :1378-1383
@@ -449,15 +436,31 @@ method refresh_locomotion() {                                                   
         LocomotionState.VelocityYawAngle = direction_to_angle_xy(LocomotionState.Velocity);   // :1391
     }
 
-    // (the role check :1394 is always true; bSendInitialVelocityYawAngle / ServerSetInitialVelocityYawAngle :1396-1431 replicate)
+    // (the role check :1394 is always true.)  A character that starts to move announces the yaw angle of its velocity: the RPC chain
+    // ServerSetInitialVelocityYawAngle -> MulticastSetInitialVelocityYawAngle (:1425-1431, :1449-1462) also runs on the authority itself,
+    // because the remote role of a replicated character is a simulated proxy even in a single player game -- the recorded takes of the
+    // UE character show the effect (the rotation towards the last input direction is unblocked when the velocity starts).
+    var bSendInitialVelocityYawAngle = LocomotionState.bHasVelocity && !bHadVelocity;       // :1396
+    var velocity_yaw_angle_to_send = LocomotionState.VelocityYawAngle;           // :1397
+
     if (Settings.bRotateTowardsDesiredVelocityInVelocityDirectionRotationMode) {         // :1399
         if (PrePenetrationVelocityValid && size_2d(PrePenetrationVelocity) >= 1.0) {     // :1402-1403 TryConsumePrePenetrationAdjustmentVelocity
+            bSendInitialVelocityYawAngle = !bHasDesiredVelocity;                         // :1405
             bHasDesiredVelocity = true;                                                  // :1406
             DesiredVelocityYawAngle = direction_to_angle_xy(PrePenetrationVelocity);     // :1408 SetDesiredVelocityYawAngle
         } else {
+            bSendInitialVelocityYawAngle = LocomotionState.bHasVelocity && !bHasDesiredVelocity;      // :1412
             bHasDesiredVelocity = LocomotionState.bHasVelocity;                          // :1413
             DesiredVelocityYawAngle = LocomotionState.VelocityYawAngle;                  // :1415
         }
+
+        velocity_yaw_angle_to_send = DesiredVelocityYawAngle;                            // :1418
+    }
+
+    if (bSendInitialVelocityYawAngle) {                                          // :1425
+        DesiredVelocityYawAngle = velocity_yaw_angle_to_send;                    // :1458
+        LocomotionState.VelocityYawAngle = velocity_yaw_angle_to_send;           // :1459
+        LocomotionState.bRotationTowardsLastInputDirectionBlocked = false;       // :1460
     }
 
     // Character is moving if has speed and current acceleration, or if the speed is greater than the moving speed threshold.   :1433
@@ -474,8 +477,7 @@ method refresh_locomotion_late() {                                              
 
 pub method Jump() {                                                              // C:1464-1471
     if (Stance == AlsStance.Standing && !valid(LocomotionAction) && LocomotionMode == AlsLocomotionMode.Grounded) {
-        host.jump();                                                             // :1469 Super::Jump()
-        JumpRequestFrames = 2;                                                   // the movement component starts the jump and calls OnJumped (poll_hooks)
+        host.jump();                                                             // :1469 Super::Jump() (the movement component starts the jump and calls OnJumped: `on jumped`)
     }
 }
 
@@ -529,8 +531,7 @@ method refresh_grounded_rotation(dt: float) {                                   
 
             // Rotate to the last view direction.
             let target_yaw_angle = LocomotionState.bHasInput ? ViewState.Rotation.yaw : LocomotionState.TargetYawAngle;   // :1588-1590
-            let rotation_interpolation_half_life = calculate_grounded_moving_rotation_interpolation_half_life();         // :1592
-            set_rotation_extra_smooth(target_yaw_angle, dt, rotation_interpolation_half_life, 500.0);                   // :1594-1596
+            set_rotation_extra_smooth(target_yaw_angle, dt, calculate_grounded_moving_rotation_interpolation_half_life(), 500.0);        // :1592-1596
             return;
         }
 
@@ -552,8 +553,7 @@ method refresh_grounded_rotation(dt: float) {                                   
 
         let target_yaw_angle = Settings.bRotateTowardsDesiredVelocityInVelocityDirectionRotationMode
             ? DesiredVelocityYawAngle : LocomotionState.VelocityYawAngle;        // :1622-1626
-        let rotation_interpolation_half_life = calculate_grounded_moving_rotation_interpolation_half_life();   // :1628
-        set_rotation_extra_smooth(target_yaw_angle, dt, rotation_interpolation_half_life, 800.0);             // :1630-1632
+        set_rotation_extra_smooth(target_yaw_angle, dt, calculate_grounded_moving_rotation_interpolation_half_life(), 800.0);          // :1628-1632
         return;
     }
 
@@ -568,8 +568,7 @@ method refresh_grounded_rotation(dt: float) {                                   
             target_yaw_angle = ViewState.Rotation.yaw + RotationYawOffsetCurve;  // :1649-1650 (view yaw + the curve of the animation)
         }
 
-        let rotation_interpolation_half_life = calculate_grounded_moving_rotation_interpolation_half_life();   // :1653
-        set_rotation_extra_smooth(target_yaw_angle, dt, rotation_interpolation_half_life, 500.0);             // :1655-1657
+        set_rotation_extra_smooth(target_yaw_angle, dt, calculate_grounded_moving_rotation_interpolation_half_life(), 500.0);          // :1653-1657
         return;
     }
 
@@ -593,16 +592,14 @@ method refresh_grounded_aiming_rotation(dt: float) {                            
     if (!LocomotionState.bHasInput && !LocomotionState.bMoving) {                // Not moving.  :1684
         set_target_yaw_angle(ViewState.Rotation.yaw);                            // :1688
 
-        let constrained = constrain_aiming_rotation(dt, true);                   // :1690
-        if (!constrained) { return; }
+        if (!constrain_aiming_rotation(dt, true)) { return; }                    // :1690
     } else {                                                                     // Moving.  :1695
         // RotationInterpolationHalfLife 0.1, TargetYawAngleRotationSpeed 1000     :1699-1700
         set_target_yaw_angle_smooth(ViewState.Rotation.yaw, dt, 1000.0);         // :1702
 
         NewActorRotation.yaw = damper_exact_angle(unwind_degrees(NewActorRotation.yaw), LocomotionState.SmoothTargetYawAngle, dt, 0.1);   // :1704-1706
 
-        let constrained = constrain_aiming_rotation(dt, false);                  // :1708
-        if (constrained) {
+        if (constrain_aiming_rotation(dt, false)) {                              // :1708
             // Cancel the extra smooth rotation, otherwise the actor will rotate too weirdly.      :1710
             LocomotionState.SmoothTargetYawAngle = LocomotionState.TargetYawAngle;     // :1711
         }

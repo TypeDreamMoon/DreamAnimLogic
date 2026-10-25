@@ -8,8 +8,6 @@
 // assets exported from the project (CS_Als_Default, AIS_Als_Default, MS_Als_*) load into the settings types below.
 //
 // Differences from the C++ that cannot be written in DAL (each is a language gap recorded in als-dal-rewrite.md section 7):
-//   * a `settings` member cannot have an initializer, so FAlsGeneralMantlingSettings::InAirTrace has the defaults of GroundedTrace
-//     here (C++: LedgeHeight {50, 150}, ReachDistance 70); the data assets always carry the values.
 //   * the collision response containers (MantlingTraceResponses, GroundPredictionSweepResponses, FCollisionResponseContainer in C++)
 //     are channel lists here: the channels that block, which is what the exported container data says.  The data loads without a
 //     warning; the two lists next to them (...ResponseChannels) hold the same channels.
@@ -299,7 +297,7 @@ settings AlsGeneralMantlingSettings {                                           
     TargetPrimitiveSpeedThreshold: float = 10.0;
     MantlingHighHeightThreshold: float = 125.0;
     GroundedTrace: AlsMantlingTraceSettings;
-    InAirTrace: AlsMantlingTraceSettings;                                                // C++ default: LedgeHeight {50, 150}, ReachDistance 70 (see the header)
+    InAirTrace: AlsMantlingTraceSettings = AlsMantlingTraceSettings(LedgeHeight: vec2(50.0, 150.0), ReachDistance: 70.0);   // AlsMantlingSettings.h:128-131
     MantlingTraceChannel: Channel = Channel.Visibility;
     MantlingTraceResponseChannels: channel_set;
     MantlingTraceResponses: channel_set;                                                 // FCollisionResponseContainer in C++: here the channels that block (same data as ...ResponseChannels)
