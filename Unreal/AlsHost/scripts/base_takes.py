@@ -306,7 +306,7 @@ def bind(st, world):
         ch = unreal.GameplayStatics.get_player_character(world, 0)
         cmc = ch.get_component_by_class(unreal.CharacterMovementComponent) if ch is not None else None
         if cmc is not None:
-            cmc.set_editor_property("b_ignore_base_rotation", False)
+            cmc.set_editor_property("ignore_base_rotation", False)         # (bIgnoreBaseRotation: the editor Python drops the b)
             st["follow_base_rotation"] = True
 
 
