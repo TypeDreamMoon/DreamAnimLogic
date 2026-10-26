@@ -45,6 +45,7 @@ double 类型之后（`DAL_HOST_VERSION` 3，`dal-syntax-v3.md` 第 35 节）rol
 | 文件 | 内容 |
 |---|---|
 | `scripts/g_record.py` | 执行 `G:\DCC\AlsTruth\tools\r1_record.py`（去掉最后一行 `run(steps)`），所以路线、命令、录制调用和原版真值录像完全相同；只换了三件事：编辑器世界的世界设置游戏模式覆盖成 `ADalAlsHostGameMode`（不保存）；驱动脚本对角色的 `set_desired_gait`、`jump`、`start_rolling_grounded` 等原来是 `AAlsCharacter` 的方法，现在转给 `UAlsCharacter` 组件，其余仍给角色；不编译相机的两个动画蓝图（它们的父类在已关掉的 `ALSCamera` 里，编译会崩）；无渲染器时网格按“被渲染”的方式整帧更新（`AlwaysTickPoseAndRefreshBones`；`R1_RENDERED=1` 时不动网格的选项）；`R1_ORIGINAL=1` 时不挂生成的组件，直接驱动原版角色；`ragdoll` 录像（`add_ragdoll_take`：布娃娃开 / 停三次，中间夹一次起跳）是在 `r1_record.py` 的路线之外加的 |
+| `scripts/base_takes.py` | 移动基底的录像（`anim-moving-base.md` 第 7 节）：十二条 take 的平台（运行时在编辑器世界里生成 `ADalTestMover`，从不存关卡）、路线、逐帧位姿旁路文件 `plat_<take>.json`；`g_record.py` 把它们接进 `r1_record.py` 的驱动源（`R1_FOLLOW_BASE=1`：CMC 的 `bIgnoreBaseRotation` 关，朝向 / 视角跟着平台转）。原版真值在 `G:\DCC\AlsTruth\base`（十二条，含平台旁路文件和 `manifest.json`） |
 | `scripts/compare_takes.py` | 比较，见下 |
 | `scripts/summarize_takes.py`、`scripts/cycle.ps1` | 每条录像一行的表（位置 / 速度 / 偏航最大误差、离散状态不符、姿势、曲线）；`cycle.ps1` 把换进去、检查、录像、比较、汇总串成一条命令 |
 | `scripts/phase_ref.py` | 写 `G:\DCC\AlsTruth\phase.json`：每条真值录像第一帧的世界时间（60 fps 的帧数）。**动画循环的相位**：图里待机 / 移动的循环是 160 帧（2.67 s），姿势取决于录像开始前动画实例更新了多少次（`Anim.UpdateCounter`，60 fps 下是世界时间的帧数减一两帧）；两次运行的计数差一个 160 的倍数时，姿势在 0.00–0.15 cm 内一致，不管是原版对原版、生成版对原版还是生成版对生成版，否则相差可达 2.4 cm（原版录了 3 次、生成版录了 4 次，10 条录像里的 186 对：两条录像的姿势距离和它们计数差对 160 取余的相位失配，相关系数 0.93）。`g_record.py` 的 `R1_PHASE=phase.json`（`record_takes.ps1 -Phase`，`cycle.ps1` 默认带上）在录制器启动前等到世界时间对 160 取余和真值那条相同，所以生成版的姿势能和真值逐帧比 |

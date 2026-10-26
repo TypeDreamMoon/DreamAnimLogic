@@ -322,7 +322,7 @@ value-returning method call inside an expression (it was DAL4042 everywhere but 
 python -I -m unittest discover -s tests
 ```
 
-1256 tests (about 17 minutes; the C++ compile tests are most of it): 608 at 0.3.0, 379 when DalLive was added, 184 of them from v0 unchanged. Python 3.11+ syntax; also run under Blender 5.2's embedded Python 3.13.
+1270 tests (about 16 minutes; the C++ compile tests are most of it): 608 at 0.3.0, 379 when DalLive was added, 184 of them from v0 unchanged. Python 3.11+ syntax; also run under Blender 5.2's embedded Python 3.13.
 
 | File | What it checks |
 |---|---|
@@ -362,6 +362,8 @@ python -I -m unittest discover -s tests
 | `test_loops.py` (19), `test_root_motion.py` (19), `test_slot_order.py` (17), `test_consume_slots.py` (8), `test_small_additions.py` (14), `test_method_calls_in_expressions.py` (11) | 0.4.0: `break` / `while`, root motion override and montage asset queries, `slot_events` and `before` / `after` (system runs against the C++), consume-on-read sampling per slot, rotator arithmetic / `valid(Peer)` / settings member initialisers, method calls inside expressions |
 | `test_host_names.py` | host names with spaces (`"VB foot_l"`) for bones and curves in the checker, both Python implementations and C++; a `notify` or action name stays an identifier |
 | `test_ragdoll_reads.py` | the ragdoll reads `ragdoll_pelvis_location`, `ragdoll_velocity`, `ragdoll_facing_up` (what ALS reads off the pelvis body): checker, both Python implementations, C++ against the stand-in engine, and the `UDalRagdollService` getters the generated code calls |
+| `test_movement_base.py` (13) | the movement base in the host protocol: the five reads (`movement_base`, `_location`, `_rotation`, `_has_relative_location`, `_relative_rotation`), `set_movement_base`, `primitive_uses_relative_location`, the hook slot `update(dt) in prepare_root_motion`; the interpreter, Python and C++ (stand-in engine) agree |
+| `test_als_movement_base_sources.py` (1) | the ALS sources have the movement base: the state struct, the shared refresh function, the two classes that use it, the mantling target in the space of a moving primitive |
 | `test_hook_slots.py` (13) | hook slots (`update(dt) in physics_walking`): the movement component runs the block itself at the start of its walking physics (`DalHost::FEventRouter::RunHook`); the checker, the order against peers, the three implementations (C++ against the stand-in engine) |
 | `test_sync_events.py` (11) | `logic X : actor sync_events` (also `anim`): the character's hooks and the declared notifies are handled when the host raises them, the inputs sampled then and the commands handed over before the call returns; an event raised by a handler waits for it; `DAL5097` |
 | `test_thread_queries.py` (13) | `host.is_game_thread()` / `host.proxy_component_transform()`: the protocol, the defaults of a host without threads, the interpreter and Python against the generated C++ (stand-in engine) with a scripted thread and proxy transform; an anim logic with `post_flush` that asks the thread runs the commands of its update, its entries and the calls other logics queued for it at once on the game thread |

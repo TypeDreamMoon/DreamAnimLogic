@@ -24,7 +24,9 @@ import sys
 
 TOOLS = "G:/DCC/AlsTruth/tools"
 sys.path.insert(0, TOOLS)
+sys.path.insert(0, os.path.dirname(os.path.abspath(globals().get("__file__", "I:/DCC/DreamAnimLogic/Unreal/AlsHost/scripts/g_record.py"))))
 import unreal
+import base_takes
 from harness import Wait, log
 
 R1 = TOOLS + "/r1_record.py"
@@ -144,10 +146,12 @@ def load_driver():
         raise RuntimeError("r1_record.py does not end with run(steps)")
     src = src.rstrip()[: -len(tail)]
     src = add_ragdoll_take(src)
+    src = base_takes.add_base_takes(src)
     if PHASE_FILE:
         src = add_phase_alignment(src)
     ns = {"__name__": "r1_record_generated", "__file__": R1}
     ns["_phase_aligned"] = phase_aligned
+    ns["BASE"] = base_takes
     exec(compile(src, R1, "exec"), ns)
     ns["unreal"] = _UnrealShim()
 

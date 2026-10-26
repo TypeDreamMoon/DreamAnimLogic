@@ -7,7 +7,10 @@ GetControlRigInput -- what the graph hands the foot IK of the Control Rig -- dif
 import json
 import sys
 
-TAKES = ["lane", "speed_jumps", "stance_changes", "rotation_modes", "view_yaw_sweeps", "in_air", "view_mode", "roll", "mantle", "features"]
+TAKES = ["lane", "speed_jumps", "stance_changes", "rotation_modes", "view_yaw_sweeps", "in_air", "view_mode", "roll", "mantle", "features",
+         # the moving-base takes (base_takes.py; truth in G:/DCC/AlsTruth/base)
+         "base_probe", "base_probe_interp", "base_translate", "base_translate_interp", "base_disc", "base_elevator", "base_jump_off", "base_jump_off_interp",
+         "base_roll_crouch", "base_mantle", "base_mantle_fast_set", "base_mantle_fast_interp"]
 prefix = sys.argv[1]
 rows = []
 for t in TAKES:
