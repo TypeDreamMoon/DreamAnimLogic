@@ -634,7 +634,7 @@ class Checker:
             return None
         return ir.PeerUse(b.peer, tuple(b.path), first in iface.settings_assets)
 
-    PHASE_ORDER = ("pre_movement", "after_movement", "after_anim", "physics_walking")
+    PHASE_ORDER = ("pre_movement", "after_movement", "after_anim", "physics_walking", "prepare_root_motion")
 
     def check_updates(self, updates: list[S.UpdateDecl], logic: S.LogicDecl | None) -> None:
         m = self.module
@@ -642,11 +642,11 @@ class Checker:
         if self.kind == "anim":
             for x, pos in [(logic, logic.phase_pos)] if (logic is not None and logic.phase) else []:
                 self.focus(logic)
-                self.err("DAL5064", "tick slots (in pre_movement / after_movement / after_anim / physics_walking) are for actor logic; an anim logic has one update", pos or logic.pos)
+                self.err("DAL5064", "tick slots (in pre_movement / after_movement / after_anim / physics_walking / prepare_root_motion) are for actor logic; an anim logic has one update", pos or logic.pos)
             for d in updates:
                 if d.phase:
                     self.focus(d)
-                    self.err("DAL5064", "tick slots (in pre_movement / after_movement / after_anim / physics_walking) are for actor logic; an anim logic has one update", d.phase_pos or d.pos)
+                    self.err("DAL5064", "tick slots (in pre_movement / after_movement / after_anim / physics_walking / prepare_root_motion) are for actor logic; an anim logic has one update", d.phase_pos or d.pos)
             logic_phase = None
         m.phases_explicit = bool(logic_phase) or any(d.phase for d in updates if self.kind == "actor")
         seen: dict[str, S.UpdateDecl] = {}

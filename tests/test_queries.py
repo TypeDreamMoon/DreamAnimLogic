@@ -34,7 +34,8 @@ state Over: bool;
 state Spd: float;
 state Step: bool;
 state Valid: bool;
-state Tf: transform;
+state Tf: transformd;
+state Rel: bool;
 state Line: float;
 state Sph: float;
 update(dt) {{
@@ -54,6 +55,7 @@ update(dt) {{
     Step = host.primitive_can_step_up(Prim);
     Valid = host.primitive_valid(Prim);
     Tf = host.primitive_transform(Prim);
+    Rel = host.primitive_uses_relative_location(Prim);
     Line = host.line_trace(From, To, Channel.Camera).distance;
     Sph = host.sweep_sphere(From, To, 10.0, Channel.Visibility, C.Resp).time;
 }}
@@ -99,7 +101,8 @@ def near(test, a, b, places=5):
 class QueryCheckTests(unittest.TestCase):
     def test_signatures(self):
         for name, n in (("sweep_capsule", 6), ("sweep_sphere", 5), ("line_trace", 3), ("overlap_capsule", 5), ("is_walkable", 1),
-                        ("primitive_valid", 1), ("primitive_speed", 1), ("primitive_can_step_up", 1), ("primitive_transform", 1)):
+                        ("primitive_valid", 1), ("primitive_speed", 1), ("primitive_can_step_up", 1), ("primitive_uses_relative_location", 1),
+                        ("primitive_transform", 1)):
             self.assertEqual(len(QUERIES[name].params), n, name)
             self.assertTrue(QUERIES[name].thread_safe, name)
             self.assertTrue(hasattr(HostV1, name), name)
@@ -182,6 +185,7 @@ class QueryPythonTests(unittest.TestCase):
         self.assertEqual((o["Prim"], o["Pen"], o["Valid"]), ("Ground", False, True))
         self.assertEqual((o["Walk"], o["Spd"], o["Step"]), (True, 12.0, False))
         self.assertEqual(o["Tf"], ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0)))
+        self.assertFalse(o["Rel"])                                                     # the ground does not move: nothing is followed on it
 
     def test_a_shape_that_starts_inside_hits_at_time_zero(self):
         o = self.out([scene(From=(0.0, 0.0, 50.0), To=(0.0, 0.0, 400.0), **self.SCENE)])[0]
@@ -281,7 +285,7 @@ class QueryCppTests(unittest.TestCase):
         m = compile_ok(ACTOR)
         frames = [scene(From=(0.0, 0.0, 200.0), To=(0.0, 0.0, 0.0), primitives={"Ground": {"speed": 12.0, "can_step_up": False}}, **QueryPythonTests.SCENE),
                   scene(From=(0.0, 0.0, 50.0), To=(0.0, 0.0, 400.0), **QueryPythonTests.SCENE),
-                  scene(From=(0.0, 0.0, 120.0), To=(500.0, 0.0, 120.0), primitives={"Sphere0": {"speed": 3.0, "transform": ((1.0, 2.0, 3.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0))}}, **QueryPythonTests.SCENE),
+                  scene(From=(0.0, 0.0, 120.0), To=(500.0, 0.0, 120.0), primitives={"Sphere0": {"speed": 3.0, "movable": True, "transform": ((1.0, 2.0, 3.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0))}}, **QueryPythonTests.SCENE),
                   scene(From=(300.0, 0.0, 130.0), To=(300.0, 0.0, 250.0), **QueryPythonTests.SCENE)]
         tcc.CppCompileTests.run_case(self, m, frames, warnings_as_errors=True, default=2e-3)
 

@@ -10,6 +10,7 @@ input B: bool;
 input S: int;
 input Mode: MovementMode;
 state N: int;
+state Base: primitive = none;
 update(dt) {
     host.set_max_walk_speed(F);
     host.set_max_acceleration(F * 2.0);
@@ -30,6 +31,8 @@ update(dt) {
     host.set_actor_location(V);
     host.set_actor_location(V, B, !B);
     host.set_velocity(V * 2.0);
+    host.set_movement_base(Base);
+    host.set_movement_base(none);
     host.set_anim_root_motion_translation_scale(F);
     host.ragdoll_begin(B, F);
     host.ragdoll_end();

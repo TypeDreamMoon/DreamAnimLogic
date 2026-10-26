@@ -26,7 +26,7 @@ class UPrimitiveComponent;
 class UAnimMontage;
 class UAnimSequenceBase;
 
-#define DAL_HOST_VERSION 3
+#define DAL_HOST_VERSION 4
 
 namespace DalHost
 {
@@ -260,6 +260,8 @@ namespace DalHost
 		PlaySlotAnimation,
 		StopMontagesWithSlot,
 		SnapshotPose,
+		// v6
+		SetMovementBase,
 	};
 
 	struct FCommand
@@ -286,6 +288,7 @@ namespace DalHost
 		float F4 = 0.0f;
 		UAnimMontage* MontageAsset = nullptr;  // a `montage` value as the command's montage (instead of the index of a declared one)
 		UAnimSequenceBase* Sequence = nullptr; // play_slot_animation: the sequence
+		UPrimitiveComponent* Primitive = nullptr; // set_movement_base: the component to stand on (none: no base)
 	};
 
 	/** Constructors of the commands, one per `host.<name>(...)` statement. */
@@ -392,6 +395,13 @@ namespace DalHost
 		{
 			FCommand C = Make(ECommand::SetVelocity);
 			C.V = Velocity;
+			return C;
+		}
+
+		inline FCommand SetMovementBase(UPrimitiveComponent* Primitive)
+		{
+			FCommand C = Make(ECommand::SetMovementBase);
+			C.Primitive = Primitive;
 			return C;
 		}
 

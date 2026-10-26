@@ -314,6 +314,7 @@ public:
 	std::string StubName;
 	FVector StubVelocity;
 	bool StubCanStepUp = true;
+	bool StubMovable = false;
 	FTransform StubTransform;
 	FVector GetComponentVelocity() const { return StubVelocity; }
 	FTransform GetComponentTransform() const { return StubTransform; }
@@ -520,9 +521,53 @@ public:
 	}
 };
 
+// the based movement of a character (what ACharacter::GetBasedMovement() holds), scripted by the tests
+struct FMovementBaseInterfaceData
+{
+	FMovementBaseInterfaceData() = default;
+	FMovementBaseInterfaceData(UObject* Object) : StubBase(dynamic_cast<UPrimitiveComponent*>(Object)) {}
+	UPrimitiveComponent* StubBase = nullptr;
+	FVector StubLocation = FVector(0.0, 0.0, 0.0);
+	FQuat StubRotation = FQuat(0.0, 0.0, 0.0, 1.0);
+};
+
+struct FBasedMovementInfo
+{
+	FMovementBaseInterfaceData MovementBaseInterfaceData;
+	FName BoneName;
+	bool bRelativeRotation = false;
+	bool bStubRelativeLocation = false;
+	bool HasRelativeLocation() const { return bStubRelativeLocation; }
+};
+
+namespace MovementBaseUtility
+{
+	inline bool UseRelativeLocation(const FMovementBaseInterfaceData* Data) { return Data != nullptr && Data->StubBase != nullptr && Data->StubBase->StubMovable; }
+	inline bool GetMovementBaseTransform(const FMovementBaseInterfaceData* Data, const FName /*BoneName*/, FVector& OutLocation, FQuat& OutQuat)
+	{
+		if (Data != nullptr && Data->StubBase != nullptr)
+		{
+			OutLocation = Data->StubLocation;
+			OutQuat = Data->StubRotation;
+			return true;
+		}
+		OutLocation = FVector(0.0, 0.0, 0.0);
+		OutQuat = FQuat(0.0, 0.0, 0.0, 1.0);
+		return false;
+	}
+}
+
 class UCharacterMovementComponent : public UObject
 {
 public:
+	UPrimitiveComponent* StubBase = nullptr;
+	UObject* GetMovementBaseObject() const { return StubBase; }
+	virtual void SetBase(FMovementBaseInterfaceData* NewBase, const FName /*BoneName*/ = FName(), bool /*bNotifyActor*/ = true)
+	{
+		StubBase = NewBase != nullptr ? NewBase->StubBase : nullptr;
+		if (StubBase != nullptr) { StubLog::Emit("set_movement_base", {StubBase->StubName}); }       // (the Python side logs the name of the component, none: nothing)
+		else { StubLog::Emit("set_movement_base", {}); }
+	}
 	FActorComponentTickFunction PrimaryComponentTick;
 	FLoggedVelocity Velocity{"set_velocity"};
 	TEnumAsByte<EMovementMode> MovementMode;
@@ -631,6 +676,8 @@ public:
 class ACharacter : public APawn
 {
 public:
+	FBasedMovementInfo StubBasedMovement;
+	const FBasedMovementInfo& GetBasedMovement() const { return StubBasedMovement; }
 	UCharacterMovementComponent* StubMovement = nullptr;
 	UCapsuleComponent* StubCapsule = nullptr;
 	bool StubRootMotion = false;

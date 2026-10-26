@@ -180,6 +180,9 @@ class MockHost(HostV1):
     def primitive_can_step_up(self, primitive):
         return primitive is not None and bool(self.primitives.get(primitive, {}).get("can_step_up", True))
 
+    def primitive_uses_relative_location(self, primitive):
+        return primitive is not None and bool(self.primitives.get(primitive, {}).get("movable", False))
+
     def primitive_transform(self, primitive):
         return rt.as_transform(self.primitives.get(primitive, {}).get("transform", rt.Transform()))
 

@@ -98,6 +98,20 @@ HOST_ITEMS: dict[str, HostItem] = {
                  ue="Character->HasAnyRootMotion()"),
         HostItem("movement_mode_custom", INT, doc="CMC custom movement mode (the sub mode of MOVE_Custom)",
                  ue="CharacterMovement->CustomMovementMode"),
+        # v6: the movement base (the component the character stands on and follows: a moving platform, an elevator, a vehicle; the ground is a base too)
+        HostItem("movement_base", PRIMITIVE, doc="the component the character is based on (its movement base); none when it stands on nothing: the floor under it "
+                                                 "when it walks, any component it is on, the climbing target while ALS mantles; compare it with the last one to see the base change",
+                 ue="Cast<UPrimitiveComponent>(Movement->GetMovementBaseObject()) (the component of BasedMovement.MovementBaseInterfaceData)"),
+        HostItem("movement_base_location", VEC3D, unit="cm", doc="world location of the movement base component (zero without a base)",
+                 ue="MovementBaseUtility::GetMovementBaseTransform(&BasedMovement.MovementBaseInterfaceData, BasedMovement.BoneName, Location, Rotation)"),
+        HostItem("movement_base_rotation", QUATD, doc="world rotation of the movement base component (the identity without a base)",
+                 ue="MovementBaseUtility::GetMovementBaseTransform(&BasedMovement.MovementBaseInterfaceData, BasedMovement.BoneName, Location, Rotation)"),
+        HostItem("movement_base_has_relative_location", BOOL, doc="the base can move (its Mobility is Movable): the character keeps a location relative to it and follows it "
+                                                                  "(FBasedMovementInfo::HasRelativeLocation)",
+                 ue="Character->GetBasedMovement().HasRelativeLocation()"),
+        HostItem("movement_base_relative_rotation", BOOL, doc="the character's rotation relative to the base is kept too (bRelativeRotation: the movement component does not "
+                                                              "ignore the base's rotation); ALS's `bHasRelativeRotation` is this and the base being relative",
+                 ue="Character->GetBasedMovement().bRelativeRotation"),
         HostItem("anim_curve", FLOAT, arg=True, arg_kind="string", free_name=True,
                  doc='value of an animation curve of the last evaluated pose: host.anim_curve("LayerHead") (0 when the curve is not there)',
                  ue="AnimInstance->GetCurveValue(FName(Name))"),
@@ -261,6 +275,9 @@ COMMANDS: dict[str, Command] = {
                                                                         "sweep: stop at what blocks, teleport: reset the physics state (a teleport)",
            ue="Pawn->SetActorLocation(Location, bSweep, nullptr, bTeleport ? ETeleportType::TeleportPhysics : ETeleportType::None)"),
         _c("set_velocity", [VEC3], ue="CharacterMovement->Velocity = v"),
+        _c("set_movement_base", [PRIMITIVE], doc="stand on a component (the movement component's SetBase): ALS's mantling makes the target the base, so the character is carried "
+                                                 "along while the target moves; none = no base.  The movement mode change that follows sets the base from the floor again",
+           ue="CharacterMovement->SetBase(FMovementBaseInterfaceData(Primitive))"),
         _c("set_anim_root_motion_translation_scale", [FLOAT], ue="Character->SetAnimRootMotionTranslationScale(Scale)"),
         _c("ragdoll_begin", [BOOL, FLOAT], doc="start ragdolling (the native ragdoll service of the actor); speed_limit caps the speed of the bodies while limit_speed is set",
            ue="UDalRagdollService::Begin(bLimitSpeed, SpeedLimit) (DalRuntime)"),
@@ -315,7 +332,10 @@ QUERIES: dict[str, Query] = {
         Query("primitive_valid", (PRIMITIVE,), BOOL, "is the component handle still valid", "IsValid(Component)", True),
         Query("primitive_speed", (PRIMITIVE,), FLOAT, "speed of the component", "Component->GetComponentVelocity().Size()", True),
         Query("primitive_can_step_up", (PRIMITIVE,), BOOL, "can the character step onto the component", "Component->CanCharacterStepUp(Pawn)", True),
-        Query("primitive_transform", (PRIMITIVE,), TRANSFORM, "world transform of the component", "Component->GetComponentTransform()", True),
+        Query("primitive_uses_relative_location", (PRIMITIVE,), BOOL,
+              "does a character on this component keep its location relative to it and follow it (the component can move: its Mobility is Movable)",
+              "MovementBaseUtility::UseRelativeLocation(Component)", True),
+        Query("primitive_transform", (PRIMITIVE,), TRANSFORMD, "world transform of the component (double: the engine's precision)", "Component->GetComponentTransform()", True),
         Query("montage_is_playing", (MONTAGE_ASSET,), BOOL, "is the montage (an asset value) playing", "AnimInstance->Montage_IsPlaying(Montage)", True),
         # v4: what an animation montage asset says about itself (pure, any thread)
         Query("montage_length", (MONTAGE_ASSET,), FLOAT, "play length of the montage in seconds (0 for none)", "Montage->GetPlayLength()", True),
@@ -414,6 +434,11 @@ class HostV0:
     ragdoll_velocity = rt.VEC3_ZERO
     ragdoll_facing_up = False
     mesh_world_transform = rt.Transform()
+    movement_base = None
+    movement_base_location = rt.VEC3_ZERO
+    movement_base_rotation = rt.QUAT_IDENTITY
+    movement_base_has_relative_location = False
+    movement_base_relative_rotation = False
 
     def action(self, name: str, ty: str):
         """Value of the input action ``name`` as DAL type ``ty`` ('bool', 'float', 'vec2', 'vec3').
@@ -521,15 +546,19 @@ class HostV1(HostV0):
         return primitive is not None
 
     def primitive_speed(self, primitive) -> float:
-        """speed of the shape (0: the shapes of the scene are static)"""
+        """``Shape.component_velocity.size()`` (the component velocity of a platform: 0 for a shape that is static or that nothing reports the velocity of)"""
         return 0.0
 
     def primitive_can_step_up(self, primitive) -> bool:
         """``Shape.can_step_up`` (True for a shape that has no flag, False for no handle)"""
         return primitive is not None
 
+    def primitive_uses_relative_location(self, primitive) -> bool:
+        """``Shape.movable`` (a platform that can move: a character on it follows it; a static shape is not followed)"""
+        return False
+
     def primitive_transform(self, primitive):
-        """the shape's world transform (identity when it is not known)"""
+        """the shape's world transform as it is now (identity when it is not known); a platform that moves answers where it is at this tick"""
         return rt.Transform()
 
     def target_count(self) -> int:
@@ -705,6 +734,9 @@ class HostV1(HostV0):
 
     def set_velocity(self, velocity) -> None:
         """cm.set_velocity(V3(velocity))"""
+
+    def set_movement_base(self, primitive) -> None:
+        """cm.set_base(shape): ``primitive`` is the value a trace hit gave (``world.primitive(handle)`` of it), None for no base"""
 
     def set_anim_root_motion_translation_scale(self, scale: float) -> None:
         """cm.set_anim_root_motion_translation_scale(scale)"""

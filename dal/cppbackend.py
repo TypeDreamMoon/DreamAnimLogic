@@ -73,7 +73,7 @@ from .types import (
 )
 
 _SCENE_QUERIES = ("sweep_capsule", "sweep_sphere", "line_trace", "overlap_capsule")          # the v3 queries that ask the physics scene
-_COMPONENT_QUERIES = ("primitive_valid", "primitive_speed", "primitive_can_step_up", "primitive_transform")
+_COMPONENT_QUERIES = ("primitive_valid", "primitive_speed", "primitive_can_step_up", "primitive_uses_relative_location", "primitive_transform")
 _NEW_HIT_MEMBERS = ("location", "start_penetrating", "primitive", "face_normal", "point_d", "location_d")
 
 T = "\t"
@@ -649,6 +649,7 @@ EXEC: dict[str, tuple[list[str], list[str]]] = {
     "set_movement_mode_locked": ([_G_MOVEMENT, _G_ALS_MOVEMENT], ["DalAlsMovement->bMovementModeLocked = DalCommand.B0;"]),
     "set_actor_location": ([_G_PAWN], ["DalPawn->SetActorLocation(DalCommand.VD, DalCommand.B0, nullptr, DalCommand.B1 ? ETeleportType::TeleportPhysics : ETeleportType::None);"]),
     "set_velocity": ([_G_MOVEMENT], ["DalMovement->Velocity = FVector(DalCommand.V);"]),
+    "set_movement_base": ([_G_MOVEMENT], ["FMovementBaseInterfaceData DalBaseData(DalCommand.Primitive);", "DalMovement->SetBase(&DalBaseData);"]),
     "set_anim_root_motion_translation_scale": ([_G_CHARACTER], ["DalCharacter->SetAnimRootMotionTranslationScale(DalCommand.F);"]),
     "ragdoll_begin": ([_G_PAWN, _G_RAGDOLL], ["DalRagdoll->Begin(DalCommand.B0, DalCommand.F);"]),
     "ragdoll_end": ([_G_PAWN, _G_RAGDOLL], ["DalRagdoll->End();"]),
@@ -750,6 +751,7 @@ _CONSUME_ITEMS = ("pre_penetration_velocity", "pre_penetration_velocity_valid") 
 _MESH_ITEMS = ("ragdoll_supported", "mesh_world_transform", "bone_component_transform", "bone_world_transform", "ref_path_child_translation", "mesh_scale")
 _RAGDOLL_ITEMS = ("ragdoll_pelvis_location", "ragdoll_velocity", "ragdoll_facing_up")             # read from the UDalRagdollService (DalRuntime) of the actor
 _WORLD_ITEMS = ("time", "time_dilation", "real_delta_time")                                          # read from the UWorld
+_BASE_ITEMS = ("movement_base", "movement_base_location", "movement_base_rotation", "movement_base_has_relative_location", "movement_base_relative_rotation")   # the based movement of the character
 _MOVEMENT_ITEMS = ("velocity", "acceleration", "max_acceleration", "max_braking_deceleration", "walkable_floor_z", "movement_mode_custom",
                    "max_walk_speed", "movement_mode", "is_grounded", "is_crouching")
 _MONTAGE_ASSET_QUERIES = frozenset(("montage_length", "montage_rate_scale", "montage_sampling_rate", "montage_blend_in_time", "montage_blend_in_option",
@@ -1050,11 +1052,11 @@ class CppGen:
 
     @property
     def needs_movement_read(self) -> bool:
-        return self.uses(*_MOVEMENT_ITEMS)
+        return self.uses(*_MOVEMENT_ITEMS, "movement_base")
 
     @property
     def needs_character_read(self) -> bool:
-        return self.needs_movement_read or self.uses(*_CHARACTER_ITEMS, *_CONSUME_ITEMS)
+        return self.needs_movement_read or self.uses(*_CHARACTER_ITEMS, *_CONSUME_ITEMS, *_BASE_ITEMS)
 
     @property
     def needs_pawn_helper(self) -> bool:
@@ -1806,9 +1808,13 @@ class CppGen:
         if "primitive_can_step_up" in q:
             out.append(Method("bool", "DalPrimitiveCanStepUp", "const UPrimitiveComponent* DalPrimitive",
                               body=["return DalPrimitive != nullptr && DalPrimitive->CanCharacterStepUp(DalGetPawn());"]))
+        if "primitive_uses_relative_location" in q:
+            out.append(Method("bool", "DalPrimitiveUsesRelativeLocation", "const UPrimitiveComponent* DalPrimitive",
+                              body=["const FMovementBaseInterfaceData DalBaseData(const_cast<UPrimitiveComponent*>(DalPrimitive));",
+                                    "return DalPrimitive != nullptr && MovementBaseUtility::UseRelativeLocation(&DalBaseData);"]))
         if "primitive_transform" in q:
-            out.append(Method("FTransform3f", "DalPrimitiveTransform", "const UPrimitiveComponent* DalPrimitive",
-                              body=["return DalPrimitive != nullptr ? FTransform3f(DalPrimitive->GetComponentTransform()) : FTransform3f();"]))
+            out.append(Method("FTransform", "DalPrimitiveTransform", "const UPrimitiveComponent* DalPrimitive",
+                              body=["return DalPrimitive != nullptr ? DalPrimitive->GetComponentTransform() : FTransform();"]))
         return out
 
     def response_lines(self) -> list[str]:
@@ -3151,6 +3157,15 @@ class CppGen:
             L.append(f"{T}const UCharacterMovementComponent* Movement = IsValid(Character) ? Character->GetCharacterMovement() : nullptr;")
         if self.uses(*_CAPSULE_ITEMS):
             L.append(f"{T}const UCapsuleComponent* Capsule = IsValid(Character) ? Character->GetCapsuleComponent() : nullptr;")
+        if self.uses("movement_base_location", "movement_base_rotation"):
+            L += [f"{T}// the transform of the movement base as ALS's RefreshMovementBase reads it (the bone of the based movement, none for the component's own)",
+                  f"{T}FVector DalBaseLocation = FVector::ZeroVector;",
+                  f"{T}FQuat DalBaseRotation = FQuat(0.0, 0.0, 0.0, 1.0);",
+                  f"{T}if (IsValid(Character))",
+                  f"{T}{{",
+                  f"{T}{T}const FBasedMovementInfo& DalBasedMovement = Character->GetBasedMovement();",
+                  f"{T}{T}MovementBaseUtility::GetMovementBaseTransform(&DalBasedMovement.MovementBaseInterfaceData, DalBasedMovement.BoneName, DalBaseLocation, DalBaseRotation);",
+                  f"{T}}}"]
         if self.uses(*_CONSUME_ITEMS):
             gate = ""
             if self.consume_only is not None:                                 # tick slots that do not read it leave it to the ones that do
@@ -3223,6 +3238,21 @@ class CppGen:
                 continue
             if it == "mesh_world_transform":
                 L.append(f"{T}{name} = DalMesh != nullptr ? {rd('DalMesh->GetComponentTransform()', True)} : {cpp_type(i.ty)}();")
+                continue
+            if it == "movement_base":
+                L.append(f"{T}{name} = Movement != nullptr ? Cast<UPrimitiveComponent>(Movement->GetMovementBaseObject()) : nullptr;")
+                continue
+            if it == "movement_base_location":
+                L.append(f"{T}{name} = {rd('DalBaseLocation', True)};")
+                continue
+            if it == "movement_base_rotation":
+                L.append(f"{T}{name} = {rd('DalBaseRotation', True)};")
+                continue
+            if it == "movement_base_has_relative_location":
+                L.append(f"{T}{name} = Character != nullptr && Character->GetBasedMovement().HasRelativeLocation();")
+                continue
+            if it == "movement_base_relative_rotation":
+                L.append(f"{T}{name} = Character != nullptr && Character->GetBasedMovement().bRelativeRotation;")
                 continue
             if it in ("bone_component_transform", "bone_world_transform"):
                 space = "RTS_Component" if it == "bone_component_transform" else "RTS_World"

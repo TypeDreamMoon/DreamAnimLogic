@@ -65,7 +65,7 @@ class Lowerer:
         return S.MemberRef(pos, S.NameRef(pos, base), field, pos)
 
     # ---- entry ----------------------------------------------------------------------------------------------------------
-    PHASE_ORDER = ("pre_movement", "after_movement", "after_anim", "physics_walking")
+    PHASE_ORDER = ("pre_movement", "after_movement", "after_anim", "physics_walking", "prepare_root_motion")
     SUGAR_CALLS = ("start", "stop", "open", "close", "consume")
 
     def run(self) -> S.SourceUnit:

@@ -14,9 +14,11 @@ from dataclasses import dataclass, field
 from .types import EnumType, Type
 
 # Tick slots the host calls itself, at a point inside its own work, instead of the engine's tick running them in a fixed place: the movement
-# component runs `physics_walking` at the start of its walking physics (UE: UCharacterMovementComponent::PhysWalking).  A hook slot is not part of
-# `update(dt)` (which runs the scheduled slots), takes no part in the `before` / `after` order, and a host that does not run it never runs the block.
-HOOK_SLOTS = ("physics_walking",)
+# component runs `physics_walking` at the start of its walking physics (UE: UCharacterMovementComponent::PhysWalking) and `prepare_root_motion`
+# where its root motion sources work out the velocity of the step (UE: FRootMotionSource::PrepareRootMotion, inside PerformMovement after the
+# character has followed its movement base).  A hook slot is not part of `update(dt)` (which runs the scheduled slots), takes no part in the
+# `before` / `after` order, and a host that does not run it never runs the block.
+HOOK_SLOTS = ("physics_walking", "prepare_root_motion")
 
 
 # ---- expressions -----------------------------------------------------------------
@@ -365,7 +367,7 @@ class UpdateDef:
     dt_name: str
     body: list[Stmt]
     pre: list[Stmt] = field(default_factory=list)      # timer ticks etc., run before events are handled
-    phase: str = "pre_movement"                         # tick slot: pre_movement | after_movement | after_anim | physics_walking (actor logic)
+    phase: str = "pre_movement"                         # tick slot: pre_movement | after_movement | after_anim | physics_walking | prepare_root_motion (actor logic)
 
 
 @dataclass

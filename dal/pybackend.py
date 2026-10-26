@@ -742,7 +742,7 @@ class PyGen:
                 L.append(f"{INDENT*2}pass")
             L.append("")
             L.append(f"{INDENT}def update_phase(self, phase, dt):")
-            L.append(f'{INDENT*2}"""One tick slot: pre_movement, after_movement, after_anim or physics_walking (a slot the logic does not use does nothing)."""')
+            L.append(f'{INDENT*2}"""One tick slot: pre_movement, after_movement, after_anim, physics_walking or prepare_root_motion (a slot the logic does not use does nothing)."""')
             for k, name in enumerate(slot_names):
                 L.append(f"{INDENT*2}{'if' if k == 0 else 'elif'} phase == {name!r}:")
                 L.append(f"{INDENT*3}self._u_{name}(dt)")

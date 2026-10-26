@@ -80,7 +80,7 @@ class HookSlotCheckTests(unittest.TestCase):
     def test_the_slot_is_accepted_and_comes_last(self):
         m = module()
         self.assertEqual([u.phase for u in m.updates], ["pre_movement", "after_movement", "physics_walking"])
-        self.assertEqual(ir.HOOK_SLOTS, ("physics_walking",))
+        self.assertEqual(ir.HOOK_SLOTS, ("physics_walking", "prepare_root_motion"))
 
     def test_written_first_it_is_still_last(self):
         src = "logic T : actor;\nstate A: int;\nupdate(dt) in physics_walking { A = 2; }\nupdate(dt) in pre_movement { A = 1; }"

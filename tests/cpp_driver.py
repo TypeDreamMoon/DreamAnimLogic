@@ -308,6 +308,14 @@ _SIMPLE = {
     "ragdoll_pelvis_location": lambda v: f"Ragdoll.StubPelvisLocation = FVector({_num(v[0])}, {_num(v[1])}, {_num(v[2])});",
     "ragdoll_velocity": lambda v: f"Ragdoll.StubPelvisVelocity = FVector({_num(v[0])}, {_num(v[1])}, {_num(v[2])});",
     "ragdoll_facing_up": lambda v: f"Ragdoll.bStubFacingUp = {'true' if v else 'false'};",
+    # the movement base: a scene primitive by its name ("Ground", "Sphere0" ...) or none
+    "movement_base": lambda v: ("Pawn.StubBasedMovement.MovementBaseInterfaceData.StubBase = nullptr; Move.StubBase = nullptr;" if v is None else
+                                f"Pawn.StubBasedMovement.MovementBaseInterfaceData.StubBase = &Prims[{0 if v == 'Ground' else int(v[6:]) + 1}]; "
+                                f"Move.StubBase = &Prims[{0 if v == 'Ground' else int(v[6:]) + 1}];"),
+    "movement_base_location": lambda v: f"Pawn.StubBasedMovement.MovementBaseInterfaceData.StubLocation = FVector({_num(v[0])}, {_num(v[1])}, {_num(v[2])});",
+    "movement_base_rotation": lambda v: f"Pawn.StubBasedMovement.MovementBaseInterfaceData.StubRotation = FQuat({_num(v[0])}, {_num(v[1])}, {_num(v[2])}, {_num(v[3])});",
+    "movement_base_has_relative_location": lambda v: f"Pawn.StubBasedMovement.bStubRelativeLocation = {'true' if v else 'false'};",
+    "movement_base_relative_rotation": lambda v: f"Pawn.StubBasedMovement.bRelativeRotation = {'true' if v else 'false'};",
 }
 _TRIGGER = {"started": "Started", "triggered": "Triggered", "ongoing": "Ongoing", "completed": "Completed", "canceled": "Canceled"}
 
@@ -633,7 +641,7 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
                 L.append(f'\t\tPrims[{k + 1}].StubName = "Sphere{k}"; World.StubPrims.push_back(&Prims[{k + 1}]);')
         if world:
             for k in range(9):                                        # every primitive starts from its defaults again
-                L.append(f"		Prims[{k}].StubVelocity = FVector(); Prims[{k}].StubCanStepUp = true; Prims[{k}].StubTransform = FTransform();")
+                L.append(f"		Prims[{k}].StubVelocity = FVector(); Prims[{k}].StubCanStepUp = true; Prims[{k}].StubMovable = false; Prims[{k}].StubTransform = FTransform();")
         for name, props in world.get("primitives", {}).items():
             k = 0 if name == "Ground" else int(name[6:]) + 1
             if k > 8:
@@ -641,6 +649,7 @@ def make_driver(module: ir.Module, frames: list[dict], params: dict | None = Non
             t = props.get("transform", ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0)))
             L.append(f"\t\tPrims[{k}].StubVelocity = FVector({_num(props.get('speed', 0.0))}, 0.0, 0.0); "
                      f"Prims[{k}].StubCanStepUp = {'true' if props.get('can_step_up', True) else 'false'}; "
+                     f"Prims[{k}].StubMovable = {'true' if props.get('movable', False) else 'false'}; "
                      f"Prims[{k}].StubTransform = {_dtransform(t)};")
         # a notify read through host.notify(...) that fired this frame
         for name, fired in f.get("notifies", {}).items():
