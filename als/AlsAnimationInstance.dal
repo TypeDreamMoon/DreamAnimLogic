@@ -5,8 +5,9 @@
 // VelocityBlend.ForwardAmount and calling Call(Self.RefreshGrounded): every state below has the name and type of the ALS member,
 // the `entry` functions are the UFUNCTIONs of the class, `GetControlRigInput` is the pure getter of the ControlRig node.
 //
-// The whole class but the moving-base compensation (no moving bases in Blender: every `MovementBase.bHasRelativeLocation` branch of the C++ is
-// dead and left out, the places say so) and the absolute-rotation sync of the mesh for URO (AI:118-134, no counterpart).  Foot lock
+// The whole class but the absolute-rotation sync of the mesh for URO (AI:118-134, no counterpart).  The moving base is in: every
+// `MovementBase.bHasRelativeLocation / bHasRelativeRotation` branch of the C++ (the foot lock in the space of the base, the spine, the
+// head, the velocity and the yaw velocity of a turning base).  Foot lock
 // (AI:1245-1573), the playback of the queued transition / turn-in-place montages (AI:1780-2046), the ground prediction sweep (AI:1142-1217),
 // the final ragdoll pose (AI:2064) and the notifies of the instance (Notifies/*) are in; the .dab contract is complete (82 of 82 paths).
 //
@@ -47,6 +48,12 @@ input WorldTime: double <- host.time;                                     // AI:
 input GlobalTimeDilation: float <- host.time_dilation;                    // AI:116   GetWorld()->GetWorldSettings()->GetEffectiveTimeDilation()
 input CustomTimeDilation: float <- host.actor_time_dilation;              // AI:114   Character->CustomTimeDilation
 input RealDeltaTime: float <- host.real_delta_time;                       // AI:115   GetWorld()->DeltaRealTimeSeconds
+// the based movement of the character (Character->GetBasedMovement(), AI:259-286)
+input BaseComponent: primitive <- host.movement_base;                     // BasedMovement.MovementBaseInterfaceData
+input BaseLocation: vec3d <- host.movement_base_location;                 // MovementBaseUtility::GetMovementBaseTransform
+input BaseRotation: quatd <- host.movement_base_rotation;
+input BaseHasRelativeLocation: bool <- host.movement_base_has_relative_location;     // BasedMovement.HasRelativeLocation()
+input BaseRelativeRotation: bool <- host.movement_base_relative_rotation;            // BasedMovement.bRelativeRotation
 
 // ---- the pose of the previous evaluation, read by the foot lock (AI:1245-1295, :1307) ------------------------------------------------
 input PelvisBoneTransform: transform <- host.bone_component_transform("pelvis");         // AI:1250  GetSocketTransform(pelvis, RTS_Component)
@@ -245,8 +252,8 @@ on notify AlsAnimNotify_SetGroundedEntryMode {                             // Al
 
 // ---- movement base (AI:259-286) -------------------------------------------------------------------------------------------------
 method refresh_movement_base_on_game_thread() {
-    // No moving bases in Blender (c3 has none, als-dal-rewrite.md G27): MovementBase keeps its defaults, bHasRelativeLocation is
-    // false, so every `if (MovementBase.bHasRelativeRotation)` branch of the ALS functions below is dead and left out.
+    MovementBase = refresh_movement_base_state(MovementBase, BaseComponent, BaseLocation, BaseRotation,
+                                               BaseHasRelativeLocation, BaseRelativeRotation);      // AI:261-285 (the same code as AAlsCharacter::RefreshMovementBase)
 }
 
 // ---- layering and pose from the animation curves (AI:288-375) ------------------------------------------------------------------------
@@ -385,7 +392,10 @@ method refresh_spine(spine_blend_amount: float, dt: float) {
             SpineState.SpineAmount = damper_exact(SpineState.SpineAmount, 0.0, dt,
                                                   interpolation_half_life * interpolation_half_life_multiplier);   // AI:490
 
-            // (AI:493-498, the moving base offset of LastYawAngleWorldSpace, is dead without moving bases.)
+            if (MovementBase.bHasRelativeRotation) {                                                 // AI:493
+                // Offset the angle to keep it in the movement base space.
+                SpineState.LastYawAngleWorldSpace = unwind_degrees(float(SpineState.LastYawAngleWorldSpace + MovementBase.DeltaRotation.yaw));    // AI:496-497
+            }
 
             // Offset the spine rotation to keep it unchanged in world space. This will result in smoother spine rotation when
             // aiming stops.  Keep the offset within 30 degrees; otherwise, the spine rotation may lag too far behind the
@@ -412,7 +422,10 @@ entry InitializeHead() linked {                                                 
 entry RefreshHead(dt) linked {                                                                       // AI:528  (.dab: Call(Self.RefreshHead))
     let first_person = ViewMode == AlsViewMode.FirstPerson;                                          // AI:546
 
-    // (AI:548-552, the moving base offset, is dead without moving bases.)
+    if (MovementBase.bHasRelativeRotation) {                                                         // AI:548
+        // Offset the angle to keep it in the movement base space.
+        HeadState.YawAngle += float(MovementBase.DeltaRotation.yaw);                                 // AI:551 UE_REAL_TO_FLOAT
+    }
 
     // Offset the angle to make it independent of character rotation.
     HeadState.YawAngle -= LocomotionState.YawVelocityWorldSpace * dt;                                // AI:555
@@ -520,7 +533,9 @@ method refresh_locomotion_on_game_thread(dt: float) {
     LocomotionState.bHasInput = CharacterLocomotion.bHasInput;                                       // AI:690
     LocomotionState.InputYawAngleWorldSpace = CharacterLocomotion.InputYawAngle;
 
-    let previous_velocity = LocomotionState.VelocityWorldSpace;                                      // AI:693 (no moving base: not rotated)
+    let previous_velocity = MovementBase.bHasRelativeRotation
+                                ? vec3(rotate(MovementBase.DeltaRotation, vec3d(LocomotionState.VelocityWorldSpace)))       // AI:693-695 (rotated with the base)
+                                : LocomotionState.VelocityWorldSpace;
 
     LocomotionState.Speed = CharacterLocomotion.Speed;                                               // AI:699
     LocomotionState.VelocityWorldSpace = CharacterLocomotion.Velocity;
@@ -542,7 +557,11 @@ method refresh_locomotion_on_game_thread(dt: float) {
 
     LocomotionState.TargetYawAngleWorldSpace = CharacterLocomotion.TargetYawAngle;                   // AI:718
 
-    let previous_yaw_angle = LocomotionState.RotationWorldSpace.yaw;                                 // AI:720
+    var previous_yaw_angle = LocomotionState.RotationWorldSpace.yaw;                                 // AI:720
+    if (MovementBase.bHasRelativeRotation) {                                                         // AI:722
+        // Offset the angle to keep it in the movement base space.
+        previous_yaw_angle = unwind_degrees(float(previous_yaw_angle + MovementBase.DeltaRotation.yaw));      // AI:725
+    }
 
     // (AI:732-777: with network smoothing off -- the only case without a network -- the transform is the actor transform.)
     LocomotionState.LocationWorldSpace = ActorLocation;                                              // AI:745
@@ -921,15 +940,26 @@ view process_foot_lock_teleport(foot: AlsFootState, context: AlsFootUpdateContex
     foot_state.LockLocationWorldSpace = transform_position(context.ComponentTransform, foot_state.LockLocation);          // AI:1346
     foot_state.LockRotationWorldSpace = transform_rotation(context.ComponentTransform, foot_state.LockRotation);
 
-    // (AI:1349-1357: the movement base space of the lock, dead without moving bases.)
+    if (MovementBase.bHasRelativeLocation) {                                                         // AI:1349
+        foot_state = lock_in_movement_base_space(foot_state, foot_state.LockLocationWorldSpace, foot_state.LockRotationWorldSpace);     // AI:1351-1356
+    }
+    return foot_state;
+}
+
+// FootState.LockLocationMovementBaseSpace / LockRotationMovementBaseSpace of a lock in world space (AI:1351-1356, :1378-1383, :1468-1473, :1549-1554):
+// the same few lines in five places of the C++, written once here.  The base transform is double, the lock the float of the state (FVector3f / FQuat4f).
+view lock_in_movement_base_space(foot: AlsFootState, location: vec3, rotation: quat) -> AlsFootState {
+    var foot_state = foot;
+    let base_rotation_inverse = quat_inverse(MovementBase.Rotation);
+    foot_state.LockLocationMovementBaseSpace = vec3(rotate(base_rotation_inverse, vec3d(location) - MovementBase.Location));
+    foot_state.LockRotationMovementBaseSpace = quat(base_rotation_inverse * quatd(rotation));
     return foot_state;
 }
 
 view process_foot_lock_base_change(foot: AlsFootState, context: AlsFootUpdateContext) -> AlsFootState {   // AI:1360
     var foot_state = foot;
 
-    // (MovementBase.bBaseChanged is never true without moving bases.)
-    if (!FeetState.bBecameValid || !is_relevant(context.IkAmount * foot_state.LockAmount)) {         // AI:1364
+    if ((!FeetState.bBecameValid && !MovementBase.bBaseChanged) || !is_relevant(context.IkAmount * foot_state.LockAmount)) {     // AI:1364
         return foot_state;
     }
 
@@ -938,9 +968,12 @@ view process_foot_lock_base_change(foot: AlsFootState, context: AlsFootUpdateCon
         foot_state.LockRotationWorldSpace = foot_state.TargetRotationWorldSpace;
     }
 
-    // No movement base (AI:1376-1389): the lock in the space of the base is the origin.
-    foot_state.LockLocationMovementBaseSpace = VEC3_ZERO;
-    foot_state.LockRotationMovementBaseSpace = QUAT_IDENTITY;
+    if (MovementBase.bHasRelativeLocation) {                                                         // AI:1376
+        foot_state = lock_in_movement_base_space(foot_state, foot_state.LockLocationWorldSpace, foot_state.LockRotationWorldSpace);     // AI:1378-1383
+    } else {
+        foot_state.LockLocationMovementBaseSpace = VEC3_ZERO;                                        // AI:1387-1388
+        foot_state.LockRotationMovementBaseSpace = QUAT_IDENTITY;
+    }
 
     foot_state.LockLocation = transform_position(context.ComponentTransformInverse, foot_state.LockLocationWorldSpace);          // AI:1391
     foot_state.LockRotation = transform_rotation(context.ComponentTransformInverse, foot_state.LockRotationWorldSpace);
@@ -1002,9 +1035,12 @@ view refresh_foot_lock(foot: AlsFootState, context: AlsFootUpdateContext) -> Als
                 target_rotation = transform_rotation(context.ComponentTransform, foot_state.FinalRotation);
             }
 
-            // No movement base (AI:1466-1479).
-            foot_state.LockLocationMovementBaseSpace = VEC3_ZERO;
-            foot_state.LockRotationMovementBaseSpace = QUAT_IDENTITY;
+            if (MovementBase.bHasRelativeLocation) {                                                 // AI:1466
+                foot_state = lock_in_movement_base_space(foot_state, target_location, target_rotation);      // AI:1468-1473
+            } else {
+                foot_state.LockLocationMovementBaseSpace = VEC3_ZERO;                                // AI:1477-1478
+                foot_state.LockRotationMovementBaseSpace = QUAT_IDENTITY;
+            }
 
             if (foot_state.LockAmount <= 0.9) {                                                      // AI:1481
                 // Keep the same lock location and rotation when the previous lock amount is close to 1 to get rid of the foot
@@ -1022,7 +1058,10 @@ view refresh_foot_lock(foot: AlsFootState, context: AlsFootUpdateContext) -> Als
         foot_state.LockAmount = new_lock_amount;
     }
 
-    // (AI:1504-1510: the lock in the world from the movement base, dead without moving bases.)
+    if (MovementBase.bHasRelativeLocation) {                                                         // AI:1504
+        foot_state.LockLocationWorldSpace = vec3(MovementBase.Location + rotate(MovementBase.Rotation, vec3d(foot_state.LockLocationMovementBaseSpace)));    // AI:1506-1507
+        foot_state.LockRotationWorldSpace = quat(MovementBase.Rotation * quatd(foot_state.LockRotationMovementBaseSpace));       // AI:1509
+    }
 
     foot_state.LockLocation = transform_position(context.ComponentTransformInverse, foot_state.LockLocationWorldSpace);   // AI:1512
     foot_state.LockRotation = transform_rotation(context.ComponentTransformInverse, foot_state.LockRotationWorldSpace);
@@ -1055,7 +1094,9 @@ view constrain_foot_lock(foot: AlsFootState, proxy_transform: transform) -> AlsF
         foot_state.LockLocationWorldSpace = transform_position(proxy_transform, foot_state.LockLocation);   // AI:1544
         foot_state.LockRotationWorldSpace = transform_rotation(proxy_transform, foot_state.LockRotation);
 
-        // (AI:1547-1555: the lock in the space of the movement base, dead without moving bases.)
+        if (MovementBase.bHasRelativeLocation) {                                                     // AI:1547
+            foot_state = lock_in_movement_base_space(foot_state, foot_state.LockLocationWorldSpace, foot_state.LockRotationWorldSpace);     // AI:1549-1554
+        }
     }
 
     // Limit the rotation of the locked foot.

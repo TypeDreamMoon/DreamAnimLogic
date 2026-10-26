@@ -304,6 +304,17 @@ class Rig:
             h.calls.clear()
         return self
 
+    def run_hook(self, slot, dt=None, logic="AlsCharacter"):
+        """The movement component runs a hook slot of a logic (``physics_walking``, ``prepare_root_motion``) while it moves the character: the block
+        runs with the host values of this frame and the commands it hands over are the frame's.  Returns them."""
+        dt = self.host["dt"] if dt is None else dt
+        before = {k: len(h.calls) for k, h in self.hosts.items()}
+        self.objs[logic].update_phase(slot, dt)
+        handed = [c for k, h in self.hosts.items() for c in h.calls[before[k]:]]
+        self.trace.append((logic, slot, [c[0] for c in handed]))
+        self.blocks.append((logic, slot, handed))
+        return handed
+
     def call(self, method, *args, logic="AlsCharacter"):
         """A ``pub method`` called from outside (what a Blueprint or another logic does)."""
         return self.objs[logic].dal_call(method, *args)
@@ -380,7 +391,7 @@ class FilesTests(Case):
         m = modules()
         char, inp = m["AlsCharacter"], m["AlsInput"]
         self.assertEqual((char.kind, inp.kind), ("actor", "actor"))
-        self.assertEqual([u.phase for u in char.updates], ["pre_movement", "after_movement", "physics_walking"])      # the last one is a hook slot: the movement component runs it
+        self.assertEqual([u.phase for u in char.updates], ["pre_movement", "after_movement", "physics_walking", "prepare_root_motion"])      # the last two are hook slots: the movement component runs them
         self.assertEqual(harness.phases_of(inp), ["pre_movement"])
         self.assertEqual([(p.name, p.logic) for p in char.peers], [("Anim", "AlsAnimationInstance")])
         self.assertEqual([(p.name, p.logic) for p in inp.peers], [("Character", "AlsCharacter")])
@@ -1461,7 +1472,7 @@ class GeneratedCppShapeTests(Case):
         self.has(h, "TObjectPtr<UAlsCharacterSettings> Settings;")
         self.has(h, "TObjectPtr<UAlsMovementSettings> MovementSettings;")
         self.has(h, "void Jump();")
-        self.has(h, "FAlsCharacterPhaseTick DalPhaseTicks[3];")                             # pre_movement, after_movement and the hook slot physics_walking
+        self.has(h, "FAlsCharacterPhaseTick DalPhaseTicks[4];")                             # pre_movement, after_movement and the hook slots physics_walking, prepare_root_motion
         self.has(h, "virtual void DalRunHook(FName DalHook, float DeltaSeconds) override;")      # the movement component runs the hook slot (DalHost::FEventRouter::RunHook)
         self.has(c, "DalPhaseTicks[2].bCanEverTick = false;")                                 # no tick function for it
         self.has(c, "void UAlsCharacter::DalHandleEventNow(const DalHost::FEvent& DalEvent)")   # sync_events

@@ -252,15 +252,19 @@ class MantleDriverTests(unittest.TestCase):
                 rig.step(velocity=(375.0, 0.0, 0.0), acceleration=(2000.0, 0.0, 0.0))
             rig.call("StartMantling")
             worst, first = 0.0, None
+
+            def between(r):                                                                       # the movement component prepares its root motion sources: the mantling's is a hook slot
+                r.run_hook("prepare_root_motion")
+                return {}, []
             for f in range(self.FIRST, self.LAST + 1):
                 location = tuple(self.v("pre_cmc", "Actor.Location." + c, f) for c in "XYZ")
                 quat = tuple(self.v("pre_cmc", "Actor.Quat." + c, f) for c in "XYZW")
                 rig.step(actor_location=location, actor_rotation=quat, velocity=(375.0, 0.0, 0.0), acceleration=(2000.0, 0.0, 0.0), dt=float(self.v("final", "Time.Delta", f)),
-                         movement_mode=6, auto_hooks=False)
-                commands = [c for c in rig.cmds["AlsCharacter"] if c[0] in ("root_motion_override", "root_motion_clear")]
+                         movement_mode=6, auto_hooks=False, between=between)
+                commands = [c for c in rig.cmds["AlsCharacter"] if c[0] == "root_motion_override"]
                 truth = [self.v("post_cmc", "Cmc.Velocity." + c, f) for c in "XYZ"]
-                if commands and commands[-1][0] == "root_motion_override":
-                    mine = commands[-1][1][0]
+                if commands:
+                    mine = commands[-1][1][0]                                                      # (the clear that follows the last step of the source comes after the movement)
                 else:
                     mine = (0.0, 0.0, 0.0)                                                         # no override: the movement component zeroes the velocity of a custom mode
                 err = max(abs(a - b) for a, b in zip(mine, truth))

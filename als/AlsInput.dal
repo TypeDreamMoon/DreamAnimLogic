@@ -10,7 +10,7 @@
 // Runs before the movement component (the PlayerController's tick in Unreal): AddMovementInput has to reach the movement component of the
 // same frame.  `flush_peers` hands the commands that the calls made here (Jump, SetDesiredStance, StartMantling ...) made the character queue to
 // the host with this block's own, before the movement component runs: the character has no block of its own before the movement for that
-// (its pre_movement block is the mantling driver).  `before Character` puts this block in front of that one.  The CMC, the character logic
+// (its pre_movement block is empty, it is there for the timers).  `before Character` puts this block in front of that one.  The CMC, the character logic
 // and the animation follow (AlsCharacter.dal, in the after_movement slot).
 //
 // Not here: the camera (SwitchShoulder only flips the flag the camera logic will read), the input mapping context (NotifyControllerChanged:
@@ -24,7 +24,7 @@
 use "als_lib.dal";
 
 peer Character: AlsCharacter;
-logic AlsInput : actor before Character flush_peers in pre_movement;     // the commands of our calls on the Character run at the end of this block, before the movement component
+logic AlsInput : actor before Character flush_peers in pre_movement;          // the commands of our calls on the Character run at the end of this block, before the movement component
 
 // AlsCharacterExample.h:62-72
 param LookUpMouseSensitivity: float = 1.0;

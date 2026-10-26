@@ -12,14 +12,20 @@
 // gait settings to the movement component (CMC:894-1020), and the actions of AlsCharacter_Actions.cpp:
 //   * rolling (CA:22-139): start conditions and direction, the montage, the rotation towards the target yaw while rolling;
 //   * mantling (CA:141-713, RMS:37-128): the forward / downward traces and overlaps, the selection of the mantling settings, the start time,
-//     the root motion source as a driver in the pre_movement block (root_motion_override + the custom movement mode), stopping;
+//     the root motion source as a driver in the prepare_root_motion block (root_motion_override + the custom movement mode), stopping;
+//     the target in the space of a moving primitive and the base the character stands on while it climbs;
 //   * ragdolling (CA:717-1170): start (on request, on a hard landing), the refresh (pelvis, capsule snap, motor strength, speed limit), stop
 //     and the get up montage chosen by the facing of the ragdoll, the FinalRagdollPose handshake with the animation instance;
 //   * the three notify states the actions end on: SetLocomotionAction, SetRootMotionScale and EarlyBlendOut (Notifies/*).
 //
-// Dropped for good (single player, no moving bases): everything that replicates (Server* / Client* / Multicast* / OnRep_*, view network
-// smoothing, the network branches of RefreshLocomotion), RefreshMovementBase and the movement base parts of the Refresh* functions (the
-// mantling target primitive is always in world space), RefreshMeshProperties (mesh tick options), the DisplayDebug family, the
+// The movement base (a moving platform, an elevator, a vehicle the character stands on) is in: RefreshMovementBase and every
+// `MovementBase.bHasRelativeLocation / bHasRelativeRotation` branch of the Refresh* functions, the mantling target in the space of its
+// primitive and SetBase on it.  Whether the character's facing and view follow a turning base is the movement component's setting
+// bIgnoreBaseRotation (true in ALS: they do not); with it off the branches that keep the view in the space of the base are the ones that run.
+//
+// Dropped for good (single player): everything that replicates (Server* / Client* / Multicast* / OnRep_*, view network
+// smoothing, the network branches of RefreshLocomotion), RefreshMeshProperties (mesh tick options, with its absolute mesh rotation on a
+// rotating base), the DisplayDebug family, the
 // BlueprintImplementableEvents (OnGaitChanged, OnMantlingStarted, OnRagdollingEnded ...: language gap G19) and the extension points
 // RefreshCustom*Rotation.
 //
@@ -84,6 +90,12 @@ input RagdollVelocity: vec3 <- host.ragdoll_velocity;                           
 input RagdollFacingUp: bool <- host.ragdoll_facing_up;                           // FMath::UnwindDegrees(PelvisRotation.Roll) <= 0.0f of the pelvis bone  CA:1099
 input RotationYawSpeedCurve: float <- host.anim_curve("RotationYawSpeed");       // GetCurveValue(RotationYawSpeedCurveName) C:1814 (AlsConstants.h:81)
 input RotationYawOffsetCurve: float <- host.anim_curve("RotationYawOffset");     // GetCurveValue(RotationYawOffsetCurveName) C:1650
+// the based movement of the character (BasedMovement, AAlsCharacter::RefreshMovementBase C:403-428)
+input BaseComponent: primitive <- host.movement_base;                            // BasedMovement.MovementBaseInterfaceData
+input BaseLocation: vec3d <- host.movement_base_location;                        // MovementBaseUtility::GetMovementBaseTransform
+input BaseRotation: quatd <- host.movement_base_rotation;
+input BaseHasRelativeLocation: bool <- host.movement_base_has_relative_location; // BasedMovement.HasRelativeLocation()
+input BaseRelativeRotation: bool <- host.movement_base_relative_rotation;        // BasedMovement.bRelativeRotation
 
 // ---- state: AlsCharacter.h:36-110 and the members of the movement component the logic reads (AlsCharacterMovementComponent.h:93-105) ------
 state bDesiredAiming: bool;                                                      // :38
@@ -102,6 +114,7 @@ state ViewState: AlsViewState;                                                  
 state InputDirection: vec3;                                                      // :87
 state DesiredVelocityYawAngle: float;                                            // :91
 state bHasDesiredVelocity: bool;                                                 // :94
+state MovementBase: AlsMovementBaseState;                                        // AlsCharacter.h: the base the character stands on, as of the last RefreshMovementBase
 state LocomotionState: AlsLocomotionState;                                       // :97
 state MantlingState: AlsMantlingState;                                           // :100
 state RagdollTargetLocation: vec3d;                                               // :103 (replicated in ALS; here the pelvis position the capsule follows)
@@ -204,10 +217,17 @@ on timer BrakingFrictionFactorResetTimer {                                      
 // the tick: AAlsCharacter::Tick, C:266-300
 // ================================================================================================================================
 
-// Before the movement component: the root motion source of the mantling is prepared where the movement component would call it (RMS:37).
-// (AlsInput runs before this logic in the slot and declares `flush_peers`: the commands of its calls on this logic - Jump, SetDesiredStance,
-// StartMantling ... - are handed to the host at the end of its own block, before the movement component runs; this block is not needed for that.)
-update(dt) in pre_movement {
+// Nothing runs before the movement but the timers of this logic, which tick in its earliest slot: the timer manager of the engine fires
+// them at the start of the frame, before the movement (BrakingFrictionFactorResetTimer).  The mantling used to be driven from here.
+update(dt) in pre_movement {                                                     // C:538-544 (the timer lambda)
+}
+
+// The root motion source of the mantling is prepared where the movement component prepares its root motion sources (RMS:37): inside
+// PerformMovement, after the character has followed its movement base, so the actor and the target primitive are where this step puts them.
+// A hook slot: the movement component runs it itself, once per step, while the root motion override (the stand-in for the source) is
+// there.  (AlsInput runs before this logic in its slot and declares `flush_peers`: the commands of its calls on this logic - Jump,
+// SetDesiredStance, StartMantling ... - are handed to the host at the end of its own block, before the movement component runs.)
+update(dt) in prepare_root_motion {
     prepare_mantling_root_motion(dt);                                            // FAlsRootMotionSource_Mantling::PrepareRootMotion, inside CharacterMovement->PerformMovement
 }
 
@@ -218,7 +238,12 @@ update(dt) in after_movement {                                                  
     bActorRotationMirrored = false;
     MovementModeNow = CharacterMovementMode;                                     // what the movement component has now (the hooks of the tick have been handled)
 
-    // RefreshMovementBase();                                                    // :277 (no moving bases)
+    if (MantlingSource.bClearPending) {                                          // the source finished in this step's PrepareRootMotion: the movement component removes it before the next one
+        host.root_motion_clear();
+        MantlingSource.bClearPending = false;
+    }
+
+    refresh_movement_base();                                                     // :277
     // RefreshMeshProperties();                                                  // :279 (mesh tick options)
     refresh_input();                                                             // :281
     refresh_locomotion_early();                                                  // :283
@@ -529,13 +554,36 @@ method refresh_input() {                                                        
     }
 }
 
-method refresh_view(dt: float) {                                                 // C:1222-1267 (no moving base, no network smoothing)
-    ViewState.PreviousYawAngle = ViewState.Rotation.yaw;                         // :1233
-    let view_rotation = normalize_rotator(ControlRotation);                      // :1252 Super::GetViewRotation().GetNormalized()
-    if (!rotators_equal(ReplicatedViewRotation, view_rotation)) {                // SetReplicatedViewRotation, C:1130-1143
-        ReplicatedViewRotation = view_rotation;                                  // :1134
+method refresh_movement_base() {                                                 // C:403-428
+    MovementBase = refresh_movement_base_state(MovementBase, BaseComponent, BaseLocation, BaseRotation,
+                                               BaseHasRelativeLocation, BaseRelativeRotation);
+}
+
+method refresh_view(dt: float) {                                                 // C:1222-1267 (no network smoothing)
+    if (MovementBase.bHasRelativeRotation) {
+        // Offset the rotations to keep them in the movement base space.   :1224-1231
+        ViewState.Rotation = rotator(normalize_rotator(rotatord(ViewState.Rotation) + MovementBase.DeltaRotation));
     }
-    ViewState.Rotation = ReplicatedViewRotation;                                 // :1258 (FinalRotation without smoothing, :1284-1289)
+
+    ViewState.PreviousYawAngle = ViewState.Rotation.yaw;                         // :1233
+
+    if (MovementBase.bHasRelativeRotation) {
+        // The view rotation of the controller is in world space: the replicated one is kept in the space of the base.   :1235-1243 (IsLocallyControlled)
+        let relative_view = to_rotator(quat_inverse(MovementBase.Rotation) * to_quat(rotatord(ControlRotation)));
+        if (!rotators_equal(ReplicatedViewRotation, rotator(relative_view))) {   // SetReplicatedViewRotation, C:1130-1143
+            ReplicatedViewRotation = rotator(relative_view);                     // :1134
+        }
+    } else {
+        let view_rotation = normalize_rotator(ControlRotation);                  // :1252 Super::GetViewRotation().GetNormalized()
+        if (!rotators_equal(ReplicatedViewRotation, view_rotation)) {            // SetReplicatedViewRotation, C:1130-1143
+            ReplicatedViewRotation = view_rotation;                              // :1134
+        }
+    }
+
+    // RefreshViewNetworkSmoothing (:1255): off, so the final rotation is the replicated one, in world space again.   :1284-1289
+    ViewState.Rotation = MovementBase.bHasRelativeRotation
+        ? rotator(to_rotator(MovementBase.Rotation * to_quat(rotatord(ReplicatedViewRotation))))
+        : ReplicatedViewRotation;
 
     // Set the yaw speed by comparing the current and previous view yaw angle, divided by delta seconds.   :1260-1266
     if (dt > SMALL_NUMBER) {
@@ -543,7 +591,23 @@ method refresh_view(dt: float) {                                                
     }
 }
 
-method refresh_locomotion_early() {                                              // C:1335-1370 (the movement base branches :1337-1367 are dropped)
+method refresh_locomotion_early() {                                              // C:1335-1370
+    if (!LocomotionState.bMoving && RotationMode == AlsRotationMode.VelocityDirection
+        && Settings.bInheritMovementBaseRotationInVelocityDirectionRotationMode) {       // :1337-1339
+        DesiredVelocityYawAngle = unwind_degrees(float(DesiredVelocityYawAngle + MovementBase.DeltaRotation.yaw));       // :1341-1342 UE_REAL_TO_FLOAT
+        LocomotionState.VelocityYawAngle = unwind_degrees(float(LocomotionState.VelocityYawAngle + MovementBase.DeltaRotation.yaw));    // :1344-1345
+    }
+
+    if (MovementBase.bHasRelativeRotation) {                                     // :1348
+        // Offset the rotations (actor rotation too) to keep them in the movement base space.
+        LocomotionState.TargetYawAngle = unwind_degrees(float(LocomotionState.TargetYawAngle + MovementBase.DeltaRotation.yaw));                 // :1352-1353
+        LocomotionState.TargetYawAngleViewSpace = unwind_degrees(float(LocomotionState.TargetYawAngleViewSpace + MovementBase.DeltaRotation.yaw));    // :1355-1356
+        LocomotionState.SmoothTargetYawAngle = unwind_degrees(float(LocomotionState.SmoothTargetYawAngle + MovementBase.DeltaRotation.yaw));        // :1358-1359
+
+        let new_rotation = rotator(normalize_rotator(rotatord(ActorRotationNow) + MovementBase.DeltaRotation));       // :1361-1365 (NewRotation.Pitch / Yaw += ..., Normalize())
+        set_actor_rotation_now(new_rotation, false);                             // :1367 SetActorRotation(NewRotation)
+    }
+
     LocomotionState.bAimingLimitAppliedThisFrame = false;                        // :1369
 }
 
@@ -635,8 +699,13 @@ method refresh_grounded_rotation(dt: float) {                                   
         if (RotationMode == AlsRotationMode.VelocityDirection) {                 // :1544
             var target_yaw_angle = 0.0;
             if (LocomotionState.bRotationTowardsLastInputDirectionBlocked) {     // :1548
-                // Rotate to the last target yaw angle (the movement base branch :1554-1558 is dropped).
+                // Rotate to the last target yaw angle, relative to the movement base or not.   :1551
                 target_yaw_angle = LocomotionState.TargetYawAngle;               // :1552
+
+                if (MovementBase.bHasRelativeLocation && !MovementBase.bHasRelativeRotation
+                    && Settings.bInheritMovementBaseRotationInVelocityDirectionRotationMode) {       // :1554-1555
+                    target_yaw_angle = float(target_yaw_angle + MovementBase.DeltaRotation.yaw);     // :1557
+                }
             } else {
                 // Rotate to the last velocity direction.
                 target_yaw_angle = Settings.bRotateTowardsDesiredVelocityInVelocityDirectionRotationMode
@@ -1116,9 +1185,17 @@ method start_mantling_with(trace: AlsMantlingTraceSettings) -> bool {           
     parameters.MantlingType = LocomotionMode != AlsLocomotionMode.Grounded ? AlsMantlingType.InAir
         : parameters.MantlingHeight > Settings.Mantling.MantlingHighHeightThreshold ? AlsMantlingType.High : AlsMantlingType.Low;      // :411-415
 
-    // The target primitive is always in world space here (no moving bases, :417-433).
-    parameters.TargetLocation = target_capsule_location;                         // :431
-    parameters.TargetRotation = to_rotator(to_orientation_quat(target_direction));     // :402, :432 (FQuat -> FRotator, double)
+    // If the target primitive cannot move, use world space to improve performance by skipping coordinate space transformations.   :417
+    let target_rotation = to_orientation_quat(target_direction);                 // :402
+    if (host.primitive_uses_relative_location(target_primitive)) {               // :420 MovementBaseUtility::UseRelativeLocation(&MovementBaseData)
+        let relative_target = relative_transform(transformd(target_capsule_location, target_rotation),
+                                                 host.primitive_transform(target_primitive));            // :422-424 GetRelativeTransform(TargetPrimitive->GetComponentTransform())
+        parameters.TargetLocation = relative_target.location;                    // :426
+        parameters.TargetRotation = to_rotator(relative_target.rotation);        // :427 TargetTransform.Rotator()
+    } else {
+        parameters.TargetLocation = target_capsule_location;                     // :431
+        parameters.TargetRotation = to_rotator(target_rotation);                 // :432 (FQuat -> FRotator, double)
+    }
 
     start_mantling_implementation(parameters);                                   // :443 (the role branches and the RPCs :435-445 are dropped)
     return true;                                                                 // :447
@@ -1203,7 +1280,7 @@ method start_mantling_implementation(parameters: AlsMantlingParameters) {       
     host.set_movement_mode(MovementMode.Custom, 0);                              // :496
     apply_movement_mode(MovementMode.Custom);
     host.set_movement_mode_locked(true);                                         // :497
-    // GetCharacterMovement()->SetBase(&MovementBaseData)                        // :499-500 (no moving bases)
+    host.set_movement_base(parameters.TargetPrimitive);                          // :499-500 SetBase(&MovementBaseData): the character is carried along with the target
 
     // Create mantling root motion.   :502
     var source = AlsMantlingRootMotionSource();                                  // :504
@@ -1218,6 +1295,7 @@ method start_mantling_implementation(parameters: AlsMantlingParameters) {       
     source.Duration = duration / play_rate;                                      // :513
     source.MontageStartTime = start_time;                                        // :514
 
+    let use_target_primitive_space = host.primitive_uses_relative_location(parameters.TargetPrimitive);      // :515 MovementBaseUtility::UseRelativeLocation(&MovementBaseData)
     let mesh_rotation_offset = base_rotation_offset();                           // :517
     let mesh_transform = transformd(vec3d(0d, 0d, 0d), mesh_rotation_offset);    // FTransform MeshTransform{GetBaseRotationOffset()}
     source.MeshRotationOffset = mesh_rotation_offset;
@@ -1226,16 +1304,27 @@ method start_mantling_implementation(parameters: AlsMantlingParameters) {       
     let actor_transform = transformd(ActorLocation, quatd(to_quat(ActorRotationNow)));   // :521
     let start_root_transform = with_scale(transformd(host.montage_root_transform(ms.Montage, start_time)), vec3d(1d, 1d, 1d));      // :523-524
     let start_root_transform_inverse = relative_transform_reverse(start_root_transform, mesh_transform);        // :526
-    let start_transform = compose(start_root_transform_inverse, actor_transform);        // :527
-    // (bUseTargetPrimitiveSpace is false: no relative space, :529-533)
+    var start_transform = compose(start_root_transform_inverse, actor_transform);        // :527
+    if (use_target_primitive_space) {                                            // :529
+        // Convert the start transform to the target primitive space.
+        start_transform = relative_transform(start_transform, host.primitive_transform(parameters.TargetPrimitive));      // :532 SetToRelativeTransform
+    }
     source.StartRotation = to_rotator(start_transform.rotation);                 // :535
     source.StartLocation = start_transform.location;                             // :536
 
     // Extract the final root transform, invert it, convert it from component space to actor space, and apply it to the target transform.   :538
-    let target_transform = transformd(parameters.TargetLocation, to_quat(normalize_rotator(parameters.TargetRotation)));      // :540
+    var target_transform = transformd(parameters.TargetLocation, to_quat(normalize_rotator(parameters.TargetRotation)));      // :540
+    if (use_target_primitive_space) {                                            // :542
+        // Convert the relative target transform back to world space.
+        target_transform = with_scale(compose(target_transform, host.primitive_transform(parameters.TargetPrimitive)), vec3d(1d, 1d, 1d));      // :545-546
+    }
     let end_root_transform = with_scale(transformd(host.montage_last_root_transform(ms.Montage)), vec3d(1d, 1d, 1d));  // :549-550
     let end_root_transform_inverse = relative_transform_reverse(end_root_transform, mesh_transform);            // :552
-    let new_target_transform = compose(end_root_transform_inverse, target_transform);   // :553
+    var new_target_transform = compose(end_root_transform_inverse, target_transform);   // :553
+    if (use_target_primitive_space) {                                            // :555
+        // Convert the target transform to be relative to the target primitive.
+        new_target_transform = relative_transform(new_target_transform, host.primitive_transform(parameters.TargetPrimitive));      // :558
+    }
     source.TargetRotation = to_rotator(new_target_transform.rotation);           // :561
     source.TargetLocation = new_target_transform.location;                       // :562
 
@@ -1244,6 +1333,7 @@ method start_mantling_implementation(parameters: AlsMantlingParameters) {       
     MantlingSource = source;
     MantlingSourceCount += 1;
     MantlingState.RootMotionSourceId = MantlingSourceCount;                      // :565 ApplyRootMotionSource
+    host.root_motion_override(vec3d(0d, 0d, 0d), quatd(0d, 0d, 0d, 1d));         // the source is there from now on; its first step is prepared in the next one (prepare_root_motion)
 
     // Play the animation montage if valid.   :567
     host.montage_play(ms.Montage, 1.0);                                      // :569
@@ -1339,14 +1429,11 @@ method stop_mantling(bStopMontage: bool) {                                      
 }
 
 // FAlsRootMotionSource_Mantling::PrepareRootMotion.  The movement component calls it while it moves the character, with the time of its
-// tick, so this runs in the pre_movement block (the commands it issues are executed before the movement component runs) and reads the
-// actor as the movement component finds it: where the last tick left it.  The root motion override of the host stands in for the
-// FRootMotionSource (Override accumulate mode: the translation is a velocity); it holds until root_motion_clear().
+// step: this runs in the prepare_root_motion block, which the movement component runs itself at that point (after the character has
+// followed its movement base: the actor is where this step has put it, the target primitive where it is now).  The root motion override
+// of the host stands in for the FRootMotionSource (Override accumulate mode: the translation is a velocity); it holds until
+// root_motion_clear().
 method prepare_mantling_root_motion(dt: float) {                                 // RMS:37-128
-    if (MantlingSource.bClearPending) {                                          // the source finished in the last tick: the movement component removed it
-        host.root_motion_clear();
-        MantlingSource.bClearPending = false;
-    }
     if (!MantlingSource.bActive) { return; }
 
     MantlingSource.Time = min(MantlingSource.Time + dt, MantlingSource.Duration);     // :40 SetTime(GetTime() + SimulationDeltaTime): the source ends at its duration
@@ -1378,9 +1465,15 @@ method prepare_mantling_root_motion(dt: float) {                                
     let location_warp_amount = blend_in_amount * mantling_location_warp(MantlingSource.Kind, warp_amount);     // :68-72
     let rotation_warp_amount = blend_in_amount * mantling_rotation_warp(MantlingSource.Kind, warp_amount);     // :74-78
 
-    let start_transform = transformd(MantlingSource.StartLocation, to_quat(MantlingSource.StartRotation));     // :80
-    let target_transform = transformd(MantlingSource.TargetLocation, to_quat(MantlingSource.TargetRotation));  // :81
-    // (the start and target transforms are in world space: no moving bases, :83-93)
+    var start_transform = transformd(MantlingSource.StartLocation, to_quat(MantlingSource.StartRotation));     // :80
+    var target_transform = transformd(MantlingSource.TargetLocation, to_quat(MantlingSource.TargetRotation));  // :81
+
+    if (host.primitive_uses_relative_location(MantlingSource.TargetPrimitive)) {   // :84 MovementBaseUtility::UseRelativeLocation(&MovementBaseData)
+        // Convert the start and target transforms from target primitive space to world space.
+        let primitive_transform = host.primitive_transform(MantlingSource.TargetPrimitive);      // TargetPrimitive->GetComponentTransform()
+        start_transform = with_scale(compose(start_transform, primitive_transform), vec3d(1d, 1d, 1d));         // :88-89
+        target_transform = with_scale(compose(target_transform, primitive_transform), vec3d(1d, 1d, 1d));       // :91-92
+    }
 
     // Interpolate the start and target transforms to obtain the warped transform.   :95
     let warp_location = lerp(start_transform.location, target_transform.location, location_warp_amount);       // :97

@@ -15,8 +15,9 @@
 //   * FAlsTurnInPlaceState::QueuedSettings is a copy of the settings value (C++: a pointer to the UAlsTurnInPlaceSettings object) and
 //     QueuedSlotName is the enum AlsTurnInPlaceSlot (C++: an FName; None = nothing queued, which is what a null QueuedSettings says).
 //   * FAlsRagdollingAnimationState::FinalRagdollPose is the `snapshot` value type (0.4.0), filled by host.snapshot_pose.
-//   * the view network smoothing members of FAlsViewState and the movement base state of the character are not declared (no
-//     networking, no moving bases).
+//   * the view network smoothing members of FAlsViewState are not declared (no networking).  The movement base state is there
+//     (AlsMovementBaseState): a component stands for FMovementBaseInterfaceData, the bone of the base is not tracked (a base is a
+//     component), and refresh_movement_base_state is the one function both the character and the animation instance refresh it with.
 
 // ---- gameplay tags (AlsGameplayTags.h:5-65, AlsGameplayTags.cpp) ----------------------------------------------------------
 tags AlsViewMode          = "Als.ViewMode"          { FirstPerson, ThirdPerson }
@@ -259,13 +260,14 @@ struct AlsRagdollingAnimationState {                                            
     FinalRagdollPose: snapshot;
     FlailPlayRate: float = 1.0;
 }
-struct AlsMovementBaseState {                                                                           // AlsMovementBaseState.h:7: the .dab only reads bHasRelativeLocation; no moving bases
+struct AlsMovementBaseState {                                                                           // AlsMovementBaseState.h:7 (the .dab only reads bHasRelativeLocation)
+    Base: primitive = none;                                                                             // MovementBaseInterfaceData (+ BoneName, not tracked)
     bBaseChanged: bool;
     bHasRelativeLocation: bool;
     bHasRelativeRotation: bool;
-    Location: vec3;
-    Rotation: quat;
-    DeltaRotation: rotator;
+    Location: vec3d;                                                                                    // FVector, FQuat, FRotator: the engine's double types
+    Rotation: quatd = quatd(0d, 0d, 0d, 1d);
+    DeltaRotation: rotatord;
 }
 struct AlsControlRigInput {                                                                             // AlsControlRigInput.h:6
     bUseHandIkBones: bool;
@@ -639,6 +641,25 @@ struct AlsFootUpdateContext {                                                   
     IkAmount: float;
     LockAmount: float;
     FrameTime: float;
+}
+
+// AAlsCharacter::RefreshMovementBase (AlsCharacter.cpp:403-428) and UAlsAnimationInstance::RefreshMovementBaseOnGameThread (AlsAnimationInstance.cpp:259-286): the same
+// code in both classes.  `base` .. `relative_rotation` are what host.movement_base ... host.movement_base_relative_rotation read (BasedMovement and
+// MovementBaseUtility::GetMovementBaseTransform).  bBaseChanged is true when the base is another component than the last time: also when either is a static
+// one (the floor under the character); DeltaRotation is the base's rotation since the last refresh, only for a base the character follows.
+fn refresh_movement_base_state(previous: AlsMovementBaseState, base: primitive, location: vec3d, rotation: quatd,
+                               has_relative_location: bool, relative_rotation: bool) -> AlsMovementBaseState {
+    var next = previous;
+    next.bBaseChanged = base != previous.Base;                                                         // :405-414 (MovementBaseInterfaceData, BoneName)
+    next.Base = base;
+    next.bHasRelativeLocation = has_relative_location;                                                 // :417
+    next.bHasRelativeRotation = has_relative_location && relative_rotation;                            // :418
+    next.Location = location;                                                                          // :422-423
+    next.Rotation = rotation;
+    next.DeltaRotation = has_relative_location && !next.bBaseChanged
+        ? to_rotator(rotation * quat_inverse(previous.Rotation))                                        // :425-427 (MovementBase.Rotation * PreviousRotation.Inverse()).Rotator()
+        : rotatord(0d, 0d, 0d);
+    return next;
 }
 
 // FTransform::EqualsNoScale(FTransform::Identity) with the default tolerance, as AlsAnimationInstance.cpp:1263 asks it: FQuat::Equals is true for q and -q.

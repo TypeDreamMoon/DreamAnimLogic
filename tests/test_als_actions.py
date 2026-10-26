@@ -280,6 +280,9 @@ def tick(rig, sim, events=(), hooks=(), **host):
         for _n, _slot, cmds in r.blocks[done[0]:]:
             sim.apply(cmds)
         done[0] = len(r.blocks)
+        if sim.override is not None:                      # the root motion sources are prepared inside PerformMovement: the mantling's is a hook slot
+            sim.apply(r.run_hook("prepare_root_motion", DT))
+            done[0] = len(r.blocks)
         sim.move(DT)
         raised, sim.hooks = list(sim.hooks), []
         return sim.host(), raised
