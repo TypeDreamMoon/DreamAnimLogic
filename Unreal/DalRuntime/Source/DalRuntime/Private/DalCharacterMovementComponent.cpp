@@ -9,6 +9,7 @@
 #include "DalRootMotionSource_Override.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/Controller.h"
+#include "PhysicsEngine/BodyInstance.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(DalCharacterMovementComponent)
 
@@ -128,10 +129,75 @@ void UDalCharacterMovementComponent::EndPlay(const EEndPlayReason::Type EndPlayR
 	Super::EndPlay(EndPlayReason);
 }
 
+namespace
+{
+	/** The angular velocity of the movement base (the physics body of the component it stands on), in radians per second.  False without a base that
+	 *  moves (ALS: UAlsUtility::TryGetMovementBaseAngularVelocity). */
+	bool TryGetMovementBaseAngularVelocity(const ACharacter& Character, FVector& OutAngularVelocity)
+	{
+		OutAngularVelocity = FVector::ZeroVector;
+
+		const UPrimitiveComponent* Base = Cast<UPrimitiveComponent>(Character.GetMovementBaseObject());
+		if (Base == nullptr || !MovementBaseUtility::UseRelativeLocation(Character.GetMovementBaseInterfaceData()))
+		{
+			return false;
+		}
+
+		const FBodyInstance* Body = Base->GetBodyInstance(Character.GetBasedMovement().BoneName);
+		if (Body == nullptr)
+		{
+			return false;
+		}
+
+		OutAngularVelocity = Body->GetUnrealWorldAngularVelocityInRadians();
+		return true;
+	}
+}
+
 FVector UDalCharacterMovementComponent::ConsumeInputVector()
 {
-	const FVector InputVector = Super::ConsumeInputVector();      // consumed either way: a blocked input is dropped, not kept for later
-	return bInputBlocked ? FVector::ZeroVector : InputVector;
+	FVector InputVector = Super::ConsumeInputVector();            // consumed either way: a blocked input is dropped, not kept for later
+	if (bInputBlocked)
+	{
+		return FVector::ZeroVector;
+	}
+
+	FVector AngularVelocity;
+	if (!bIgnoreBaseRotation && CharacterOwner != nullptr && TryGetMovementBaseAngularVelocity(*CharacterOwner, AngularVelocity))
+	{
+		// ALS-CMC.cpp:213-217: offset the input to keep it in the movement base space (only a character that follows the rotation of its base).
+		InputVector = FQuat::MakeFromRotationVector(AngularVelocity * GetWorld()->GetDeltaSeconds()).RotateVector(InputVector);
+	}
+
+	return InputVector;
+}
+
+void UDalCharacterMovementComponent::UpdateBasedRotation(FRotator& FinalRotation, const FRotator& ReducedRotation)
+{
+	// ALS-CMC.cpp:244-270: the engine's version has no effect when the rotation changes of the base are ignored in FaceRotation (the generated logic
+	// rotates the actor itself), so the control rotation is what follows the base (UpdateBasedMovement only calls this when bIgnoreBaseRotation is off).
+	if (CharacterOwner == nullptr || CharacterOwner->GetController() == nullptr)
+	{
+		return;
+	}
+
+	const FBasedMovementInfo& BasedMovement = CharacterOwner->GetBasedMovement();
+
+	FVector MovementBaseLocation;
+	FQuat MovementBaseRotation;
+	MovementBaseUtility::GetMovementBaseTransform(&BasedMovement.MovementBaseInterfaceData, BasedMovement.BoneName, MovementBaseLocation, MovementBaseRotation);
+
+	if (!OldBaseQuat.Equals(MovementBaseRotation, UE_SMALL_NUMBER))
+	{
+		const FRotator DeltaRotation = (MovementBaseRotation * OldBaseQuat.Inverse()).Rotator();
+		FRotator NewControlRotation = CharacterOwner->GetController()->GetControlRotation();
+
+		NewControlRotation.Pitch += DeltaRotation.Pitch;
+		NewControlRotation.Yaw += DeltaRotation.Yaw;
+		NewControlRotation.Normalize();
+
+		CharacterOwner->GetController()->SetControlRotation(NewControlRotation);
+	}
 }
 
 void UDalCharacterMovementComponent::SetMovementMode(const EMovementMode NewMovementMode, const uint8 NewCustomMode)
@@ -221,6 +287,13 @@ void UDalCharacterMovementComponent::PhysicsRotation(const float DeltaTime)
 
 void UDalCharacterMovementComponent::CalcVelocity(const float DeltaTime, const float Friction, const bool bFluid, const float BrakingDeceleration)
 {
+	FVector AngularVelocity;
+	if (!bIgnoreBaseRotation && CharacterOwner != nullptr && TryGetMovementBaseAngularVelocity(*CharacterOwner, AngularVelocity))
+	{
+		// ALS-CMC.cpp:283-287: offset the velocity to keep it in the movement base space (only a character that follows the rotation of its base).
+		Velocity = FQuat::MakeFromRotationVector(AngularVelocity * DeltaTime).RotateVector(Velocity);
+	}
+
 	Super::CalcVelocity(DeltaTime, Friction, bFluid, BrakingDeceleration);
 
 	if (bInPhysWalking)

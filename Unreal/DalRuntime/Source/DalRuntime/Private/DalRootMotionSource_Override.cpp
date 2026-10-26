@@ -1,5 +1,6 @@
 #include "DalRootMotionSource_Override.h"
 
+#include "DalHost.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 
@@ -46,6 +47,12 @@ void FDalRootMotionSource_Override::PrepareRootMotion(const float SimulationDelt
 		RootMotionParams.Clear();
 		return;
 	}
+
+	// The logic that drives the override (ALS's mantling: FAlsRootMotionSource_Mantling::PrepareRootMotion) works out the velocity of this step now,
+	// where the engine prepares its root motion sources: inside PerformMovement, after the character has followed its movement base.  Its block
+	// (update in prepare_root_motion) hands over a root_motion_override that changes Velocity / RotationDelta of this source.
+	static const FName PrepareRootMotionHook(TEXT("prepare_root_motion"));
+	DalHost::FEventRouter::RunHook(&Character, PrepareRootMotionHook, DeltaTime);
 
 	// The translation of an Override source's root motion is a velocity (cm/s); the rotation is the delta of this update.
 	RootMotionParams.Set(FTransform{RotationDelta, Velocity});
