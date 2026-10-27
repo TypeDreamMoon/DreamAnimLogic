@@ -179,6 +179,43 @@ def build_routes():
 
 ROUTES = build_routes()
 
+# ---- mantling every kind of ledge: boxes in a row along +X (the platform machinery of base_takes.py spawns them in the editor world, never saved) ----------------
+# AlsMantlingSettingsKind: Low (a ledge under the high threshold), High, LowBox (Low with the Box overlay), HighInAir (the auto mantle while falling).  The route runs
+# at each box in turn (a step whose name ends in `_mantle` tries StartMantling every frame from 0.2 s into it, like the `mantle` take), over the top and on to the next.
+MANTLE_BOXES = [("A", 180.0, 70.0), ("B", 800.0, 115.0), ("C", 1400.0, 160.0), ("D", 2000.0, 210.0), ("E", 2600.0, 80.0), ("F", 3200.0, 105.0), ("G", 3800.0, 280.0)]
+MANTLE_VARIANTS_ROUTE = """
+MANTLE_VARIANTS = [
+    step("idle", 1.5),
+    step("A_low70_mantle", 3.0, move=(1, 0), gait="Running", mantle_try=True),
+    step("A_over", 2.0),
+    step("B_low115_mantle", 3.0, mantle_try=True),
+    step("B_over", 2.0),
+    step("C_high160_mantle", 3.5, mantle_try=True),
+    step("C_over", 2.0),
+    step("D_high210_mantle", 3.5, mantle_try=True),
+    step("D_over", 2.0),
+    step("E_box80_mantle", 3.0, overlay="Box", mantle_try=True),
+    step("E_over", 2.0, overlay="Default"),
+    step("F_inair105", 5.0, at=[(0.2, {"jump": True}), (1.0, {"jump": True}), (1.8, {"jump": True}), (2.6, {"jump": True})]),
+    step("F_over", 2.0),
+    step("G_too_high_mantle", 3.0, mantle_try=True),
+    step("end", 1.5, move=(0, 0)),
+]
+
+"""
+
+
+def _register_mantle_variants():
+    import base_takes as B
+    platforms = [B.box("R1B_Ledge" + n, (front + 150.0, 0.0, h / 2.0), (150.0, 300.0, h / 2.0), mover=False) for n, front, h in MANTLE_BOXES]
+    B.TAKES["mantle_variants"] = {"desc": "mantling ledges of 70 / 115 (Low), 160 / 210 (High), 80 with the Box overlay (LowBox), in the air, and one too high", "platforms": platforms}
+    B.ROUTES["mantle_variants"] = "MANTLE_VARIANTS"
+    if "MANTLE_VARIANTS = [" not in B.STEPS:
+        B.STEPS += MANTLE_VARIANTS_ROUTE
+
+
+_register_mantle_variants()
+
 # take name -> (route, description, run's fixed fps)
 TAKES = {
     "overlays_a": ("OVERLAYS_A", "overlay modes Masculine / Feminine / Injured / HandsTied / PistolOneHanded / PistolTwoHanded: a tour of the ground states each", 60),

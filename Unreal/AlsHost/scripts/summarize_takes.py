@@ -12,7 +12,7 @@ TAKES = ["lane", "speed_jumps", "stance_changes", "rotation_modes", "view_yaw_sw
          "base_probe", "base_probe_interp", "base_translate", "base_translate_interp", "base_disc", "base_elevator", "base_jump_off", "base_jump_off_interp",
          "base_roll_crouch", "base_mantle", "base_mantle_fast_set", "base_mantle_fast_interp",
          # the takes of als_takes.py (truth in G:/DCC/AlsTruth/extra)
-         "overlays_a", "overlays_b", "aim_overlays", "aiming_rotate", "aiming_moves", "montage_slots", "slowmo", "fps30_mix", "fps120_mix"]
+         "overlays_a", "overlays_b", "aim_overlays", "aiming_rotate", "aiming_moves", "montage_slots", "slowmo", "fps30_mix", "fps120_mix", "mantle_variants"]
 prefix = sys.argv[1]
 rows = []
 for t in TAKES:
