@@ -7,13 +7,15 @@ param(
     [switch]$WithC3,
     [switch]$Windowless,                                         # record without a renderer (-nullrhi): faster, but the mesh does not count as rendered and the notifies of montages differ
     [switch]$NoPhase,                                            # do not start each take at the animation phase of the truth take (see below)
-    [int]$PhaseOffset = 0                                        # g_record.py R1_PHASE_OFFSET
+    [int]$PhaseOffset = 0,                                       # g_record.py R1_PHASE_OFFSET
+    [string]$Truth = 'G:\DCC\AlsTruth',                          # the folder of the truth takes (G:\DCC\AlsTruth\extra for the takes of als_takes.py, G:\DCC\AlsTruth\base for base_takes.py)
+    [int]$Fps = 60                                               # the fixed frame rate of the run (the takes fps30_mix / fps120_mix: 30 / 120)
 )
 # The whole PIE cycle for the generated ALS (about 20 minutes; the takes render offscreen at 1024x576 like the original ones, -Windowless: no renderer at all): generate + swap into the host + build, the 14 DalRuntime checks, the truth
 # takes recorded and compared with G:\DCC\AlsTruth, a table with one row per take.  No window is ever shown (the takes render offscreen).  -WithC3 also runs the c3 scenarios of the Blender side.
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
-$truth = 'G:\DCC\AlsTruth'
+$truth = $Truth
 New-Item -ItemType Directory -Force $Out | Out-Null
 Set-Location $repo
 if (-not $NoRefresh) { & (Join-Path $PSScriptRoot 'refresh_host.ps1') -Rev $Rev }
@@ -27,7 +29,7 @@ if (-not $NoChecks) {
 # phase of the truth takes; the recorder waits for it before it starts.
 $phase = Join-Path $truth 'phase.json'
 if ($NoPhase -or -not (Test-Path $phase)) { $phase = '' }
-& (Join-Path $PSScriptRoot 'record_takes.ps1') -Takes $Takes -Out (Join-Path $Out 'takes') -Res (Join-Path $Out 'res') -Tag cycle -Rendered:(-not $Windowless) -Phase $phase -PhaseOffset $PhaseOffset
+& (Join-Path $PSScriptRoot 'record_takes.ps1') -Takes $Takes -Out (Join-Path $Out 'takes') -Res (Join-Path $Out 'res') -Tag cycle -Rendered:(-not $Windowless) -Phase $phase -PhaseOffset $PhaseOffset -Fps $Fps
 foreach ($t in $Takes.Split(',')) {
     if ($t -eq 'ragdoll') {                                      # a ragdoll cannot be compared frame by frame: the state machine, the timings, the get up
         python -I (Join-Path $PSScriptRoot 'compare_ragdoll.py') (Join-Path $Out 'takes\als_ragdoll.dvrec') (Join-Path $truth 'als_ragdoll.dvrec') `

@@ -200,6 +200,44 @@ def rig_input_errors(gen: Take, truth: Take, n: int, tol=1e-3):
     return out
 
 
+def montage_rows(rec: Recording, f: int):
+    """The live montage instances of frame f as sorted (position, weight, desired weight, play rate, flags): the names of dynamic montages count up through the
+    session (AnimMontage_<n>) and differ between two runs, the instance ids too."""
+    ms = rec.arrays.get("montage_state")
+    if ms is None:
+        return []
+    rows = []
+    for r in ms[f]:
+        if r[1] == r[1] and r[1] >= 0:
+            rows.append((round(float(r[2]), 3), round(float(r[3]), 3), round(float(r[4]), 2), round(float(r[5]), 3), int(r[9])))
+    return sorted(rows)
+
+
+def montage_errors(gen: Take, truth: Take, n: int):
+    """Frames in which the live montages differ (how many are live, their positions / weights / rates / flags), the number of live montages at most, and the
+    montage_play events (frame, slot, sequence) of the two takes."""
+    bad, first, most = 0, -1, 0
+    for f in range(n):
+        a, b = montage_rows(truth.rec, f), montage_rows(gen.rec, f)
+        most = max(most, len(a))
+        if len(a) != len(b) or any(max(abs(x[0] - y[0]), abs(x[1] - y[1])) > 0.003 or x[2:] != y[2:] for x, y in zip(a, b)):
+            bad += 1
+            if first < 0:
+                first = f
+    def plays(t):
+        return [(int(e["f"]), e.get("slot"), e.get("sequence") or e.get("montage")) for e in t.rec.events if e.get("type") == "montage_play"]
+    pa, pb = plays(truth), plays(gen)
+    return {"frames_differ": bad, "first": first, "most_live": most, "plays_truth": len(pa), "plays_gen": len(pb),
+            "plays_frames_differ": sum(1 for x, y in zip(pa, pb) if x[0] != y[0] or x[1] != y[1]) + abs(len(pa) - len(pb))}
+
+
+def dt_errors(gen: Take, truth: Take, n: int):
+    """The length of each frame (the recorder's dt): the two runs of a take with time dilation must have the same frames."""
+    a, b = np.asarray(truth.rec.dt[:n], float), np.asarray(gen.rec.dt[:n], float)
+    m = min(len(a), len(b))
+    return {"max_diff": float(np.abs(a[:m] - b[:m]).max()) if m else 0.0, "min": float(a.min()), "max": float(a.max())}
+
+
 def segment_table(seg_info, n, columns: dict):
     rows = []
     for s in seg_info:
@@ -269,6 +307,8 @@ def compare(gen_path, truth_path, seg_path=None, verbose=True):
     rig = rig_input_errors(gen, truth, n)
     if rig:
         res["rig_input"] = rig
+    res["montages"] = montage_errors(gen, truth, n)
+    res["dt"] = dt_errors(gen, truth, n)
 
     # --- by route segment
     if seg_path:

@@ -18,6 +18,7 @@ result = {}
 for path in sorted(glob.glob(os.path.join(folder, "als_*.dvrec"))):
     take = os.path.basename(path)[len("als_"):-len(".dvrec")]
     rec = Recording.load(path)
-    result[take] = int(round(float(np.asarray(rec.truth.series("final", "Time.Seconds"), float)[0]) * 60.0))
+    t60 = float(np.asarray(rec.truth.series("final", "Time.Seconds"), float)[0]) * 60.0
+    result[take] = int(round(t60)) if abs(t60 - round(t60)) < 1e-6 else round(t60, 6)       # (an integer at 60 fps, a fraction of a frame at other rates)
 json.dump(result, open(out, "w", encoding="utf-8"), indent=1, sort_keys=True)
 print(out, result)

@@ -6,6 +6,7 @@ param(
     [string]$Project = 'I:\UnrealProject_Moon\DEV_58\DreamVEdAnimHost\DreamAnimTestHost.uproject',
     [string]$ExtraArgs = '',
     [switch]$Fixed60,
+    [int]$Fps = 60,                        # the fixed frame rate of -Fixed60 (-benchmark -fps=<n>)
     [switch]$Rendered                      # a renderer without a window (-RenderOffscreen, 1024x576 like the original truth takes): the original ALS only ticks a rendered mesh's pose
 )
 # Runs a Python script in the sandbox host's editor WITHOUT a window and at below-normal priority: -nullrhi (no renderer, no window), started hidden.
@@ -18,7 +19,7 @@ $a = @("`"$Project`"")
 if ($Map) { $a += $Map }
 $a += @("-ExecCmds=`"py $py`"", "-abslog=`"$Log`"", '-unattended', '-nopause', '-nosplash', '-NoSound', '-NoLiveCoding', '-notelemetry', '-NoVerifyGC')
 if ($Rendered) { $a += @('-RenderOffscreen', '-ResX=1024', '-ResY=576') } else { $a += '-nullrhi' }
-if ($Fixed60) { $a += @('-benchmark', '-fps=60') }
+if ($Fixed60) { $a += @('-benchmark', "-fps=$Fps") }
 if ($ExtraArgs) { $a += $ExtraArgs }
 Write-Host "launching (hidden, below normal): $exe $($a -join ' ')"
 $p = Start-Process -FilePath $exe -ArgumentList ($a -join ' ') -PassThru -WindowStyle Hidden -WorkingDirectory (Split-Path $Project)

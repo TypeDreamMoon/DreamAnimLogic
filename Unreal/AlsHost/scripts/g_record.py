@@ -26,6 +26,7 @@ TOOLS = "G:/DCC/AlsTruth/tools"
 sys.path.insert(0, TOOLS)
 sys.path.insert(0, os.path.dirname(os.path.abspath(globals().get("__file__", "I:/DCC/DreamAnimLogic/Unreal/AlsHost/scripts/g_record.py"))))
 import unreal
+import als_takes
 import base_takes
 from harness import Wait, log
 
@@ -35,6 +36,7 @@ RENDERED = os.environ.get("R1_RENDERED", "0") == "1"
 PHASE_FILE = os.environ.get("R1_PHASE", "")
 PHASE_OFFSET = int(os.environ.get("R1_PHASE_OFFSET", "0"))       # updates between the wait's check and the first recorded frame (a constant of the driver; see phase_ref.py)
 PHASE_LOOP = 160
+FPS = float(os.environ.get("R1_FPS", "60"))                      # the fixed frame rate of this editor run (-fps=<n>, run_editor.ps1 -Fps): the phase wait needs its step
 GAME_MODE = "/Script/DreamAnimTestHost.DalAlsHostGameMode"
 LOGIC_CLASS = "AlsCharacter"
 # what the driver calls on the character and AAlsCharacter had (the generated component has them as BlueprintCallable methods)
@@ -135,8 +137,10 @@ def phase_aligned(mesh, take):
     ref = json.load(open(PHASE_FILE, encoding="utf-8")).get(take)
     if ref is None:
         return True
-    frames = int(round(unreal.GameplayStatics.get_time_seconds(mesh.get_world()) * 60.0))
-    return (frames - int(ref) + PHASE_OFFSET) % PHASE_LOOP == 0
+    frames = unreal.GameplayStatics.get_time_seconds(mesh.get_world()) * 60.0      # (frames of 1/60 s; a float: other frame rates fall between them)
+    r = (frames - float(ref) + PHASE_OFFSET) % PHASE_LOOP
+    tol = 0.25 * 60.0 / FPS                                                      # a quarter of a step of this run
+    return r < tol or PHASE_LOOP - r < tol
 
 
 def load_driver():
@@ -147,6 +151,7 @@ def load_driver():
     src = src.rstrip()[: -len(tail)]
     src = add_ragdoll_take(src)
     src = base_takes.add_base_takes(src)
+    src = als_takes.add_als_takes(src)
     if PHASE_FILE:
         src = add_phase_alignment(src)
     ns = {"__name__": "r1_record_generated", "__file__": R1}
