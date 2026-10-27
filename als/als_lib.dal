@@ -57,7 +57,7 @@ struct AlsLocomotionState {                                                     
     bResetAimingLimit: bool = true;
 }
 struct AlsViewState {                                                                                   // AlsViewState.h:36 (without NetworkSmoothing)
-    Rotation: rotator;
+    Rotation: rotatord;                                                                                 // FRotator (double)
     YawSpeed: float;
     PreviousYawAngle: float;
 }
@@ -100,7 +100,7 @@ struct AlsLocomotionAnimationState {                                            
     CapsuleHalfHeight: float;
 }
 struct AlsViewAnimationState {                                                                          // AlsViewAnimationState.h:6
-    RotationWorldSpace: rotator;
+    RotationWorldSpace: rotatord;                                                                       // FRotator (double)
     YawAngle: float;
     YawSpeed: float;
     PitchAngle: float;

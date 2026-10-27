@@ -17,6 +17,7 @@ Movement-base compensation is dead without moving bases (``MovementBase.bHasRela
 from __future__ import annotations
 
 import math
+import struct
 from collections import Counter
 
 from oracles.als_lean_oracle import UE_KINDA_SMALL_NUMBER, UE_LN2, UE_SMALL_NUMBER, dot, inv_exp_approx, quat_unrotate_vector, quat_yaw_degrees, unwind_degrees
@@ -32,6 +33,9 @@ TAGS = {
 SLOT_NONE, SLOT_STANDING, SLOT_CROUCHING = 0, 1, 2                      # the FName slots of the turn in place state (the .dal's enum AlsTurnInPlaceSlot)
 MONTAGE_BLEND_INERTIALIZATION = 1                                       # EMontageBlendMode::Inertialization
 
+
+def f32(x):                                                             # UE_REAL_TO_FLOAT: a double narrowed to float (round to nearest even)
+    return struct.unpack('<f', struct.pack('<f', x))[0]
 
 
 def tag(kind, member):
@@ -483,8 +487,8 @@ class AlsAnimOracle:
         s = self.s
         V, loco = s["View"], s["Loco"]
         if not s["tags"]["LocomotionAction"]:
-            V["YawAngle"] = unwind_degrees(V["RotationWorldSpace"][1] - loco["RotationWorldSpace"][1])
-            V["PitchAngle"] = unwind_degrees(V["RotationWorldSpace"][0] - loco["RotationWorldSpace"][0])
+            V["YawAngle"] = unwind_degrees(f32(V["RotationWorldSpace"][1] - loco["RotationWorldSpace"][1]))
+            V["PitchAngle"] = unwind_degrees(f32(V["RotationWorldSpace"][0] - loco["RotationWorldSpace"][0]))
             V["PitchAmount"] = 0.5 - V["PitchAngle"] / 180.0
         view_amount = 1.0 - self.curve01("ViewBlock")
         aiming_amount = self.curve01("PoseAiming")
@@ -670,7 +674,7 @@ class AlsAnimOracle:
     def refresh_grounded_movement(self):                    # AI:921
         s, G = self.s, self.s["Grounded"]
         G["HipsDirectionLockAmount"] = clamp(self.curve("HipsDirectionLock"), -1.0, 1.0)
-        v = unwind_degrees(s["Loco"]["VelocityYawAngleWorldSpace"] - s["View"]["RotationWorldSpace"][1])
+        v = unwind_degrees(f32(s["Loco"]["VelocityYawAngleWorldSpace"] - s["View"]["RotationWorldSpace"][1]))
         if s["tags"]["RotationMode"] == tag("RotationMode", "VelocityDirection") or s["tags"]["Gait"] == tag("Gait", "Sprinting"):
             d = "Forward"
         else:

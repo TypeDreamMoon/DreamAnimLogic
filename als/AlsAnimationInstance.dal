@@ -322,8 +322,8 @@ method refresh_view_on_game_thread() {
 
 method refresh_view(dt: float) {
     if (!valid(LocomotionAction)) {                                                                  // AI:389
-        ViewState.YawAngle = unwind_degrees(ViewState.RotationWorldSpace.yaw - LocomotionState.RotationWorldSpace.yaw);
-        ViewState.PitchAngle = unwind_degrees(ViewState.RotationWorldSpace.pitch - LocomotionState.RotationWorldSpace.pitch);
+        ViewState.YawAngle = unwind_degrees(float(ViewState.RotationWorldSpace.yaw - LocomotionState.RotationWorldSpace.yaw));
+        ViewState.PitchAngle = unwind_degrees(float(ViewState.RotationWorldSpace.pitch - LocomotionState.RotationWorldSpace.pitch));
         ViewState.PitchAmount = 0.5 - ViewState.PitchAngle / 180.0;                                  // AI:397
     }
 
@@ -668,7 +668,7 @@ method refresh_grounded_lean(dt: float) {                                       
 entry RefreshGroundedMovement() linked {                                                           // AI:921  (.dab: Call(Self.RefreshGroundedMovement))
     GroundedState.HipsDirectionLockAmount = clamp(CurveHipsDirectionLock, -1.0, 1.0);                // AI:939
 
-    let velocity_yaw_angle_view_space = unwind_degrees(LocomotionState.VelocityYawAngleWorldSpace - ViewState.RotationWorldSpace.yaw);   // AI:941
+    let velocity_yaw_angle_view_space = unwind_degrees(float(LocomotionState.VelocityYawAngleWorldSpace - ViewState.RotationWorldSpace.yaw));   // AI:941
 
     refresh_movement_direction(velocity_yaw_angle_view_space);                                       // AI:945
     refresh_rotation_yaw_offsets(velocity_yaw_angle_view_space);                                     // AI:946

@@ -71,7 +71,7 @@ input Acceleration: vec3 <- host.acceleration;                                  
 input MaxAcceleration: float <- host.max_acceleration;                           // CMC->GetMaxAcceleration()                C:1119 (the ground value on the ground, CMC:292)
 input PrePenetrationVelocity: vec3 <- host.pre_penetration_velocity;             // TryConsumePrePenetrationAdjustmentVelocity, consumed by the read   C:1402
 input PrePenetrationVelocityValid: bool <- host.pre_penetration_velocity_valid;
-input ControlRotation: rotator <- host.control_rotation;                         // Super::GetViewRotation()                 C:101, C:1252
+input ControlRotation: rotatord <- host.control_rotation;                        // Super::GetViewRotation() (FRotator, double)   C:101, C:1252
 input ActorLocation: vec3d <- host.actor_location;                               // GetActorLocation() (FVector, double)     CA:174
 input ActorRotation: quat <- host.actor_rotation;                                // GetActorRotation()                       C:110
 input ActorQuat: quatd <- host.actor_rotation;                                   // GetActorQuat() (FQuat, double): the mantling reads it at double precision   CA:517, RMS:123
@@ -109,7 +109,7 @@ state RotationMode: AlsRotationMode = AlsRotationMode.ViewDirection;            
 state Stance: AlsStance = AlsStance.Standing;                                    // :66 (idem)
 state Gait: AlsGait = AlsGait.Walking;                                           // :69
 state LocomotionAction: AlsLocomotionAction;                                     // :72 (no tag: no action)
-state ReplicatedViewRotation: rotator;                                           // :81 (the raw view rotation, normalized)
+state ReplicatedViewRotation: rotatord;                                          // :81 (the raw view rotation, normalized; FRotator, double)
 state ViewState: AlsViewState;                                                   // :84
 state InputDirection: vec3;                                                      // :87
 state DesiredVelocityYawAngle: float;                                            // :91
@@ -173,7 +173,7 @@ const MAX_FLOOR_DIST: float = 2.4;                    // UCharacterMovementCompo
 // helpers
 // ================================================================================================================================
 
-fn rotators_equal(a: rotator, b: rotator) -> bool {                              // FRotator::Equals with the default tolerance KINDA_SMALL_NUMBER (used by C:1132)
+fn rotators_equal(a: rotatord, b: rotatord) -> bool {                              // FRotator::Equals with the default tolerance KINDA_SMALL_NUMBER (used by C:1132)
     let d = normalize_rotator(a - b);                                            // rotator arithmetic (0.4.0): the difference, each axis in (-180, 180]
     return abs(d.pitch) <= KINDA_SMALL_NUMBER && abs(d.yaw) <= KINDA_SMALL_NUMBER && abs(d.roll) <= KINDA_SMALL_NUMBER;
 }
@@ -196,7 +196,7 @@ on begin_play {                                                                 
     Gait = DesiredGait;                                                                 // :99
     ReplicatedViewRotation = normalize_rotator(ControlRotation);                        // :101 SetReplicatedViewRotation(Super::GetViewRotation().GetNormalized())
     ViewState.Rotation = ReplicatedViewRotation;                                        // :107
-    ViewState.PreviousYawAngle = ViewState.Rotation.yaw;                                // :108
+    ViewState.PreviousYawAngle = float(ViewState.Rotation.yaw);                         // :108 UE_REAL_TO_FLOAT
     ActorRotationNow = normalize_rotator(to_rotator(ActorRotation));
     set_target_yaw_angle(ActorRotationNow.yaw);                                         // :110-112
     LocomotionState.InputYawAngle = ActorRotationNow.yaw;                               // :114
@@ -517,7 +517,7 @@ view can_sprint() -> bool {                                                     
         && (DesiredRotationMode == AlsRotationMode.VelocityDirection || Settings.bRotateToVelocityWhenSprinting)) {
         return true;                                                             // :1012-1016
     }
-    return abs(unwind_degrees(LocomotionState.InputYawAngle - ViewState.Rotation.yaw)) < 50.0;   // :1018-1026 (YawAngleThreshold)
+    return abs(unwind_degrees(float(LocomotionState.InputYawAngle - ViewState.Rotation.yaw))) < 50.0;   // :1018-1026 (YawAngleThreshold)
 }
 
 pub method SetOverlayMode(NewOverlayMode: AlsOverlayMode) {                      // C:1029-1060
@@ -562,16 +562,16 @@ method refresh_movement_base() {                                                
 method refresh_view(dt: float) {                                                 // C:1222-1267 (no network smoothing)
     if (MovementBase.bHasRelativeRotation) {
         // Offset the rotations to keep them in the movement base space.   :1224-1231
-        ViewState.Rotation = rotator(normalize_rotator(rotatord(ViewState.Rotation) + MovementBase.DeltaRotation));
+        ViewState.Rotation = normalize_rotator(ViewState.Rotation + MovementBase.DeltaRotation);
     }
 
-    ViewState.PreviousYawAngle = ViewState.Rotation.yaw;                         // :1233
+    ViewState.PreviousYawAngle = float(ViewState.Rotation.yaw);                  // :1233 UE_REAL_TO_FLOAT
 
     if (MovementBase.bHasRelativeRotation) {
         // The view rotation of the controller is in world space: the replicated one is kept in the space of the base.   :1235-1243 (IsLocallyControlled)
-        let relative_view = to_rotator(quat_inverse(MovementBase.Rotation) * to_quat(rotatord(ControlRotation)));
-        if (!rotators_equal(ReplicatedViewRotation, rotator(relative_view))) {   // SetReplicatedViewRotation, C:1130-1143
-            ReplicatedViewRotation = rotator(relative_view);                     // :1134
+        let relative_view = to_rotator(quat_inverse(MovementBase.Rotation) * to_quat(ControlRotation));
+        if (!rotators_equal(ReplicatedViewRotation, relative_view)) {            // SetReplicatedViewRotation, C:1130-1143
+            ReplicatedViewRotation = relative_view;                              // :1134
         }
     } else {
         let view_rotation = normalize_rotator(ControlRotation);                  // :1252 Super::GetViewRotation().GetNormalized()
@@ -582,12 +582,12 @@ method refresh_view(dt: float) {                                                
 
     // RefreshViewNetworkSmoothing (:1255): off, so the final rotation is the replicated one, in world space again.   :1284-1289
     ViewState.Rotation = MovementBase.bHasRelativeRotation
-        ? rotator(to_rotator(MovementBase.Rotation * to_quat(rotatord(ReplicatedViewRotation))))
+        ? to_rotator(MovementBase.Rotation * to_quat(ReplicatedViewRotation))
         : ReplicatedViewRotation;
 
     // Set the yaw speed by comparing the current and previous view yaw angle, divided by delta seconds.   :1260-1266
     if (dt > SMALL_NUMBER) {
-        ViewState.YawSpeed = abs(ViewState.Rotation.yaw - ViewState.PreviousYawAngle) / dt;
+        ViewState.YawSpeed = abs(float(ViewState.Rotation.yaw - ViewState.PreviousYawAngle)) / dt;     // UE_REAL_TO_FLOAT(double - float)
     }
 }
 
@@ -724,7 +724,7 @@ method refresh_grounded_rotation(dt: float) {                                   
             }
 
             // Rotate to the last view direction.
-            let target_yaw_angle = LocomotionState.bHasInput ? ViewState.Rotation.yaw : LocomotionState.TargetYawAngle;   // :1588-1590
+            let target_yaw_angle = LocomotionState.bHasInput ? float(ViewState.Rotation.yaw) : LocomotionState.TargetYawAngle;   // :1588-1590
             set_rotation_extra_smooth(target_yaw_angle, dt, calculate_grounded_moving_rotation_interpolation_half_life(), 500.0);        // :1592-1596
             return;
         }
@@ -759,7 +759,7 @@ method refresh_grounded_rotation(dt: float) {                                   
         if (Gait == AlsGait.Sprinting) {                                         // :1643
             target_yaw_angle = LocomotionState.VelocityYawAngle;                 // :1645
         } else {
-            target_yaw_angle = ViewState.Rotation.yaw + RotationYawOffsetCurve;  // :1649-1650 (view yaw + the curve of the animation)
+            target_yaw_angle = float(ViewState.Rotation.yaw + RotationYawOffsetCurve);  // :1649-1650 (view yaw + the curve of the animation)
         }
 
         set_rotation_extra_smooth(target_yaw_angle, dt, calculate_grounded_moving_rotation_interpolation_half_life(), 500.0);          // :1653-1657
@@ -784,12 +784,12 @@ method refresh_grounded_aiming_rotation(dt: float) {                            
     NewActorRotation = ActorRotationNow;                                         // :1682
 
     if (!LocomotionState.bHasInput && !LocomotionState.bMoving) {                // Not moving.  :1684
-        set_target_yaw_angle(ViewState.Rotation.yaw);                            // :1688
+        set_target_yaw_angle(float(ViewState.Rotation.yaw));                     // :1688
 
         if (!constrain_aiming_rotation(dt, true)) { return; }                    // :1690
     } else {                                                                     // Moving.  :1695
         // RotationInterpolationHalfLife 0.1, TargetYawAngleRotationSpeed 1000     :1699-1700
-        set_target_yaw_angle_smooth(ViewState.Rotation.yaw, dt, 1000.0);         // :1702
+        set_target_yaw_angle_smooth(float(ViewState.Rotation.yaw), dt, 1000.0);  // :1702
 
         NewActorRotation.yaw = damper_exact_angle(unwind_degrees(NewActorRotation.yaw), LocomotionState.SmoothTargetYawAngle, dt, 0.1);   // :1704-1706
 
@@ -810,7 +810,7 @@ method constrain_aiming_rotation(dt: float, bApplySecondaryConstraint: bool) -> 
         LocomotionState.AimingYawAngleLimit = 180.0;                             // :1725-1728
     }
 
-    var actor_yaw_angle_view_space = unwind_degrees(ViewState.Rotation.yaw - NewActorRotation.yaw);   // :1730
+    var actor_yaw_angle_view_space = unwind_degrees(float(ViewState.Rotation.yaw - NewActorRotation.yaw));   // :1730
 
     let min_aiming_yaw_angle_limit = Settings.AimingYawAngleLimit;               // :1732
 
@@ -845,7 +845,7 @@ method constrain_aiming_rotation(dt: float, bApplySecondaryConstraint: bool) -> 
 
     let previous_actor_yaw_angle = NewActorRotation.yaw;                         // :1779
 
-    NewActorRotation.yaw = unwind_degrees(ViewState.Rotation.yaw - actor_yaw_angle_view_space);   // :1781
+    NewActorRotation.yaw = unwind_degrees(float(ViewState.Rotation.yaw - actor_yaw_angle_view_space));   // :1781
 
     // KINDA_SMALL_NUMBER: converting back to a world space rotation may introduce rounding error.   :1783-1784
     return !is_nearly_zero(unwind_degrees(NewActorRotation.yaw - previous_actor_yaw_angle), KINDA_SMALL_NUMBER);   // :1786
@@ -874,7 +874,7 @@ method refresh_in_air_rotation(dt: float) {                                     
     if (RotationMode == AlsRotationMode.VelocityDirection || RotationMode == AlsRotationMode.ViewDirection) {   // :1844
         // RotationInterpolationHalfLife 0.2 (:1846)
         if (Settings.InAirRotationMode == AlsInAirRotationMode.KeepViewSpaceRotation) {          // :1850
-            set_rotation_smooth(ViewState.Rotation.yaw - LocomotionState.TargetYawAngleViewSpace, dt, 0.2);   // :1851-1852
+            set_rotation_smooth(float(ViewState.Rotation.yaw - LocomotionState.TargetYawAngleViewSpace), dt, 0.2);   // :1851-1852
         } else if (Settings.InAirRotationMode == AlsInAirRotationMode.RotateToVelocity && LocomotionState.bMoving) {   // :1855-1856
             set_rotation_smooth(LocomotionState.VelocityYawAngle, dt, 0.2);      // :1858 (not moving: the default branch, like the C++ fall through)
         } else {
@@ -888,7 +888,7 @@ method refresh_in_air_rotation(dt: float) {                                     
 
 method refresh_in_air_aiming_rotation(dt: float) {                               // C:1878-1891
     // RotationInterpolationHalfLife 0.1 (:1880)
-    set_target_yaw_angle(ViewState.Rotation.yaw);                                // :1882
+    set_target_yaw_angle(float(ViewState.Rotation.yaw));                         // :1882
 
     var new_rotation = ActorRotationNow;                                         // :1884
     new_rotation.yaw = damper_exact_angle(unwind_degrees(new_rotation.yaw), LocomotionState.SmoothTargetYawAngle, dt, 0.1);   // :1885-1886
@@ -942,7 +942,7 @@ method set_target_yaw_angle_smooth(target_yaw_angle: float, dt: float, rotation_
 }
 
 method refresh_target_yaw_angle_view_space() {                                   // C:1952-1956
-    LocomotionState.TargetYawAngleViewSpace = unwind_degrees(ViewState.Rotation.yaw - LocomotionState.TargetYawAngle);   // :1954-1955
+    LocomotionState.TargetYawAngleViewSpace = unwind_degrees(float(ViewState.Rotation.yaw - LocomotionState.TargetYawAngle));   // :1954-1955
 }
 
 // ================================================================================================================================
@@ -963,7 +963,7 @@ method push_grounded_movement_settings() {
 
     if (gait_settings.bAllowDirectionDependentMovementSpeed && length_sq(Velocity) > KINDA_SMALL_NUMBER) {   // :941-943
         // Ideally actor rotation, but ALS controls it itself and does not replicate it: the view rotation of the controller.   :945-954
-        let view_rotation_gravity_space = get_twist(to_quat(ControlRotation), vec3(0.0, 0.0, 1.0));    // :956 UAlsRotation::GetTwist about the up axis
+        let view_rotation_gravity_space = get_twist(to_quat(rotator(ControlRotation)), vec3(0.0, 0.0, 1.0));    // :956 UAlsRotation::GetTwist about the up axis
         let velocity_view_space = unrotate(view_rotation_gravity_space, Velocity).xy;                  // :958
         let velocity_yaw_angle_view_space = direction_to_angle(velocity_view_space);                   // :959
 
