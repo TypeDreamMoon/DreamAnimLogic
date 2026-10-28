@@ -18,7 +18,8 @@
 # and the locomotion loops of the graph run for 160 frames (2.67 s) -- two runs whose counters differ by a multiple of 160 give the same pose to
 # 0.00-0.15 cm, whatever else differs, and otherwise they differ by up to 2.4 cm.  The wait is added before the recorder starts.  (The counter is
 # not readable from Python; at a fixed 60 fps it is the world time in frames minus one or two, so the wait goes by the world time.)
-# Environment: as r1_record.py (R1_TAKES, R1_OUT, R1_RES, R1_SUFFIX, R1_TRUTH), and R1_ORIGINAL, R1_RENDERED, R1_PHASE, R1_PHASE_OFFSET.
+# R1_PHASE_EXACT=1 with R1_PHASE starts at the reference's absolute world time instead (a number > 1: at that world frame, e.g. 900 when the editor is slower than the reference) (the ragdoll take: Chaos repeats bit for bit only from the same absolute time).
+# Environment: as r1_record.py (R1_TAKES, R1_OUT, R1_RES, R1_SUFFIX, R1_TRUTH), and R1_ORIGINAL, R1_RENDERED, R1_PHASE, R1_PHASE_OFFSET, R1_PHASE_EXACT.
 import os
 import sys
 
@@ -36,6 +37,7 @@ RENDERED = os.environ.get("R1_RENDERED", "0") == "1"
 PHASE_FILE = os.environ.get("R1_PHASE", "")
 PHASE_OFFSET = int(os.environ.get("R1_PHASE_OFFSET", "0"))       # updates between the wait's check and the first recorded frame (a constant of the driver; see phase_ref.py)
 PHASE_LOOP = 160
+PHASE_EXACT = float(os.environ.get("R1_PHASE_EXACT", "0"))            # 1: start at the reference take's absolute world time instead of the same point of the 160-frame loop; > 1: at that world frame
 FPS = float(os.environ.get("R1_FPS", "60"))                      # the fixed frame rate of this editor run (-fps=<n>, run_editor.ps1 -Fps): the phase wait needs its step
 GAME_MODE = "/Script/DreamAnimTestHost.DalAlsHostGameMode"
 LOGIC_CLASS = "AlsCharacter"
@@ -138,6 +140,15 @@ def phase_aligned(mesh, take):
     if ref is None:
         return True
     frames = unreal.GameplayStatics.get_time_seconds(mesh.get_world()) * 60.0      # (frames of 1/60 s; a float: other frame rates fall between them)
+    if PHASE_EXACT:
+        # the recording starts at the reference's own world time: a physics take (the ragdoll) does not repeat when it starts a loop (160 frames) later, only when it
+        # starts at the same absolute time (float32 times in the solver: UE's own Chaos ragdoll differs 3-5 cm between runs that start at world frame 591 and 751, and is
+        # bit-identical between two that start at 591).  If the editor is already past it the take starts at once and the log says so.
+        want = float(ref) + PHASE_OFFSET if PHASE_EXACT <= 1.0 else PHASE_EXACT
+        if frames > want + 0.25 * 60.0 / FPS:
+            log("R1_PHASE_EXACT: the world is at frame %.2f, past the reference start %.2f: the take starts now" % (frames, want))
+            return True
+        return abs(frames - want) < 0.25 * 60.0 / FPS
     r = (frames - float(ref) + PHASE_OFFSET) % PHASE_LOOP
     tol = 0.25 * 60.0 / FPS                                                      # a quarter of a step of this run
     return r < tol or PHASE_LOOP - r < tol
