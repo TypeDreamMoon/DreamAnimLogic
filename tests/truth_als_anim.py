@@ -47,7 +47,13 @@ TAKES = ("lane", "features", "in_air", "speed_jumps", "stance_changes", "rotatio
 
 
 def take_path(name: str) -> str:
-    return os.path.join(TRUTH_DIR, f"als_{name}.dvrec")
+    path = os.path.join(TRUTH_DIR, f"als_{name}.dvrec")
+    if not os.path.isfile(path):                                    # the takes of the other drivers: <truth>/far (ANIM-55: 10 km from the origin), base, extra
+        for sub in ("far", "base", "extra"):
+            other = os.path.join(TRUTH_DIR, sub, f"als_{name}.dvrec")
+            if os.path.isfile(other):
+                return other
+    return path
 
 
 def available(name: str = "lane") -> bool:
@@ -189,7 +195,9 @@ def leaf_types(module) -> dict:
     return out
 
 
-COMPONENTS = {"vec2": "XY", "vec3": "XYZ", "quat": "XYZW", "rotator": ("Pitch", "Yaw", "Roll")}
+COMPONENTS = {"vec2": "XY", "vec3": "XYZ", "quat": "XYZW", "rotator": ("Pitch", "Yaw", "Roll"),
+              "vec2d": "XY", "vec3d": "XYZ", "quatd": "XYZW", "rotatord": ("Pitch", "Yaw", "Roll")}         # (the double types hold what the recording has, as it is)
+CLASS_OF = {"vec2": rt.Vec2, "vec3": rt.Vec3, "quat": rt.Quat, "rotator": rt.Rotator, "vec2d": rt.Vec2, "vec3d": rt.Vec3, "quatd": rt.Quat, "rotatord": rt.Rotator}
 
 
 def truth_leaves(module, flat: dict, prefix: str = "Anim.") -> dict:
@@ -204,7 +212,7 @@ def truth_leaves(module, flat: dict, prefix: str = "Anim.") -> dict:
             if any(v is None for v in vals):
                 continue
             v = tuple(float(x) for x in vals)
-            out[path] = {"vec2": rt.Vec2, "vec3": rt.Vec3, "quat": rt.Quat, "rotator": rt.Rotator}[name](*v)
+            out[path] = CLASS_OF[name](*v)
             continue
         if name == "snapshot" or key not in flat:
             continue
@@ -396,7 +404,8 @@ def compare_take(name: str, frames: range | None = None, tol: Tolerance | None =
     mods = A.compile_system()
     module = mods[INSTANCE]
     leaves_of = leaf_types(module)
-    cls = {n: load_class(m, generate_python(m)) for n, m in mods.items()}
+    f32 = os.environ.get("DAL_ALS_FLOAT32") == "1" or None                  # the compiler's float32 mode (the engine's float arithmetic), as the Blender ALS spec runs it
+    cls = {n: load_class(m, generate_python(m, float32=f32), float32=f32) for n, m in mods.items()}
     from dal import settings as dsettings
     pack = os.environ.get("DAL_ALS_PACK", r"G:\DCC\AlsPack")
     resolver = dsettings.PackResolver(pack)

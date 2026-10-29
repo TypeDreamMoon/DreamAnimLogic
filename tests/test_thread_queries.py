@@ -20,9 +20,9 @@ from dal.mockhost import MockHost
 
 PROXY = """
 logic Px : anim;
-input MeshT: transform <- host.mesh_world_transform;
-state Proxy: vec3;
-state Mesh: vec3;
+input MeshT: transformd <- host.mesh_world_transform;
+state Proxy: vec3d;
+state Mesh: vec3d;
 state Game: bool;
 update(dt) {
     Proxy = host.proxy_component_transform().location;
@@ -57,7 +57,7 @@ update(dt) { if (host.is_game_thread()) { host.stop_montages_with_slot("InUpdate
 """
 ACTOR = """
 logic Ac : actor;
-state Where: vec3;
+state Where: vec3d;
 state Game: bool;
 update(dt) { Where = host.proxy_component_transform().location; Game = host.is_game_thread(); }
 """
@@ -82,7 +82,7 @@ def frame(**kw):
 
 class ProtocolTests(unittest.TestCase):
     def test_the_queries_are_in_the_protocol(self):
-        for name, ret in (("is_game_thread", "bool"), ("proxy_component_transform", "transform")):
+        for name, ret in (("is_game_thread", "bool"), ("proxy_component_transform", "transformd")):
             q = hostapi.QUERIES[name]
             self.assertEqual((q.params, q.ret.name, q.thread_safe), ((), ret, True), name)
         self.assertIn("is_game_thread", hostapi.protocol_markdown())
@@ -126,7 +126,7 @@ class CppTests(unittest.TestCase):
     def test_generated_text(self):
         cpp, hdr = (lambda f: (f["Px.cpp"], f["Px.h"]))(generate_cpp(module(PROXY, "Px.dal")))
         self.assertIn("return IsInGameThread();", cpp)
-        self.assertIn("return FTransform3f(GetProxyOnAnyThread<FAnimInstanceProxy>().GetComponentTransform());", cpp)
+        self.assertIn("return GetProxyOnAnyThread<FAnimInstanceProxy>().GetComponentTransform();", cpp)
         self.assertIn('#include "CoreGlobals.h"', cpp)
         self.assertIn('#include "Animation/AnimInstanceProxy.h"', cpp)
         self.assertIn("bool DalIsGameThread()", hdr)

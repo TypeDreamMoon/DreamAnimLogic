@@ -57,11 +57,11 @@ input BaseRelativeRotation: bool <- host.movement_base_relative_rotation;       
 
 // ---- the pose of the previous evaluation, read by the foot lock (AI:1245-1295, :1307) ------------------------------------------------
 input PelvisBoneTransform: transform <- host.bone_component_transform("pelvis");         // AI:1250  GetSocketTransform(pelvis, RTS_Component)
-input FootLeftIkBoneTransform: transform <- host.bone_world_transform("ik_foot_l");      // AI:1279  bUseFootIkBones: GetSocketTransform(ik_foot_l)
-input FootRightIkBoneTransform: transform <- host.bone_world_transform("ik_foot_r");     // AI:1288
+input FootLeftIkBoneTransform: transformd <- host.bone_world_transform("ik_foot_l");      // AI:1279  bUseFootIkBones: GetSocketTransform(ik_foot_l)
+input FootRightIkBoneTransform: transformd <- host.bone_world_transform("ik_foot_r");     // AI:1288
 // The virtual bones of the skeleton are called "VB foot_l" / "VB foot_r": a host name may have single spaces in it.
-input FootLeftVirtualBoneTransform: transform <- host.bone_world_transform("VB foot_l"); // AI:1281  !bUseFootIkBones
-input FootRightVirtualBoneTransform: transform <- host.bone_world_transform("VB foot_r"); // AI:1290
+input FootLeftVirtualBoneTransform: transformd <- host.bone_world_transform("VB foot_l"); // AI:1281  !bUseFootIkBones
+input FootRightVirtualBoneTransform: transformd <- host.bone_world_transform("VB foot_r"); // AI:1290
 
 // ---- animation curves of the previous evaluation (GetCurveValue; AI:288-375 read the same map, 0 when a curve is missing) ----------
 input CurveLayerHead: float <- host.anim_curve("LayerHead");                                          // UAlsConstants::Layer*CurveName
@@ -937,8 +937,8 @@ view process_foot_lock_teleport(foot: AlsFootState, context: AlsFootUpdateContex
         return foot_state;
     }
 
-    foot_state.LockLocationWorldSpace = transform_position(context.ComponentTransform, foot_state.LockLocation);          // AI:1346
-    foot_state.LockRotationWorldSpace = transform_rotation(context.ComponentTransform, foot_state.LockRotation);
+    foot_state.LockLocationWorldSpace = transform_position(context.ComponentTransform, vec3d(foot_state.LockLocation));          // AI:1346
+    foot_state.LockRotationWorldSpace = transform_rotation(context.ComponentTransform, quatd(foot_state.LockRotation));
 
     if (MovementBase.bHasRelativeLocation) {                                                         // AI:1349
         foot_state = lock_in_movement_base_space(foot_state, foot_state.LockLocationWorldSpace, foot_state.LockRotationWorldSpace);     // AI:1351-1356
@@ -947,12 +947,12 @@ view process_foot_lock_teleport(foot: AlsFootState, context: AlsFootUpdateContex
 }
 
 // FootState.LockLocationMovementBaseSpace / LockRotationMovementBaseSpace of a lock in world space (AI:1351-1356, :1378-1383, :1468-1473, :1549-1554):
-// the same few lines in five places of the C++, written once here.  The base transform is double, the lock the float of the state (FVector3f / FQuat4f).
-view lock_in_movement_base_space(foot: AlsFootState, location: vec3, rotation: quat) -> AlsFootState {
+// the same few lines in five places of the C++, written once here.  The world lock and the base transform are double, the lock in base space the float of the state (FVector3f / FQuat4f).
+view lock_in_movement_base_space(foot: AlsFootState, location: vec3d, rotation: quatd) -> AlsFootState {
     var foot_state = foot;
     let base_rotation_inverse = quat_inverse(MovementBase.Rotation);
-    foot_state.LockLocationMovementBaseSpace = vec3(rotate(base_rotation_inverse, vec3d(location) - MovementBase.Location));
-    foot_state.LockRotationMovementBaseSpace = quat(base_rotation_inverse * quatd(rotation));
+    foot_state.LockLocationMovementBaseSpace = vec3(rotate(base_rotation_inverse, location - MovementBase.Location));
+    foot_state.LockRotationMovementBaseSpace = quat(base_rotation_inverse * rotation);
     return foot_state;
 }
 
@@ -975,8 +975,8 @@ view process_foot_lock_base_change(foot: AlsFootState, context: AlsFootUpdateCon
         foot_state.LockRotationMovementBaseSpace = QUAT_IDENTITY;
     }
 
-    foot_state.LockLocation = transform_position(context.ComponentTransformInverse, foot_state.LockLocationWorldSpace);          // AI:1391
-    foot_state.LockRotation = transform_rotation(context.ComponentTransformInverse, foot_state.LockRotationWorldSpace);
+    foot_state.LockLocation = vec3(transform_position(context.ComponentTransformInverse, foot_state.LockLocationWorldSpace));          // AI:1391
+    foot_state.LockRotation = quat(transform_rotation(context.ComponentTransformInverse, foot_state.LockRotationWorldSpace));
     return foot_state;
 }
 
@@ -1009,8 +1009,8 @@ view refresh_foot_lock(foot: AlsFootState, context: AlsFootUpdateContext) -> Als
             foot_state.LockRotation = QUAT_IDENTITY;
         }
 
-        foot_state.FinalLocation = transform_position(context.ComponentTransformInverse, foot_state.TargetLocationWorldSpace);       // AI:1432
-        foot_state.FinalRotation = transform_rotation(context.ComponentTransformInverse, foot_state.TargetRotationWorldSpace);
+        foot_state.FinalLocation = vec3(transform_position(context.ComponentTransformInverse, foot_state.TargetLocationWorldSpace));       // AI:1432
+        foot_state.FinalRotation = quat(transform_rotation(context.ComponentTransformInverse, foot_state.TargetRotationWorldSpace));
         return foot_state;
     }
 
@@ -1022,8 +1022,8 @@ view refresh_foot_lock(foot: AlsFootState, context: AlsFootUpdateContext) -> Als
     if (new_amount_equal_one) {                                                                      // AI:1443
         if (new_amount_greater_than_previous) {                                                      // AI:1445
             // If the new foot lock amount is 1 and the previous amount is less than 1, then save the new foot lock location and rotation.
-            var target_location = VEC3_ZERO;
-            var target_rotation = QUAT_IDENTITY;
+            var target_location = vec3d(VEC3_ZERO);
+            var target_rotation = quatd(QUAT_IDENTITY);
 
             if (FeetState.bBecameValid) {                                                            // AI:1452
                 target_location = foot_state.TargetLocationWorldSpace;
@@ -1031,8 +1031,8 @@ view refresh_foot_lock(foot: AlsFootState, context: AlsFootUpdateContext) -> Als
             } else {
                 // We use the final transform here (the transform of the foot from the previous frame, but without the foot IK applied),
                 // since using the target transform may cause the foot to teleport.
-                target_location = transform_position(context.ComponentTransform, foot_state.FinalLocation);       // AI:1462
-                target_rotation = transform_rotation(context.ComponentTransform, foot_state.FinalRotation);
+                target_location = transform_position(context.ComponentTransform, vec3d(foot_state.FinalLocation));       // AI:1462
+                target_rotation = transform_rotation(context.ComponentTransform, quatd(foot_state.FinalRotation));
             }
 
             if (MovementBase.bHasRelativeLocation) {                                                 // AI:1466
@@ -1048,8 +1048,8 @@ view refresh_foot_lock(foot: AlsFootState, context: AlsFootUpdateContext) -> Als
                 foot_state.LockLocationWorldSpace = target_location;                                 // AI:1486
                 foot_state.LockRotationWorldSpace = target_rotation;
 
-                foot_state.LockLocation = transform_position(context.ComponentTransformInverse, foot_state.LockLocationWorldSpace);   // AI:1489
-                foot_state.LockRotation = transform_rotation(context.ComponentTransformInverse, foot_state.LockRotationWorldSpace);
+                foot_state.LockLocation = vec3(transform_position(context.ComponentTransformInverse, foot_state.LockLocationWorldSpace));   // AI:1489
+                foot_state.LockRotation = quat(transform_rotation(context.ComponentTransformInverse, foot_state.LockRotationWorldSpace));
             }
         }
 
@@ -1059,12 +1059,12 @@ view refresh_foot_lock(foot: AlsFootState, context: AlsFootUpdateContext) -> Als
     }
 
     if (MovementBase.bHasRelativeLocation) {                                                         // AI:1504
-        foot_state.LockLocationWorldSpace = vec3(MovementBase.Location + rotate(MovementBase.Rotation, vec3d(foot_state.LockLocationMovementBaseSpace)));    // AI:1506-1507
-        foot_state.LockRotationWorldSpace = quat(MovementBase.Rotation * quatd(foot_state.LockRotationMovementBaseSpace));       // AI:1509
+        foot_state.LockLocationWorldSpace = MovementBase.Location + rotate(MovementBase.Rotation, vec3d(foot_state.LockLocationMovementBaseSpace));    // AI:1506-1507
+        foot_state.LockRotationWorldSpace = MovementBase.Rotation * quatd(foot_state.LockRotationMovementBaseSpace);       // AI:1509
     }
 
-    foot_state.LockLocation = transform_position(context.ComponentTransformInverse, foot_state.LockLocationWorldSpace);   // AI:1512
-    foot_state.LockRotation = transform_rotation(context.ComponentTransformInverse, foot_state.LockRotationWorldSpace);
+    foot_state.LockLocation = vec3(transform_position(context.ComponentTransformInverse, foot_state.LockLocationWorldSpace));   // AI:1512
+    foot_state.LockRotation = quat(transform_rotation(context.ComponentTransformInverse, foot_state.LockRotationWorldSpace));
 
     foot_state = constrain_foot_lock(foot_state, context.ComponentTransform);                                                  // AI:1515
 
@@ -1072,12 +1072,12 @@ view refresh_foot_lock(foot: AlsFootState, context: AlsFootUpdateContext) -> Als
 
     let final_rotation = normalize(fast_lerp(foot_state.TargetRotationWorldSpace, foot_state.LockRotationWorldSpace, foot_state.LockAmount));   // AI:1519
 
-    foot_state.FinalLocation = transform_position(context.ComponentTransformInverse, final_location);   // AI:1522
-    foot_state.FinalRotation = transform_rotation(context.ComponentTransformInverse, final_rotation);
+    foot_state.FinalLocation = vec3(transform_position(context.ComponentTransformInverse, final_location));   // AI:1522
+    foot_state.FinalRotation = quat(transform_rotation(context.ComponentTransformInverse, final_rotation));
     return foot_state;
 }
 
-view constrain_foot_lock(foot: AlsFootState, proxy_transform: transform) -> AlsFootState {            // AI:1526  (proxy_transform: Proxy.GetComponentTransform(), AI:1542)
+view constrain_foot_lock(foot: AlsFootState, proxy_transform: transformd) -> AlsFootState {            // AI:1526  (proxy_transform: Proxy.GetComponentTransform(), AI:1542)
     var foot_state = foot;
 
     // Limit the location of the locked foot to prevent legs from twisting into a spiral when the character rotates quickly.
@@ -1091,8 +1091,8 @@ view constrain_foot_lock(foot: AlsFootState, proxy_transform: transform) -> AlsF
         foot_state.LockLocation = rotate(offset_rotation, foot_state.LockLocation);                  // AI:1538
         foot_state.LockRotation = normalize(offset_rotation * foot_state.LockRotation);              // AI:1539
 
-        foot_state.LockLocationWorldSpace = transform_position(proxy_transform, foot_state.LockLocation);   // AI:1544
-        foot_state.LockRotationWorldSpace = transform_rotation(proxy_transform, foot_state.LockRotation);
+        foot_state.LockLocationWorldSpace = transform_position(proxy_transform, vec3d(foot_state.LockLocation));   // AI:1544
+        foot_state.LockRotationWorldSpace = transform_rotation(proxy_transform, quatd(foot_state.LockRotation));
 
         if (MovementBase.bHasRelativeLocation) {                                                     // AI:1547
             foot_state = lock_in_movement_base_space(foot_state, foot_state.LockLocationWorldSpace, foot_state.LockRotationWorldSpace);     // AI:1549-1554
@@ -1100,14 +1100,14 @@ view constrain_foot_lock(foot: AlsFootState, proxy_transform: transform) -> AlsF
     }
 
     // Limit the rotation of the locked foot.
-    let foot_delta_angle = rad_to_deg(twist_angle(foot_state.LockRotationWorldSpace * quat_inverse(foot_state.TargetRotationWorldSpace),
+    let foot_delta_angle = rad_to_deg(twist_angle(quat(foot_state.LockRotationWorldSpace * quat_inverse(foot_state.TargetRotationWorldSpace)),
                                                   vec3(0.0, 0.0, 1.0)));                             // AI:1560
 
     if (abs(foot_delta_angle) > Settings.FootLock.FootAngleLimit + KINDA_SMALL_NUMBER) {            // AI:1566
         let clamped_angle = clamp(foot_delta_angle, -Settings.FootLock.FootAngleLimit, Settings.FootLock.FootAngleLimit);       // AI:1568
         let offset_rotation = quat_from_axis_angle(vec3(0.0, 0.0, 1.0), deg_to_rad(clamped_angle - foot_delta_angle));          // AI:1569
 
-        foot_state.LockRotationWorldSpace = offset_rotation * foot_state.LockRotationWorldSpace;     // AI:1571
+        foot_state.LockRotationWorldSpace = quatd(offset_rotation) * foot_state.LockRotationWorldSpace;     // AI:1571
     }
 
     return foot_state;

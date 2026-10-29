@@ -8,6 +8,7 @@ foot angle limits and fall; the view yaw sweeps start turns in place; no take ma
 never holds a foot 8 cm away from the target), so that part rests on the oracle and the hand-checked scenarios.
 """
 
+import os
 import unittest
 
 import _bootstrap  # noqa: F401
@@ -82,6 +83,45 @@ class TruthTests(unittest.TestCase):
         for name in ("speed_jumps", "stance_changes", "rotation_modes", "view_mode"):
             with self.subTest(take=name):
                 self.check(name, 2000)
+
+
+@unittest.skipUnless(T.available("far_origin"), "the far-origin truth take (G:/DCC/AlsTruth/far, ANIM-55) is not on this machine")
+class FarOriginTests(unittest.TestCase):
+    """The original ALS recorded 10 km (1e6 cm) from the origin (`Unreal/AlsHost/scripts/base_takes.py` far_origin): a walk, turns, a run, crouching, a sprint, a jump,
+    a roll, with the feet locking in between.  The foot lock runs in the compiler's float32 mode, as the Blender ALS spec and the engine's float arithmetic do: the
+    world space lock and the foot targets are doubles (FVector / FQuat), everything else of the foot a float, so what is left against the original is what the original
+    itself rounds to a float (a float holds a number of 1e6 in steps of 0.0625).  Before ANIM-55 the world locations were floats here: 7800 of the 70907 foot lock
+    values of the take differed (FinalLocation in 2420 and 2320 of 2445 frames, up to 0.08 cm, LockLocation up to 0.3 cm)."""
+
+    @classmethod
+    def setUpClass(cls):
+        old = os.environ.get("DAL_ALS_FLOAT32")
+        os.environ["DAL_ALS_FLOAT32"] = "1"
+        try:
+            cls.report = T.compare_take("far_origin", tol=T.Tolerance(rel=1.5e-7, abs_=1e-3))        # (a relative 1.5e-7: the original's own float32 of a number of 1e6)
+        finally:
+            if old is None:
+                del os.environ["DAL_ALS_FLOAT32"]
+            else:
+                os.environ["DAL_ALS_FLOAT32"] = old
+
+    def test_the_take_is_far_from_the_origin_and_has_locked_feet(self):
+        r = self.report
+        self.assertGreater(r.frames, 2000)
+        self.assertGreater(r.stats["foot lock full"], 500)
+
+    def test_the_foot_lock_is_the_originals_to_the_float_it_stores(self):
+        compared, bad = self.report.count(("FeetState.",))
+        self.assertGreater(compared, 60000)
+        self.assertLess(bad, 100, self.report.format(("FeetState.",)))              # (48: the frames of a released lock, whose component space lock is a world zero seen from 10 km)
+
+    def test_the_final_feet_and_the_world_targets_are_exact_in_every_frame(self):
+        group = self.report.group(("FeetState.",))
+        for side in ("Left", "Right"):
+            for name in ("FinalLocation", "TargetLocationWorldSpace"):
+                stat = group[f"FeetState.{side}.{name}"]
+                self.assertEqual(stat.bad, 0, name)
+                self.assertLess(stat.max_error, 5e-3, f"{side}.{name}")
 
 
 if __name__ == "__main__":

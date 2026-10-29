@@ -130,7 +130,7 @@ HOST_ITEMS: dict[str, HostItem] = {
         HostItem("bone_component_transform", TRANSFORM, arg=True, arg_kind="string", free_name=True,
                  doc='transform of a bone in component space, from the pose evaluated last: host.bone_component_transform("pelvis")',
                  ue="Mesh->GetSocketTransform(Bone, RTS_Component)"),
-        HostItem("bone_world_transform", TRANSFORM, arg=True, arg_kind="string", free_name=True,
+        HostItem("bone_world_transform", TRANSFORMD, arg=True, arg_kind="string", free_name=True,
                  doc='transform of a bone in world space, from the pose evaluated last: host.bone_world_transform("ik_foot_l")',
                  ue="Mesh->GetSocketTransform(Bone, RTS_World)"),
         HostItem("ref_path_child_translation", VEC3, arg=True, arg_kind="string", nargs=2, unit="cm", free_name=True,
@@ -354,7 +354,7 @@ QUERIES: dict[str, Query] = {
         Query("is_game_thread", (), BOOL,
               "does the code run on the game thread (an animation graph may update on a worker thread; a host without threads answers false)",
               "IsInGameThread()", True),
-        Query("proxy_component_transform", (), TRANSFORM,
+        Query("proxy_component_transform", (), TRANSFORMD,
               "the component transform the animation proxy has cached while the graph updates (FAnimInstanceProxy::GetComponentTransform): the mesh's "
               "transform at the last PreUpdate / PreEvaluateAnimation, which is not the mesh's transform of the moment while root motion moves the character",
               "GetProxyOnAnyThread<FAnimInstanceProxy>().GetComponentTransform() (an actor logic: the mesh component's transform)", True),

@@ -1755,10 +1755,10 @@ class CppGen:
             if self.actor:
                 body = ["const AActor* DalOwner = GetOwner();",
                         "const USkeletalMeshComponent* DalMesh = DalOwner != nullptr ? DalOwner->FindComponentByClass<USkeletalMeshComponent>() : nullptr;",
-                        "return DalMesh != nullptr ? FTransform3f(DalMesh->GetComponentTransform()) : FTransform3f();"]
+                        "return DalMesh != nullptr ? DalMesh->GetComponentTransform() : FTransform();"]
             else:
-                body = ["return FTransform3f(GetProxyOnAnyThread<FAnimInstanceProxy>().GetComponentTransform());"]
-            out.append(Method("FTransform3f", "DalProxyComponentTransform",
+                body = ["return GetProxyOnAnyThread<FAnimInstanceProxy>().GetComponentTransform();"]
+            out.append(Method("FTransform", "DalProxyComponentTransform",
                               doc="host.proxy_component_transform: the component transform the animation proxy cached (the mesh's, for an actor logic).", body=body))
         if "montage_is_playing" in q:
             out.append(Method("bool", "DalMontageIsPlaying", "const UAnimMontage* DalMontage",

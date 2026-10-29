@@ -38,6 +38,10 @@ def f32(x):                                                             # UE_REA
     return struct.unpack('<f', struct.pack('<f', x))[0]
 
 
+def f32v(v):                                                            # FVector3f{FVector}: the components narrowed
+    return tuple(f32(c) for c in v)
+
+
 def tag(kind, member):
     return TAGS[kind] + member if member else ""
 
@@ -814,7 +818,7 @@ class AlsAnimOracle:
         if self.s["Feet"]["bBecameValid"] or self.f["time"] - self.TeleportedTime > 0.20000000298023224 or not is_relevant(c["IkAmount"] * foot["LockAmount"]):
             return
         self.hits["foot_lock_teleport"] += 1
-        foot["LockLocationWorldSpace"] = t_position(c["ComponentTransform"], foot["LockLocation"])
+        foot["LockLocationWorldSpace"] = t_position(c["ComponentTransform"], foot["LockLocation"])         # (double: FVector{float3f}, the component transform is double)
         foot["LockRotationWorldSpace"] = t_rotation(c["ComponentTransform"], foot["LockRotation"])
 
     def process_foot_lock_base_change(self, c):             # AI:1360
@@ -828,8 +832,8 @@ class AlsAnimOracle:
             foot["LockRotationWorldSpace"] = foot["TargetRotationWorldSpace"]
         foot["LockLocationMovementBaseSpace"] = (0.0, 0.0, 0.0)
         foot["LockRotationMovementBaseSpace"] = QUAT_ID
-        foot["LockLocation"] = t_position(c["ComponentTransformInverse"], foot["LockLocationWorldSpace"])
-        foot["LockRotation"] = t_rotation(c["ComponentTransformInverse"], foot["LockRotationWorldSpace"])
+        foot["LockLocation"] = f32v(t_position(c["ComponentTransformInverse"], foot["LockLocationWorldSpace"]))       # (FVector3f{...} / FQuat4f{...})
+        foot["LockRotation"] = f32v(t_rotation(c["ComponentTransformInverse"], foot["LockRotationWorldSpace"]))
 
     def refresh_foot_lock(self, c):                         # AI:1395
         foot = c["foot"]
@@ -852,8 +856,8 @@ class AlsAnimOracle:
                 foot["LockRotationMovementBaseSpace"] = QUAT_ID
                 foot["LockLocation"] = (0.0, 0.0, 0.0)
                 foot["LockRotation"] = QUAT_ID
-            foot["FinalLocation"] = t_position(inv, foot["TargetLocationWorldSpace"])
-            foot["FinalRotation"] = t_rotation(inv, foot["TargetRotationWorldSpace"])
+            foot["FinalLocation"] = f32v(t_position(inv, foot["TargetLocationWorldSpace"]))
+            foot["FinalRotation"] = f32v(t_rotation(inv, foot["TargetRotationWorldSpace"]))
             return
         new_amount_equal_one = is_full_weight(new_lock_amount)
         new_amount_greater_than_previous = new_lock_amount > foot["LockAmount"]
@@ -872,19 +876,19 @@ class AlsAnimOracle:
                     self.hits["foot_lock_new_location"] += 1
                     foot["LockLocationWorldSpace"] = target_location
                     foot["LockRotationWorldSpace"] = target_rotation
-                    foot["LockLocation"] = t_position(inv, foot["LockLocationWorldSpace"])
-                    foot["LockRotation"] = t_rotation(inv, foot["LockRotationWorldSpace"])
+                    foot["LockLocation"] = f32v(t_position(inv, foot["LockLocationWorldSpace"]))
+                    foot["LockRotation"] = f32v(t_rotation(inv, foot["LockRotationWorldSpace"]))
             foot["LockAmount"] = 1.0
         elif not new_amount_greater_than_previous:
             self.hits["foot_lock_blend_out"] += 1
             foot["LockAmount"] = new_lock_amount
-        foot["LockLocation"] = t_position(inv, foot["LockLocationWorldSpace"])
-        foot["LockRotation"] = t_rotation(inv, foot["LockRotationWorldSpace"])
+        foot["LockLocation"] = f32v(t_position(inv, foot["LockLocationWorldSpace"]))
+        foot["LockRotation"] = f32v(t_rotation(inv, foot["LockRotationWorldSpace"]))
         self.constrain_foot_lock(foot)
         final_location = v_lerp(foot["TargetLocationWorldSpace"], foot["LockLocationWorldSpace"], foot["LockAmount"])
         final_rotation = q_normalize(q_fast_lerp(foot["TargetRotationWorldSpace"], foot["LockRotationWorldSpace"], foot["LockAmount"]))
-        foot["FinalLocation"] = t_position(inv, final_location)
-        foot["FinalRotation"] = t_rotation(inv, final_rotation)
+        foot["FinalLocation"] = f32v(t_position(inv, final_location))
+        foot["FinalRotation"] = f32v(t_rotation(inv, final_rotation))
 
     def constrain_foot_lock(self, foot):                    # AI:1526
         F = self.s["Feet"]
@@ -900,7 +904,7 @@ class AlsAnimOracle:
             component = self.f["mesh_transform"]
             foot["LockLocationWorldSpace"] = t_position(component, foot["LockLocation"])
             foot["LockRotationWorldSpace"] = t_rotation(component, foot["LockRotation"])
-        foot_delta_angle = math.degrees(q_twist_angle(q_mul(foot["LockRotationWorldSpace"], q_inverse(foot["TargetRotationWorldSpace"])), UP))
+        foot_delta_angle = math.degrees(q_twist_angle(f32v(q_mul(foot["LockRotationWorldSpace"], q_inverse(foot["TargetRotationWorldSpace"]))), UP))      # (FQuat4f{...}.GetTwistAngle)
         if abs(foot_delta_angle) > S["foot_angle_limit"] + UE_KINDA_SMALL_NUMBER:
             self.hits["foot_angle_clamped"] += 1
             clamped = clamp(foot_delta_angle, -S["foot_angle_limit"], S["foot_angle_limit"])

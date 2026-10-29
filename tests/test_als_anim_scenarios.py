@@ -42,13 +42,13 @@ class Sim:
     TAGS = {"InViewMode": tag("ViewMode", "ThirdPerson"), "InLocomotionMode": tag("LocomotionMode", "Grounded"), "InRotationMode": tag("RotationMode", "ViewDirection"),
             "InStance": tag("Stance", "Standing"), "InGait": tag("Gait", "Walking"), "InOverlayMode": tag("OverlayMode", "Default"), "InLocomotionAction": ""}
 
-    def __init__(self, mods, params=None, dt=1 / 60, skeleton=None):
+    def __init__(self, mods, params=None, dt=1 / 60, skeleton=None, float32=None):
         self.mods, self.dt = mods, dt
         self.params = params if params is not None else {INSTANCE: {"Settings": settings_data()}}
         self.hosts = {n: harness.ScriptedHost() for n in mods}
         for host in self.hosts.values():
             host.skeleton = {k: dict(v) for k, v in (skeleton or {}).items()}               # the reference skeleton the thigh axes are read from at begin play
-        self.objs = {n: load_class(m, generate_python(m))(self.hosts[n], **self.params.get(n, {})) for n, m in mods.items()}
+        self.objs = {n: load_class(m, generate_python(m, float32=float32), float32=float32)(self.hosts[n], **self.params.get(n, {})) for n, m in mods.items()}
         for n, m in mods.items():
             for p in m.peers:
                 self.objs[n].connect(p.name, self.objs[p.logic])
@@ -1092,7 +1092,7 @@ class FootLockTests(ScenarioBase):
         sim = self.valid_sim()
         s = sim.feet(left_yaw=20.0, loc={"bHasInput": True, "bHasVelocity": True, "Speed": 200.0}, dt=1 / 30)       # lock 1 - 5/30 = 0.8333, lock rotation 0 (yaw), target yaw 20
         q = s["FeetState.Left.FinalRotation"]
-        self.assertAlmostEqual(sum(c * c for c in q), 1.0, places=9)
+        self.assertAlmostEqual(sum(c * c for c in q), 1.0, places=6)                                 # (FQuat4f{...}: narrowed to float, so unit to a float's 6e-8)
         self.assertAlmostEqual(2.0 * math.degrees(math.atan2(q[2], q[3])), 20.0 * (1.0 - s["FeetState.Left.LockAmount"]), places=0)
 
     def test_a_pose_that_comes_back_after_a_pending_update_locks_where_the_foot_is(self):
@@ -1106,6 +1106,37 @@ class FootLockTests(ScenarioBase):
         # became valid with a lock that was relevant: the lock starts at the target (AI:1370), without the blend out of a moving character
         near(self, s["FeetState.Left.LockLocationWorldSpace"], (140.0, -10.0, 0.0))
         self.assertEqual(s["FeetState.Left.LockAmount"], 1.0)
+
+    def test_the_foot_lock_far_from_the_origin_is_the_foot_lock_at_the_origin(self):
+        """ANIM-55: the world space lock and the foot targets are doubles (FVector / FQuat), the transforms of the component, the proxy and the bones too.  A walk,
+        a stop with the feet locked and a turn at 10 km (1e6 cm) from the origin gives the same locks and final feet (the state in the space of the component) as
+        at the origin: a float32 holds a world position there in steps of 0.0625 cm, which showed as a few hundredths of a centimetre before."""
+        far = 1.0e6
+        worst = 0.0
+        runs = []
+        for x0 in (0.0, far):
+            sim = FeetSim(self.mods, params=system_params(True), float32=True)               # (the compiler's float32 mode: what the engine's float arithmetic does)
+            sim.time = 100.0
+            out = []
+            for i in range(120):
+                walking = i < 60
+                x = x0 + 2.4137 * i if walking else x0 + 2.4137 * 60.0 + 0.31 * math.sin(0.4 * i)                # the mesh walks, stops and sways a little
+                yaw = 0.0 if i < 90 else 1.7 * (i - 90)                                                         # ... then turns on the spot
+                left = (x + 100.0 + 25.0 * math.sin(0.15 * i), -10.0, 0.0)
+                right = (x + 100.0 - 25.0 * math.sin(0.15 * i), 10.0, 0.0)
+                lock = (1.0, 0.0) if (i // 20) % 2 == 0 else (0.0, 1.0)
+                s = sim.feet(left=left, right=right, left_yaw=yaw * 0.5, right_yaw=yaw * 0.5, mesh=(x, 0.0, 0.0), lock=lock,
+                             loc={"bMoving": walking, "bHasVelocity": walking, "Speed": 145.0 if walking else 0.0}, yaw=yaw)
+                out.append({k: s[k] for k in ("FeetState.Left.LockLocation", "FeetState.Left.FinalLocation", "FeetState.Right.LockLocation", "FeetState.Right.FinalLocation",
+                                              "FeetState.Left.LockLocationMovementBaseSpace", "FeetState.Left.LockAmount", "FeetState.Right.LockAmount")})
+            runs.append(out)
+        for near_frame, far_frame in zip(*runs):
+            for key in near_frame:
+                a, b = near_frame[key], far_frame[key]
+                a = a if isinstance(a, tuple) else (a,)
+                b = b if isinstance(b, tuple) else (b,)
+                worst = max(worst, max(abs(u - v) for u, v in zip(a, b)))
+        self.assertLess(worst, 2e-3, "the foot lock at 10 km differs from the one at the origin by %.5f cm" % worst)
 
     def test_the_pose_goes_into_the_control_rig_input(self):
         sim = self.valid_sim()

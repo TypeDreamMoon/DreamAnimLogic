@@ -211,10 +211,10 @@ struct AlsInAirState {                                                          
 struct AlsFootState {                                                                                   // AlsFeetState.h:6
     LockAmount: float;
     ThighAxisPelvisSpace: vec3;
-    TargetLocationWorldSpace: vec3;
-    TargetRotationWorldSpace: quat;
-    LockLocationWorldSpace: vec3;
-    LockRotationWorldSpace: quat;
+    TargetLocationWorldSpace: vec3d;                                                                    // FVector / FQuat (double); the rest of the foot is FVector3f / FQuat4f
+    TargetRotationWorldSpace: quatd;
+    LockLocationWorldSpace: vec3d;
+    LockRotationWorldSpace: quatd;
     LockLocationMovementBaseSpace: vec3;
     LockRotationMovementBaseSpace: quat;
     LockLocation: vec3;
@@ -636,8 +636,8 @@ fn movement_direction_cache(d: AlsMovementDirection) -> AlsMovementDirectionCach
 enum AlsTurnInPlaceSlot { None, TurnInPlaceStanding, TurnInPlaceCrouching }                      // the FName slots of UAlsConstants (AlsConstants.h:30-31); None = nothing queued
 
 struct AlsFootUpdateContext {                                                                      // FAlsFootUpdateContext (AlsFeetState.h:76); the foot itself is passed next to it
-    ComponentTransform: transform;
-    ComponentTransformInverse: transform;
+    ComponentTransform: transformd;                                                                     // FTransform (double)
+    ComponentTransformInverse: transformd;
     IkAmount: float;
     LockAmount: float;
     FrameTime: float;
