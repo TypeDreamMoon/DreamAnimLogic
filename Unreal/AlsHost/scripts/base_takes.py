@@ -112,8 +112,40 @@ TAKES = {
         "platforms": [box("R1B_MantleBox", (330, -300, 65.5), (150, 450, 64.5), "interp", pingpong((0, 1200, 0), 60.0), interp=interp_of((0, 1200, 0), 60.0))]},
 }
 
+# Far from the origin (ANIM-55, anim-moving-base.md 12.7): the character is put at (FAR_X, 0, 100) on a static slab and walks / stops / locks its feet there.  FAR_X = 1e6 cm
+# (10 km): a float32 holds a world position there with 0.0625 cm steps, the double of FVector does not.  The slab is 70 x 30 m (top at z = 0) and reaches 10 m behind the start.
+# Env R1_FAR_X (cm) overrides the distance.
+FAR_X = float(os.environ.get("R1_FAR_X", "1000000"))
+TAKES["far_origin"] = {
+    "desc": "standing, walking, turning, running, crouching, sprinting, jumping, rolling on a slab %.0f m from the origin" % (FAR_X / 100.0),
+    "start": [FAR_X, 0.0, 100.0],
+    "platforms": [box("R1B_Far", (FAR_X + 2500.0, 0.0, -50.0), (3500.0, 1500.0, 50.0), mover=False)]}
+
 # The routes (driver steps: see r1_record.py).  The character stands at the origin facing +X.
 STEPS = '''
+ORIGIN = [0.0, 0.0]          # where the character starts (a take with "start" moves it there); the driver's LIMIT / GUARD are distances from it
+
+FAR_ORIGIN = [
+    step("idle", 2.5),
+    step("walk", 2.5, gait="Walking", move=(1, 0)),
+    step("stop", 2.0, move=(0, 0)),
+    step("turn_right", 2.5, yaw_delta=100.0, yaw_time=0.4),
+    step("turn_left", 2.5, yaw_delta=-100.0, yaw_time=0.4),
+    step("run", 2.5, gait="Running", move=(1, 0)),
+    step("stop2", 2.5, move=(0, 0)),
+    step("strafe", 2.0, gait="Walking", move=(0, 1)),
+    step("stop3", 1.5, move=(0, 0)),
+    step("crouch_idle", 2.0, stance="Crouching"),
+    step("crouch_walk", 2.0, gait="Walking", move=(1, 0)),
+    step("stand_stop", 2.0, stance="Standing", move=(0, 0)),
+    step("sprint", 2.5, gait="Sprinting", move=(1, 0)),
+    step("stop4", 2.5, move=(0, 0)),
+    step("jump", 2.5, jump=True),
+    step("roll", 3.0, roll=True),
+    step("run_back", 2.0, gait="Running", move=(-1, 0)),
+    step("end", 2.0, move=(0, 0)),
+]
+
 BASE_PROBE = [
     step("idle", 2.0),
     step("jump", 3.0, jump=True),
@@ -196,7 +228,7 @@ BASE_MANTLE = [
 
 '''
 
-ROUTES = {"base_probe": "BASE_PROBE", "base_probe_interp": "BASE_PROBE", "base_translate": "BASE_TRANSLATE", "base_translate_interp": "BASE_TRANSLATE",
+ROUTES = {"far_origin": "FAR_ORIGIN", "base_probe": "BASE_PROBE", "base_probe_interp": "BASE_PROBE", "base_translate": "BASE_TRANSLATE", "base_translate_interp": "BASE_TRANSLATE",
           "base_disc": "BASE_DISC", "base_elevator": "BASE_ELEVATOR", "base_jump_off": "BASE_JUMP_OFF", "base_jump_off_interp": "BASE_JUMP_OFF",
           "base_roll_crouch": "BASE_ROLL_CROUCH", "base_mantle": "BASE_MANTLE", "base_mantle_fast_set": "BASE_MANTLE", "base_mantle_fast_interp": "BASE_MANTLE"}
 
@@ -224,6 +256,15 @@ def add_base_takes(src):
     src = _replace_once(src, '        state["frames"] += 1' + nl, '        state["frames"] += 1' + nl + "        BASE.drive(base_state, fc())" + nl)
     src = _replace_once(src, "    if box_actor is not None:" + nl + "        unreal.EditorLevelLibrary.destroy_actor(box_actor)" + nl,
                         "    if box_actor is not None:" + nl + "        unreal.EditorLevelLibrary.destroy_actor(box_actor)" + nl + "    BASE.finish(base_state, log)" + nl)
+    # a take with a "start" puts the character there before the settling wait; the driver's limits (LIMIT: abort, GUARD: turn around) count from the start
+    src = _replace_once(src, "    pc.set_control_rotation(unreal.Rotator(roll=0.0, pitch=0.0, yaw=0.0))" + nl + "    yield Wait(2.0)" + nl,
+                        "    pc.set_control_rotation(unreal.Rotator(roll=0.0, pitch=0.0, yaw=0.0))" + nl + "    BASE.place(base_state, ch, ORIGIN, log)" + nl + "    yield Wait(2.0)" + nl)
+    src = _replace_once(src, "        if abs(loc.x) > LIMIT or abs(loc.y) > LIMIT:" + nl,
+                        "        if abs(loc.x - ORIGIN[0]) > LIMIT or abs(loc.y - ORIGIN[1]) > LIMIT:" + nl)
+    src = _replace_once(src, '        if (abs(loc.x) > GUARD or abs(loc.y) > GUARD) and state["t"] > state["guard_until"]',
+                        '        if (abs(loc.x - ORIGIN[0]) > GUARD or abs(loc.y - ORIGIN[1]) > GUARD) and state["t"] > state["guard_until"]')
+    src = _replace_once(src, "            heading = math.degrees(math.atan2(-loc.y, -loc.x))" + nl,
+                        "            heading = math.degrees(math.atan2(ORIGIN[1] - loc.y, ORIGIN[0] - loc.x))" + nl)
     # a mantle attempt per step (the original driver tried once per take; with one such step the behaviour is the same)
     src = _replace_once(src, '        if s["cmd"].get("mantle_try") and not state.get("mantled") and state["t"] > 0.2:' + nl,
                         '        if s["cmd"].get("mantle_try") and state.get("mantled_step") != state["i"] and state["t"] > 0.2:' + nl)
@@ -288,6 +329,17 @@ def begin(take, info, out_dir, log):
                           "motion": p["spec"]["motion"], "mover": p["spec"]["mover"], "interp": p["spec"].get("interp")} for p in st["platforms"]]
     log("%s: %d platform(s) spawned in the editor world" % (take, len(st["platforms"])))
     return st
+
+
+def place(st, ch, origin, log):
+    """A take with a "start" ([x, y, z]): teleport the character there (the driver then settles for two seconds before the recorder starts) and make it the origin of the driver's limits."""
+    cfg = TAKES.get(st["take"]) if st is not None else None
+    if cfg is None or not cfg.get("start"):
+        return
+    start = cfg["start"]
+    ch.set_actor_location(unreal.Vector(*start), False, True)
+    origin[0], origin[1] = start[0], start[1]
+    log("%s: the character is at (%.0f, %.0f, %.0f)" % (st["take"], start[0], start[1], start[2]))
 
 
 def bind(st, world):
