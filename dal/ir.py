@@ -485,6 +485,7 @@ class Module:
     slot_events: bool = False                                   # actor logic: events are handled at the start of every tick slot
     sync_events: bool = False                                   # the hooks and declared notifies the host raises are handled when it raises them (receive_event)
     flush_peers: bool = False                                   # actor logic: the commands the called peers queue run with this logic's own at the end of its block
+    flush_calls: list[str] = field(default_factory=list)        # actor logic: pub methods whose commands run at the end of a call from outside (C++: game code, Blueprint)
     order: list[OrderDef] = field(default_factory=list)         # actor logic: tick slot order against peers
     methods: list[MethodDef] = field(default_factory=list)      # methods and views, in source order
     peers: list[PeerDef] = field(default_factory=list)
@@ -601,7 +602,7 @@ class Module:
 
     @property
     def uses_commands(self) -> bool:
-        return self.flush_peers or any(isinstance(n, Command) for _l, body in self.bodies() for n in walk_stmts(body))
+        return self.flush_peers or bool(self.flush_calls) or any(isinstance(n, Command) for _l, body in self.bodies() for n in walk_stmts(body))
 
 
 # ---- traversal ---------------------------------------------------------------------------------
@@ -774,7 +775,7 @@ def dump_stmts(stmts: list[Stmt], indent: int = 1) -> list[str]:
 
 def dump(m: Module) -> str:
     out = [f"library {m.name}" if m.is_library else f"logic {m.name}" + (f" : {m.kind}" if m.kind != "anim" else "") + (" post_flush" if m.post_flush else "")
-           + (" slot_events" if m.slot_events else "") + (" sync_events" if m.sync_events else "") + (" flush_peers" if m.flush_peers else "") + "".join(f" {o.relation} {o.peer}" for o in m.order)]
+           + (" slot_events" if m.slot_events else "") + (" sync_events" if m.sync_events else "") + (" flush_peers" if m.flush_peers else "") + (" flush_calls " + ", ".join(m.flush_calls) if m.flush_calls else "") + "".join(f" {o.relation} {o.peer}" for o in m.order)]
     for lib in m.libs:
         out.append(f"use {lib.filename!r}")
     for en in m.enums:

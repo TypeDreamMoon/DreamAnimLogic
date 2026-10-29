@@ -4,6 +4,8 @@
 
 **脚本都不弹窗口**：编辑器隐藏启动，优先级低于正常；UBT 限 8 个并行动作，同样低优先级。检查（`runtime_checks.py`）用 `-nullrhi`；录像用 `-RenderOffscreen -ResX=1024 -ResY=576`（`run_editor.ps1 -Rendered`）：有渲染器，没有窗口。原版 ALS 只对“被渲染”的网格整帧更新姿势（`VisibilityBasedAnimTickOption`），`-nullrhi` 下网格不算被渲染，蒙太奇的通知也不一样，所以拿它和有渲染器的原版录像比不公平（`cycle.ps1 -Windowless` 还保留，只在不在乎这点时用）。离屏渲染的原版录像和有真窗口录的真值帧数一致、各段同时开始；离屏跑得比开窗口快得多（十一条录像约 6 分钟）。
 
+**不用显卡的录像（ANIM-56，2026-10-29）**：`UnrealEditor-Cmd.exe <uproject> <地图> -ExecCmds="py scripts/g_record_nr.py" -unattended -nosplash -nullrhi -benchmark -fps=60`（最低优先级跑），环境变量照 `g_record.py`（`R1_TAKES=ragdoll`、`R1_PHASE=G:\DCC\AlsTruth\phase.json`、`R1_PHASE_EXACT=<世界帧>` 等），生成版另设 `DAL_HOST_ALWAYS_TICK_POSE=1`（宿主角色的构造函数据此让网格像被渲染的一样整帧更新姿势，不然动画实例的更新次数、也就是 160 帧循环的相位每次不同，同一起始帧的两次录像都不一样）；原版（`R1_ORIGINAL=1`）由 `g_record_nr.py` 把 `B_Als_Character` 网格的蓝图默认值改成 `AlwaysTickPoseAndRefreshBones`（只改内存里的，不保存；原版的 `RefreshMeshProperties` 每帧把网格的选项压到 `Min(目标, 蓝图默认)`）。这样原版和生成版在**同一个起始世界帧、同一个动画相位**下各录一条（一条约 1.5 分钟），能逐帧比。不是渲染的录像：`orig_start*` 那五条是离屏渲染的，两种录像的原版互相差几厘米到十厘米（第一段 7 cm），所以两种不能混着比。`R1_PHASE_EXACT` 的等待在慢机器上会超时（30 s 的 Wait），日志里有 `wait timed out` 就重录。
+
 ## 怎么替换（`host_als.py`）
 
 两个模块不能都叫 `ALS`，两份同名类也不能共存，所以原版逻辑源码不能在构建里。UBT 编译模块目录下所有 `.cpp`，UHT 读所有头文件，所以“关掉”就是“不在 `Source/` 下”。`host_als.py apply` 做的事：

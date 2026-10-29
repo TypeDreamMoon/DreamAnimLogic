@@ -40,6 +40,14 @@ ADalAlsHostCharacter::ADalAlsHostCharacter(const FObjectInitializer& ObjectIniti
 		MeshComponent->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::OnlyTickMontagesWhenNotRendered;
 		MeshComponent->bEnableUpdateRateOptimizations = false;
 
+		// A run without a renderer (-nullrhi, scripts/run_editor.ps1 without -Rendered, or DAL_HOST_ALWAYS_TICK_POSE=1 in the environment of the editor): the mesh is never
+		// rendered, and a mesh that is not rendered only ticks its montages.  The pose is ticked like a rendered mesh's from the first frame on (otherwise the animation
+		// instance has had a different number of updates, i.e. another phase of its 160-frame loops, in every run).
+		if (FPlatformMisc::GetEnvironmentVariable(TEXT("DAL_HOST_ALWAYS_TICK_POSE")) == TEXT("1"))
+		{
+			MeshComponent->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
+		}
+
 		// B_Als_Character: the mannequin and the animation blueprint rebuilt from AB_Als.dab
 		MeshComponent->SetSkeletalMeshAsset(FindAsset<USkeletalMesh>(TEXT("/ALS/ALS/Character/SKM_Als.SKM_Als")));
 		static ConstructorHelpers::FClassFinder<UAnimInstance> AnimClassFinder(TEXT("/ALS/ALS/Character/AB_Als.AB_Als_C"));

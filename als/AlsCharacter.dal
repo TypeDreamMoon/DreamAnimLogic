@@ -53,7 +53,7 @@
 use "als_lib.dal";
 
 peer Anim: AlsAnimationInstance;                       // AlsCharacter.h:57 AnimationInstance: Jump() and SnapshotFinalRagdollPose() are called on it (queued)
-logic AlsCharacter : actor slot_events sync_events in after_movement;   // the ALS Tick runs after the movement component (als-dal-rewrite.md 1.9)
+logic AlsCharacter : actor slot_events sync_events flush_calls StartRagdolling, StopRagdolling in after_movement;   // the ALS Tick runs after the movement component (als-dal-rewrite.md 1.9)
 
 param Settings: AlsCharacterSettings;                  // AlsCharacter.h:31
 param MovementSettings: AlsMovementSettings;           // AlsCharacter.h:34

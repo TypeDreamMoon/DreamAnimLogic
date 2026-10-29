@@ -867,7 +867,9 @@ class CppGen:
         self.consume_only = module.consume_slots() if (self.phased or module.sync_events) else None   # the slots that sample the consume-on-read inputs (None: all)
         self.slots = [u.phase for u in module.updates] or [module.default_phase]
         self.queue_target = module.kind == "anim" and any(x.pub and not x.is_view for x in module.methods)
-        self.has_cmds = bool(self.cmds) or module.flush_peers
+        self.has_cmds = bool(self.cmds) or module.flush_peers or (module.kind == "actor" and bool(module.flush_calls))
+        self.flush_calls = module.kind == "actor" and bool(module.flush_calls)       # `flush_calls`: the blocks count as running, the listed pub methods hand their commands over when a call from outside ends
+        self.scope_line = "FDalCallScope DalCallScope(this, false);" if self.flush_calls else None
         # an animation logic that asks where it runs (host.is_game_thread) wants what it queued to happen at once when the graph updates on the game thread
         self.game_thread_flush = bool(self.post_flush and self.cmds and "is_game_thread" in self.queries)
         self.flush_peer_names: list[str] = []                            # `flush_peers`: the peers whose pub methods this logic calls at once
@@ -1327,6 +1329,8 @@ class CppGen:
                        f"{T}{T}Target->DalRunPhase(Phase, DilatedTime);", f"{T}}});", "}"])
         blocks.append([f"FString {tick}::DiagnosticMessage()", "{", f'{T}return FString(TEXT("{cls}::DalRunPhase"));', "}"])
         rp = [f"void {cls}::DalRunPhase(const int32 Phase, const float DeltaTime)", "{"]
+        if self.scope_line:
+            rp += [f"{T}{self.scope_line}", ""]
         if self.bind_anim or self.bind_input:
             rp.append(f"{T}DalBindHost();")
         if any(q.startswith("target_") for q in self.queries):
@@ -1402,7 +1406,12 @@ class CppGen:
                 if x.is_view and not self.actor:
                     spec += ", Meta = (BlueprintThreadSafe)"
             doc = ("view " if x.is_view else "method ") + x.name
-            out.append(Method(ret, name, params, self.stmts(x.body, 0), dparams or None, x.pub, "public" if x.pub else "private", doc, x.is_view, spec))
+            body = self.stmts(x.body, 0)
+            if self.flush_calls and x.name in self.m.flush_calls:
+                # a call from outside (game code, Blueprint) ends by running the commands it queued, as the call of the original does; a call from a block of the logic does not
+                body = ["FDalCallScope DalCallScope(this, true);", ""] + body
+                doc += " (flush_calls: its commands run when a call from outside ends)"
+            out.append(Method(ret, name, params, body, dparams or None, x.pub, "public" if x.pub else "private", doc, x.is_view, spec))
         return out
 
     def input_pairs(self) -> list[tuple[str, str]]:
@@ -1525,7 +1534,9 @@ class CppGen:
         if self.actor:
             sample = [("\tDalSampleInputs(MAX_int32);                // (a slot that consumes nothing: the update blocks keep what they read once)" if self.consume_only is not None
                        else "\tDalSampleInputs();")]
-        return ["DalNowEvents.Add(DalEvent);",
+        scope = [self.scope_line, ""] if self.scope_line else []
+        return [*scope,
+                "DalNowEvents.Add(DalEvent);",
                 "if (bDalInEvent)",
                 "{",
                 "\treturn;                                   // raised by the commands of the event being handled: handled right after it",
@@ -2561,6 +2572,24 @@ class CppGen:
                     L.append(f"{T}bool bDalInEvent = false;")
             if self.has_cmds:
                 L.append(f"{T}TArray<DalHost::FCommand> DalCommandQueue;       // queued by the update, run on the game thread")
+            if self.flush_calls:
+                L.append(f"{T}int32 DalCallDepth = 0;                           // flush_calls: the blocks of the logic and the calls in progress")
+                L.append(f"{T}struct FDalCallScope                              // a block (bFlush false) or a call of a flush_calls method (true); the outermost call hands the commands over when it ends")
+                L.append(f"{T}{{")
+                L.append(f"{T}{T}{self.cls}* Owner;")
+                L.append(f"{T}{T}bool bFlush;")
+                L.append(f"{T}{T}FDalCallScope({self.cls}* InOwner, const bool bInFlush) : Owner(InOwner), bFlush(bInFlush)")
+                L.append(f"{T}{T}{{")
+                L.append(f"{T}{T}{T}++Owner->DalCallDepth;")
+                L.append(f"{T}{T}}}")
+                L.append(f"{T}{T}~FDalCallScope()")
+                L.append(f"{T}{T}{{")
+                L.append(f"{T}{T}{T}if (--Owner->DalCallDepth == 0 && bFlush)")
+                L.append(f"{T}{T}{T}{{")
+                L.append(f"{T}{T}{T}{T}Owner->DalFlushCommands();")
+                L.append(f"{T}{T}{T}}}")
+                L.append(f"{T}{T}}}")
+                L.append(f"{T}}};")
             if self.actor and self.bind_anim:
                 L.append(f"{T}TWeakObjectPtr<UAnimInstance> DalBoundAnim;")
             if self.actor and self.bind_input:
@@ -2850,7 +2879,10 @@ class CppGen:
                 blocks.append([f"{cls}::{cls}()", "{",
                                f"{T}PrimaryComponentTick.bCanEverTick = true;",
                                f"{T}PrimaryComponentTick.TickGroup = TG_PrePhysics;", "}"])
-            begin = [f"void {cls}::BeginPlay()", "{", f"{T}Super::BeginPlay();", "", f"{T}DalResetState();"]
+            begin = [f"void {cls}::BeginPlay()", "{", f"{T}Super::BeginPlay();", ""]
+            if self.scope_line:
+                begin += [f"{T}{self.scope_line}", ""]
+            begin.append(f"{T}DalResetState();")
             if self.sink:
                 begin.append(f"{T}DalHost::FEventRouter::Register(this);")
             if m.peers:
@@ -2868,6 +2900,8 @@ class CppGen:
             blocks.append(begin)
             if self.bind_anim or self.end_handlers or self.sink:
                 end_lines = [f"void {cls}::EndPlay(const EEndPlayReason::Type EndPlayReason)", "{"]
+                if self.scope_line:
+                    end_lines += [f"{T}{self.scope_line}", ""]
                 if self.end_handlers:
                     end_lines.append(f"{T}DalSampleInputs();")
                     end_lines.extend(f"{T}DalHandler_{k}();" for k in self.end_handlers)
@@ -2888,6 +2922,8 @@ class CppGen:
             if not self.phased:
                 tick = [f"void {cls}::TickComponent(const float DeltaTime, const ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)", "{",
                         f"{T}Super::TickComponent(DeltaTime, TickType, ThisTickFunction);", ""]
+                if self.scope_line:
+                    tick += [f"{T}{self.scope_line}", ""]
                 if any(q.startswith("target_") for q in self.queries):
                     tick.append(f"{T}bDalTargetsFresh = false;")
                 if self.bind_anim or self.bind_input:
@@ -3062,6 +3098,8 @@ class CppGen:
                                f"{T}if (Parent.IsValid())", f"{T}{{", f"{T}{T}Parent->{e.name}({args});", f"{T}}}", "}"])
         for e in m.entries:
             lines = [f"void {cls}::{e.name}({cpp_params([(p.name, p.ty) for p in e.params], True, True)})", "{"]
+            if self.actor and self.scope_line:
+                lines.append(f"{T}{self.scope_line}")
             if e.dt_name:
                 lines.append(f"{T}[[maybe_unused]] const float {e.dt_name} = Dal_DeltaSeconds;")
             lines.extend(self.stmts(e.body, 1))

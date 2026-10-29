@@ -676,6 +676,12 @@ class Checker:
         m.slot_events = logic.slot_events
         m.sync_events = logic.sync_events
         m.flush_peers = logic.flush_peers
+        for name, pos in logic.flush_calls:
+            method = next((x for x in m.methods if x.name == name), None)
+            if method is None or not method.pub or method.is_view:
+                self.err("DAL3080", f"flush_calls names '{name}', which is not a pub method of this logic (a view returns a value and queues nothing)", pos)
+            elif name not in m.flush_calls:
+                m.flush_calls.append(name)
         if logic.flush_peers and not any(i.kind == "actor" for i in self.peer_ifaces.values()):
             self.warn("DAL5096", "flush_peers hands over the commands that the actor peers queue in the calls of a block, and this logic has no actor peer", logic.flush_peers_pos or logic.pos)
         mine = [u.phase for u in m.updates] or [m.default_phase]

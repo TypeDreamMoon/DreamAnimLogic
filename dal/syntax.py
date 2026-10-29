@@ -226,6 +226,7 @@ class LogicDecl(Decl):
     flush_peers_pos: Pos | None = None
     sync_events: bool = False        # `logic X : sync_events;` -- the hooks and notifies the host raises are handled when it raises them, not at the start of a slot / update
     sync_events_pos: Pos | None = None
+    flush_calls: list = field(default_factory=list)  # `logic X : actor flush_calls A, B;` -- (pub method name, position): the commands of a call from outside run at the end of the call
 
 
 @dataclass

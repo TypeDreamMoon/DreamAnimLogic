@@ -310,10 +310,21 @@ class Parser:
         slot_events, slot_events_pos = False, None
         sync_events, sync_events_pos = False, None
         flush_peers, flush_peers_pos = False, None
+        flush_calls: list = []
         order: list = []
         while (self.is_word("linked") or self.is_word("post_flush") or self.is_word("slot_events") or self.is_word("sync_events") or self.is_word("flush_peers")
-               or self.is_word("before") or self.is_word("after")):       # the options of the logic, in any order
+               or self.is_word("flush_calls") or self.is_word("before") or self.is_word("after")):       # the options of the logic, in any order
             lk = self.advance()
+            if lk.text == "flush_calls":
+                if kind != "actor":
+                    raise self.error("DAL2026", "only an actor logic runs the commands of a call at once: logic Name : actor flush_calls StartRagdolling, StopRagdolling;", lk.pos)
+                while True:
+                    method = self.ident("the name of a pub method")
+                    flush_calls.append((method.text, method.pos))
+                    if not self.tok.is_op(","):
+                        break
+                    self.advance()
+                continue
             if lk.text == "flush_peers":
                 if kind != "actor":
                     raise self.error("DAL2026", "only an actor logic calls its peers at once: logic Name : actor flush_peers in pre_movement;", lk.pos)
@@ -352,7 +363,7 @@ class Parser:
         self.expect_op(";", "after the logic name")
         return S.LogicDecl(kw.pos, name.text, kind, kind_pos, phase, phase_pos, linked, linked_pos, post_flush, post_flush_pos,
                            slot_events, slot_events_pos, order, name_pos=name.pos, flush_peers=flush_peers, flush_peers_pos=flush_peers_pos,
-                           sync_events=sync_events, sync_events_pos=sync_events_pos)
+                           sync_events=sync_events, sync_events_pos=sync_events_pos, flush_calls=flush_calls)
 
     def parse_phase(self) -> tuple[str | None, Pos | None]:
         """Optional `in pre_movement | after_movement | after_anim | physics_walking | prepare_root_motion`."""

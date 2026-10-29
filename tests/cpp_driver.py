@@ -363,10 +363,11 @@ def entry_call(module: ir.Module, target: str, item) -> str:
     from dal.cppbackend import cpp_value
 
     name, args = (item, {}) if isinstance(item, str) else (item[0], dict(item[1]) if len(item) > 1 else {})
-    entries = [*module.entries, *(module.linked.entries if module.linked is not None else [])]
+    entries = [*module.entries, *(module.linked.entries if module.linked is not None else []), *(x for x in module.methods if x.pub and not x.is_view)]       # (a pub method is called the same way)
     e = next(x for x in entries if x.name == name)
-    last = max((i for i, p in enumerate(e.params) if p.name in args), default=-1)
-    parts = [_arg_lit(p.ty, args[p.name]) if p.name in args else cpp_value(p.ty, p.default) for p in e.params[:last + 1]]
+    params = [(p[0], p[1], None) if isinstance(p, tuple) else (p.name, p.ty, p.default) for p in e.params]           # (a method's parameters are (name, type) pairs)
+    last = max((i for i, p in enumerate(params) if p[0] in args), default=-1)
+    parts = [_arg_lit(p[1], args[p[0]]) if p[0] in args else cpp_value(p[1], p[2]) for p in params[:last + 1]]
     return f"{target}.{name}({', '.join(parts)});"
 
 

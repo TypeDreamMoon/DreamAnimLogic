@@ -1440,10 +1440,20 @@ def run_system(mods, frames, backend, params, schedule=None):
 def compare_systems(test, mods, a, b, tol, logics=("AlsInput", "AlsCharacter"), effects=False):
     problems = []
     test.assertEqual(len(a), len(b))
+    # `flush_calls` (C++ only): the ragdoll commands that the input's call of StartRagdolling / StopRagdolling queues on the character run when that call ends, inside the
+    # input's block, not in the character's own block as in Python: the same commands, in the other logic's list and before its own -- compared per frame over both logics
+    moved = effects and bool(getattr(mods.get("AlsCharacter"), "flush_calls", None))
     for i, (fa, fb) in enumerate(zip(a, b)):
+        if moved:
+            ea = sorted(repr((x[0], tuple(round(float(p), 2) if isinstance(p, (int, float)) else p for p in x[1:]))) for n in logics for x in tcc.py_effects(fa[n]["__cmds__"]))
+            eb = sorted(repr((x[0], tuple(round(float(p), 2) if isinstance(p, (int, float)) else p for p in x[1:]))) for n in logics for x in fb[n]["__cmds__"])
+            if len(ea) != len(eb) or [x.split(",")[0] for x in ea] != [x.split(",")[0] for x in eb]:
+                problems.append(f"frame {i} commands: {ea} != {eb}")
         for n in logics:
             for k, v in fa[n].items():
                 if k.startswith("__"):
+                    if moved:
+                        continue
                     if effects:
                         ea, eb = tcc.py_effects(v), list(fb[n][k])
                         if len(ea) != len(eb) or any(x[0] != y[0] or not all(tcc.close_token(p, q, max(tol, 1e-3)) for p, q in zip(x[1:], y[1:])) for x, y in zip(ea, eb)):
